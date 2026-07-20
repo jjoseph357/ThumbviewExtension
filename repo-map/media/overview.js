@@ -1,0 +1,616 @@
+const vscode = acquireVsCodeApi();
+
+const canvas = document.getElementById("map");
+const ctx = canvas.getContext("2d");
+const tooltip = document.getElementById("hover-tooltip");
+
+let data = null;
+let statusText = "Loading Repository Map...";
+let activeFileUri = null;
+let searchQuery = "";
+let focusedFolder = ""; // empty means root
+
+let openFiles = []; // Array of open file URIs (orange borders)
+let cursorLocations = {}; // Map of file URIs to current cursor line numbers
+
+// Setup search inputs
+const searchInput = document.getElementById("search-input");
+const clearSearch = document.getElementById("clear-search");
+
+searchInput.addEventListener("input", e => {
+    searchQuery = e.target.value.toLowerCase().trim();
+    clearSearch.style.display = searchQuery ? "block" : "none";
+    render();
+});
+
+clearSearch.addEventListener("click", () => {
+    searchInput.value = "";
+    searchQuery = "";
+    clearSearch.style.display = "none";
+    render();
+});
+
+// Capture global keystrokes and type directly into search box
+window.addEventListener("keydown", event => {
+    if (document.activeElement === searchInput) {
+        return;
+    }
+    if (event.ctrlKey || event.altKey || event.metaKey) {
+        return;
+    }
+
+    if (event.key.length === 1) {
+        event.preventDefault();
+        searchInput.focus();
+        searchInput.value += event.key;
+        searchQuery = searchInput.value.toLowerCase().trim();
+        clearSearch.style.display = searchQuery ? "block" : "none";
+        render();
+    } else if (event.key === "Backspace") {
+        event.preventDefault();
+        searchInput.focus();
+        searchInput.value = searchInput.value.slice(0, -1);
+        searchQuery = searchInput.value.toLowerCase().trim();
+        clearSearch.style.display = searchQuery ? "block" : "none";
+        render();
+    }
+});
+
+function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(window.innerWidth * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    render();
+}
+
+window.addEventListener("resize", resize);
+
+window.addEventListener("message", event => {
+    const msg = event.data;
+
+    if (msg.command === "status") {
+        statusText = msg.text;
+        render();
+    }
+
+    if (msg.command === "data") {
+        data = msg;
+        statusText = "";
+        render();
+    }
+
+    if (msg.command === "activeFile") {
+        activeFileUri = msg.uri;
+        render();
+    }
+
+    if (msg.command === "openState") {
+        openFiles = msg.openFiles || [];
+        cursorLocations = msg.cursorLocations || {};
+        render();
+    }
+});
+
+function buildStableGrid(nCells, targetAspect = 1.777) {
+    let rows = 1;
+    let cols = Math.max(2, Math.ceil(rows * targetAspect));
+
+    const slots = [];
+
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            slots.push([c, r]);
+        }
+    }
+
+    while (slots.length < nCells) {
+        const newRows = rows + 1;
+        const newCols = Math.max(
+            cols,
+            Math.ceil(newRows * targetAspect)
+        );
+
+        for (let r = 0; r < rows; r++) {
+            for (let c = cols; c < newCols; c++) {
+                slots.push([c, r]);
+            }
+        }
+
+        for (let r = rows; r < newRows; r++) {
+            for (let c = 0; c < newCols; c++) {
+                slots.push([c, r]);
+            }
+        }
+
+        rows = newRows;
+        cols = newCols;
+    }
+
+    return {
+        rows,
+        cols,
+        slots
+    };
+}
+
+function updateBreadcrumbs() {
+    const container = document.getElementById("breadcrumbs");
+    if (!focusedFolder) {
+        container.style.display = "none";
+        return;
+    }
+    container.style.display = "flex";
+    container.innerHTML = "";
+
+    const rootSpan = document.createElement("span");
+    rootSpan.className = "breadcrumb-item";
+    rootSpan.innerText = "root";
+    rootSpan.onclick = () => {
+        focusedFolder = "";
+        updateBreadcrumbs();
+        render();
+    };
+    container.appendChild(rootSpan);
+
+    const segments = focusedFolder.split("/").filter(Boolean);
+    let currentPath = "";
+    for (let i = 0; i < segments.length; i++) {
+        const sep = document.createElement("span");
+        sep.className = "breadcrumb-separator";
+        sep.innerText = "/";
+        container.appendChild(sep);
+
+        currentPath += segments[i] + "/";
+        const pathRef = currentPath;
+
+        const segmentSpan = document.createElement("span");
+        segmentSpan.className = "breadcrumb-item";
+        segmentSpan.innerText = segments[i];
+        segmentSpan.onclick = () => {
+            focusedFolder = pathRef;
+            updateBreadcrumbs();
+            render();
+        };
+        container.appendChild(segmentSpan);
+    }
+}
+
+function getFilteredFiles() {
+    if (!data) return [];
+    if (!focusedFolder) return data.files;
+    return data.files.filter(f => f.path.startsWith(focusedFolder));
+}
+
+function drawStatus() {
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.fillStyle = "#18181c";
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+    ctx.fillStyle = "#e1e1e6";
+    ctx.font = "16px system-ui";
+    ctx.fillText(statusText, 24, 48);
+
+    ctx.fillStyle = "#707075";
+    ctx.font = "12px system-ui";
+    ctx.fillText("Waiting for repository data...", 24, 74);
+}
+
+function tokenizeLine(text) {
+    if (!text) return [];
+
+    const regex = /(\/\/.*|#.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|import|export|from|using|require|if|else|elif|for|while|return|switch|case|break|continue|try|catch|finally|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace)\b|\b\d+\b|[+\-*\/%=<>!&|^~:]+|\w+|\s+|.)/g;
+
+    let match;
+    const tokens = [];
+    while ((match = regex.exec(text)) !== null) {
+        const val = match[0];
+        let category = "normal";
+
+        if (val.startsWith("//") || val.startsWith("#") || val.startsWith("/*")) {
+            category = "comment";
+        } else if (val.startsWith('"') || val.startsWith("'") || val.startsWith("`")) {
+            category = "string";
+        } else if (/^\d+$/.test(val)) {
+            category = "number";
+        } else if (/^(if|else|elif|for|while|return|switch|case|break|continue|try|catch|finally)$/.test(val)) {
+            category = "control-flow";
+        } else if (/^(class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|import|export|from|using|require|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace)$/.test(val)) {
+            category = "keyword";
+        } else if (/^[+\-*\/%=<>!&|^~:]+$/.test(val)) {
+            category = "operator";
+        }
+
+        tokens.push({ text: val, category });
+    }
+    return tokens;
+}
+
+function colorForCategory(category) {
+    switch (category) {
+        case "comment": return "#6a9955";
+        case "string": return "#ce9178";
+        case "number": return "#b5cea8";
+        case "control-flow": return "#c586c0";
+        case "keyword": return "#569cd6";
+        case "operator": return "#cccccc";
+        default: return "#9cdcfe";
+    }
+}
+
+function drawMinimap(file, x, y, w, h) {
+    const lines = file.lines || [];
+    const lineCount = Math.max(file.lineCount || lines.length, 1);
+    const stepY = h / lineCount;
+    const maxLineChars = 120;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line || !line.text) {
+            continue;
+        }
+
+        const indent = line.indent;
+        const startX = x + Math.min(indent / maxLineChars, 0.4) * w;
+
+        const trimmedText = line.text.trimStart();
+        const lineTextLength = trimmedText.length;
+        if (lineTextLength === 0) {
+            continue;
+        }
+
+        const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * 0.7;
+
+        const isMatchedLine = searchQuery && line.text.toLowerCase().includes(searchQuery);
+
+        if (isMatchedLine) {
+            ctx.fillStyle = "#ec4899"; // Highlight pink for search match
+            ctx.fillRect(
+                x,
+                y + i * stepY,
+                w,
+                Math.max(stepY, 2.0)
+            );
+        } else {
+            const tokens = tokenizeLine(trimmedText);
+            const totalTextChars = Math.max(lineTextLength, 1);
+
+            let currentX = startX;
+            for (const tok of tokens) {
+                const tokLen = tok.text.length;
+                const tokW = (tokLen / totalTextChars) * lineW;
+
+                ctx.fillStyle = colorForCategory(tok.category);
+                ctx.fillRect(
+                    currentX,
+                    y + i * stepY,
+                    Math.min(tokW, x + w - currentX),
+                    Math.max(stepY, 0.7)
+                );
+                currentX += tokW;
+            }
+        }
+    }
+
+    // Highlight cursor location in transparent gray if the file tab is open (highlighted orange)
+    const isFileOpen = openFiles.includes(file.uri);
+    if (isFileOpen && (file.uri in cursorLocations)) {
+        const cursorLine = cursorLocations[file.uri];
+        const startL = Math.max(0, cursorLine - 15);
+        const endL = Math.min(lineCount - 1, cursorLine + 15);
+
+        ctx.fillStyle = "rgba(255, 255, 255, 0.22)"; // Transparent gray overlay
+        ctx.fillRect(
+            x,
+            y + startL * stepY,
+            w,
+            Math.max((endL - startL + 1) * stepY, 4.0)
+        );
+    }
+}
+
+function render() {
+    if (!ctx) {
+        return;
+    }
+
+    if (!data) {
+        drawStatus();
+        return;
+    }
+
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.fillStyle = "#18181c";
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+    const filteredFiles = getFilteredFiles();
+    if (filteredFiles.length === 0) {
+        ctx.fillStyle = "#707075";
+        ctx.font = "14px system-ui";
+        ctx.fillText("No files match the active folder or search query.", 24, 80);
+        return;
+    }
+
+    let gridCols, gridRows, slots;
+    if (!focusedFolder) {
+        gridCols = data.layout.cols;
+        gridRows = data.layout.rows;
+        slots = filteredFiles.map(f => f.slot);
+    } else {
+        const subLayout = buildStableGrid(filteredFiles.length);
+        gridCols = subLayout.cols;
+        gridRows = subLayout.rows;
+        slots = subLayout.slots;
+    }
+
+    const topMargin = 64;
+    const bottomMargin = 40;
+    const sideMargin = 16;
+
+    const availableW = window.innerWidth - (sideMargin * 2);
+    const availableH = window.innerHeight - topMargin - bottomMargin;
+
+    const cellW = availableW / gridCols;
+    const cellH = availableH / gridRows;
+
+    const queryActive = !!searchQuery;
+
+    for (let i = 0; i < filteredFiles.length; i++) {
+        const file = filteredFiles[i];
+        const slot = slots[i];
+        if (!slot) continue;
+
+        const col = slot[0];
+        const row = slot[1];
+
+        const x = sideMargin + col * cellW;
+        const y = topMargin + row * cellH;
+
+        file._cell = {
+            x,
+            y,
+            w: cellW,
+            h: cellH
+        };
+
+        const isContentMatch = queryActive && file.lines.some(l => l.text.toLowerCase().includes(searchQuery));
+        const isPathMatch = queryActive && file.path.toLowerCase().includes(searchQuery);
+        const isSearchMatch = isContentMatch || isPathMatch;
+
+        const isActive = file.uri === activeFileUri;
+        const isOpen = openFiles.includes(file.uri);
+
+        ctx.save();
+
+        if (queryActive && !isSearchMatch) {
+            ctx.globalAlpha = 0.15;
+        }
+
+        // Draw card background
+        ctx.fillStyle = "#1e1e24";
+        ctx.fillRect(x + 4, y + 4, cellW - 8, cellH - 8);
+
+        // Border rendering prioritisation
+        if (queryActive && isSearchMatch) {
+            ctx.strokeStyle = "#ec4899"; // Pink search match border
+            ctx.lineWidth = 2.5;
+        } else if (isActive) {
+            ctx.strokeStyle = "#a855f7"; // Purple active border
+            ctx.lineWidth = 2.5;
+        } else if (isOpen) {
+            ctx.strokeStyle = "#f97316"; // Orange open tab border
+            ctx.lineWidth = 1.8;
+        } else {
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+            ctx.lineWidth = 1;
+        }
+        ctx.strokeRect(x + 4, y + 4, cellW - 8, cellH - 8);
+
+        ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
+        ctx.font = "10px system-ui, sans-serif";
+
+        const label = file.path.length > 38
+            ? "..." + file.path.slice(-35)
+            : file.path;
+
+        ctx.fillText(label, x + 10, y + 18);
+
+        drawMinimap(
+            file,
+            x + 10,
+            y + 24,
+            Math.max(1, cellW - 20),
+            Math.max(1, cellH - 34)
+        );
+
+        ctx.restore();
+    }
+}
+
+canvas.addEventListener("click", event => {
+    if (!data) {
+        return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (
+            px >= c.x &&
+            px <= c.x + c.w &&
+            py >= c.y &&
+            py <= c.y + c.h
+        ) {
+            const minimapTop = c.y + 24;
+            const minimapHeight = Math.max(1, c.h - 34);
+
+            const relativeY = Math.max(
+                0,
+                Math.min(1, (py - minimapTop) / minimapHeight)
+            );
+
+            const line = Math.floor(relativeY * file.lineCount);
+
+            vscode.postMessage({
+                command: "jump",
+                uri: file.uri,
+                line,
+                query: searchQuery
+            });
+
+            return;
+        }
+    }
+});
+
+canvas.addEventListener("dblclick", event => {
+    if (!data) {
+        return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (
+            px >= c.x &&
+            px <= c.x + c.w &&
+            py >= c.y &&
+            py <= c.y + c.h
+        ) {
+            const lastSlash = file.path.lastIndexOf('/');
+            if (lastSlash !== -1) {
+                const folder = file.path.substring(0, lastSlash + 1);
+                focusedFolder = folder;
+                updateBreadcrumbs();
+                render();
+            }
+            return;
+        }
+    }
+});
+
+canvas.addEventListener("mousemove", event => {
+    if (!data) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    const filteredFiles = getFilteredFiles();
+    let hoveredFile = null;
+    let hoveredLineIdx = -1;
+
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (
+            px >= c.x &&
+            px <= c.x + c.w &&
+            py >= c.y &&
+            py <= c.y + c.h
+        ) {
+            hoveredFile = file;
+            const minimapTop = c.y + 24;
+            const minimapHeight = Math.max(1, c.h - 34);
+
+            const relativeY = Math.max(
+                0,
+                Math.min(1, (py - minimapTop) / minimapHeight)
+            );
+
+            hoveredLineIdx = Math.floor(relativeY * file.lineCount);
+            break;
+        }
+    }
+
+    if (hoveredFile && hoveredLineIdx >= 0 && hoveredLineIdx < hoveredFile.lineCount) {
+        const start = Math.max(0, hoveredLineIdx - 7);
+        const end = Math.min(hoveredFile.lineCount - 1, hoveredLineIdx + 7);
+
+        let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})</div>`;
+        for (let i = start; i <= end; i++) {
+            const line = hoveredFile.lines[i];
+            const isHoveredLine = i === hoveredLineIdx;
+            const lineText = line ? line.text : "";
+            const tokens = tokenizeLine(lineText);
+
+            let lineHtml = "";
+            for (const tok of tokens) {
+                let escapedText = tok.text
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;");
+
+                if (searchQuery && tok.text.toLowerCase().includes(searchQuery)) {
+                    const escapedQuery = searchQuery.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+                    const regex = new RegExp(`(${escapedQuery})`, 'gi');
+                    escapedText = escapedText.replace(regex, `<span style="background: rgba(236, 72, 153, 0.35); color: #f472b6; font-weight: 600; border-radius: 2px; padding: 0 2px;">$1</span>`);
+                }
+
+                const color = colorForCategory(tok.category);
+                lineHtml += `<span style="color: ${color}">${escapedText}</span>`;
+            }
+
+            const isMatchLine = searchQuery && lineText.toLowerCase().includes(searchQuery);
+            let bgStyle = "";
+            let prefix = "  ";
+
+            if (isHoveredLine) {
+                prefix = `<span style="color: #a855f7; font-weight: bold;">&gt; </span>`;
+                if (isMatchLine) {
+                    bgStyle = "background: rgba(236, 72, 153, 0.28); display: inline-block; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px;";
+                } else {
+                    bgStyle = "background: rgba(168, 85, 247, 0.18); display: inline-block; width: 100%; border-left: 3px solid #a855f7; padding-left: 2px;";
+                }
+            } else if (isMatchLine) {
+                bgStyle = "background: rgba(236, 72, 153, 0.2); display: inline-block; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px;";
+            }
+
+            tooltipHtml += `<div style="${bgStyle}">${prefix}${lineHtml || " "}</div>`;
+        }
+
+        tooltip.innerHTML = tooltipHtml;
+        tooltip.style.display = "block";
+
+        let tx;
+        if (event.clientX > window.innerWidth / 2) {
+            tx = event.clientX - tooltip.offsetWidth - 20;
+        } else {
+            tx = event.clientX + 20;
+        }
+
+        let ty = event.clientY + 16;
+
+        if (ty + tooltip.offsetHeight > window.innerHeight) {
+            ty = window.innerHeight - tooltip.offsetHeight - 16;
+        }
+
+        tooltip.style.left = `${tx}px`;
+        tooltip.style.top = `${ty}px`;
+    } else {
+        tooltip.style.display = "none";
+    }
+});
+
+canvas.addEventListener("mouseleave", () => {
+    tooltip.style.display = "none";
+});
+
+resize();
+
+vscode.postMessage({
+    command: "ready"
+});
