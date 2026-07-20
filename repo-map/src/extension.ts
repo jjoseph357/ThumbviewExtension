@@ -7,7 +7,7 @@ export async function activate(context: vscode.ExtensionContext) {
     console.log("REPOMAP EXTENSION ACTIVATED");
 
     const fileOrder = new PersistentFileOrder();
-    const savedOrder = context.globalState.get<string[]>("repomap.seenFiles");
+    const savedOrder = context.workspaceState.get<string[]>("repomap.seenFiles");
     if (savedOrder) {
         fileOrder.update(savedOrder);
     }
@@ -79,7 +79,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const files = await scanRepository();
 
             fileOrder.update(files.map(f => f.id));
-            await context.globalState.update("repomap.seenFiles", fileOrder.getOrder());
+            await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
 
             const order = fileOrder.getOrder();
             const layout = buildStableGrid(order.length);
@@ -122,9 +122,9 @@ export async function activate(context: vscode.ExtensionContext) {
     };
 
     const disposable = vscode.commands.registerCommand(
-        "repomap.open",
+        "thumbview.open",
         async () => {
-            console.log("REPOMAP COMMAND EXECUTED");
+            console.log("THUMBVIEW COMMAND EXECUTED");
 
             if (activePanel) {
                 activePanel.reveal(vscode.ViewColumn.Active);
@@ -132,11 +132,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            vscode.window.showInformationMessage("Repository Map opening...");
+            vscode.window.showInformationMessage("Thumbview opening...");
 
             const panel = vscode.window.createWebviewPanel(
-                "repomap",
-                "Repository Map",
+                "thumbview",
+                "Thumbview",
                 vscode.ViewColumn.Active,
                 {
                     enableScripts: true,
@@ -247,6 +247,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(disposable);
 
+    const reflowDisposable = vscode.commands.registerCommand("thumbview.reflow", async () => {
+        await context.workspaceState.update("repomap.seenFiles", undefined);
+        if (activePanel) {
+            refreshRepositoryMap(activePanel);
+        }
+        vscode.window.showInformationMessage("Thumbview layout reflowed.");
+    });
+    context.subscriptions.push(reflowDisposable);
+
     // Watch active editor changes
     const editorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
         if (activePanel) {
@@ -296,7 +305,7 @@ export async function activate(context: vscode.ExtensionContext) {
             try {
                 const files = await scanRepository();
                 fileOrder.update(files.map(f => f.id));
-                await context.globalState.update("repomap.seenFiles", fileOrder.getOrder());
+                await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
 
                 const order = fileOrder.getOrder();
                 const layout = buildStableGrid(order.length);
@@ -491,9 +500,8 @@ function getHtml(
             z-index: 1000;
             max-width: 550px;
             line-height: 1.4;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            overflow-x: hidden;
+            white-space: pre;
+            overflow: hidden;
         }
 
         .tooltip-filename {

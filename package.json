@@ -1,0 +1,28 @@
+{
+    "name": "repo-map",
+    "displayName": "Repository Map",
+    "version": "0.0.1",
+    "engines": {
+        "vscode": "^1.92.0"
+    },
+    "main": "./out/extension.js",
+    "activationEvents": [
+        "onCommand:repomap.open"
+    ],
+    "contributes": {
+        "commands": [
+            {
+                "command": "repomap.open",
+                "title": "Repository Map: Open"
+            }
+        ]
+    },
+    "scripts": {
+        "compile": "tsc -p ."
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.0",
+        "@types/vscode": "^1.92.0",
+        "typescript": "^5.5.0"
+    }
+}

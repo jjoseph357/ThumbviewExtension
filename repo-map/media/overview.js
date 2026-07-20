@@ -196,37 +196,142 @@ function drawStatus() {
     ctx.fillText("Waiting for repository data...", 24, 74);
 }
 
-function tokenizeLine(text) {
-    if (!text) return [];
+function detectLang(path) {
+    if (!path) return 'js';
+    const ext = path.split('.').pop().toLowerCase();
+    if (ext === 'css' || ext === 'scss' || ext === 'less') return 'css';
+    if (ext === 'html' || ext === 'htm' || ext === 'xml' || ext === 'svg' || ext === 'vue') return 'html';
+    if (ext === 'json') return 'json';
+    if (ext === 'py') return 'python';
+    return 'js';
+}
 
-    const regex = /(\/\/.*|#.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|import|export|from|using|require|if|else|elif|for|while|return|switch|case|break|continue|try|catch|finally|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace)\b|\b\d+\b|[+\-*\/%=<>!&|^~:]+|\w+|\s+|.)/g;
+function tokenizeLine(text, lang) {
+    if (!text) return [];
+    if (lang === 'css') return tokenizeCSS(text);
+    if (lang === 'html') return tokenizeHTML(text);
+    return tokenizeJS(text, lang);
+}
+
+function tokenizeCSS(text) {
+    const tokens = [];
+    const regex = /(\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|@[\w-]+|!important|#[\da-fA-F]{3,8}\b|\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|vmin|vmax|s|ms|deg|fr|ch|ex|pt)?|:[\w-]+|\.[\w-]+|[\w-]+|[{}();:,>+~\[\]*=]|\s+|.)/g;
+    let match;
+    let afterColon = false;
+    const trimmed = text.trim();
+    const isDecl = /[\w-]+\s*:/.test(trimmed);
+
+    while ((match = regex.exec(text)) !== null) {
+        const val = match[0];
+        let cat = "normal";
+        if (val.startsWith('/*')) { cat = "comment"; }
+        else if (val.startsWith('"') || val.startsWith("'")) { cat = "string"; }
+        else if (val.startsWith('@')) { cat = "control-flow"; }
+        else if (val === '!important') { cat = "keyword"; }
+        else if (val === ':') { cat = "normal"; afterColon = true; }
+        else if (val === ';' || val === '{' || val === '}') { cat = "normal"; afterColon = false; }
+        else if (/^#[\da-fA-F]{3,8}$/.test(val)) { cat = "number"; }
+        else if (/^\d/.test(val)) { cat = "number"; }
+        else if (val.startsWith(':')) { cat = "selector"; }
+        else if (val.startsWith('.') && !afterColon) { cat = "selector"; }
+        else if (/^[\w-]+$/.test(val)) {
+            if (isDecl && !afterColon) { cat = "css-property"; }
+            else if (afterColon) { cat = "css-value"; }
+            else { cat = "selector"; }
+        }
+        tokens.push({ text: val, category: cat, isKey: false });
+    }
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].category === 'css-value' || tokens[i].category === 'selector') {
+            let n = i + 1;
+            while (n < tokens.length && /^\s+$/.test(tokens[n].text)) n++;
+            if (n < tokens.length && tokens[n].text === '(') tokens[i].category = 'function';
+        }
+    }
+    return tokens;
+}
+
+function tokenizeHTML(text) {
+    const tokens = [];
+    const regex = /(<!--[\s\S]*?-->|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|<\/?|\/?>|=|&\w+;|[\w:-]+|\s+|.)/g;
+    let match;
+    let inTag = false;
+    let seenTagName = false;
+    while ((match = regex.exec(text)) !== null) {
+        const val = match[0];
+        let cat = "normal";
+        if (val.startsWith('<!--')) { cat = "comment"; }
+        else if (val.startsWith('"') || val.startsWith("'")) { cat = "string"; }
+        else if (val === '<' || val === '</') { cat = "tag-bracket"; inTag = true; seenTagName = false; }
+        else if (val === '>' || val === '/>') { cat = "tag-bracket"; inTag = false; }
+        else if (inTag && /^[\w:-]+$/.test(val)) { cat = seenTagName ? "attribute" : "tag"; seenTagName = true; }
+        else if (val.startsWith('&') && val.endsWith(';')) { cat = "keyword"; }
+        tokens.push({ text: val, category: cat, isKey: false });
+    }
+    return tokens;
+}
+
+function tokenizeJS(text, lang) {
+    const isJson = lang === 'json';
+    const isPy = lang === 'python';
+    const regex = isPy
+        ? /(#.*|\/\*[\s\S]*?\*\/|"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:class|def|lambda|import|from|as|if|elif|else|for|while|return|try|except|finally|raise|with|yield|pass|break|continue|and|or|not|in|is|True|False|None|self|async|await|global|nonlocal)\b|\b\d+\b|[+\-*\/%=<>!&|^~:@]+|\w+|\s+|.)/g
+        : /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|this|self|import|export|from|using|require|if|else|elif|for|while|return|switch|case|break|continue|try|catch|finally|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace|new|null|undefined|true|false|typeof|instanceof)\b|\b\d+\b|[+\-*\/%=<>!&|^~:]+|\w+|\s+|.)/g;
 
     let match;
     const tokens = [];
     while ((match = regex.exec(text)) !== null) {
         const val = match[0];
-        let category = "normal";
+        let cat = "normal";
+        if (val.startsWith("//") || (isPy && val.startsWith("#")) || val.startsWith("/*")) { cat = "comment"; }
+        else if (val.startsWith('"') || val.startsWith("'") || val.startsWith("`")) { cat = "string"; }
+        else if (/^\d+$/.test(val)) { cat = "number"; }
+        else if (/^(if|else|elif|for|while|return|switch|case|break|continue|try|catch|except|finally|raise|with|yield|pass|and|or|not|in|is)$/.test(val)) { cat = "control-flow"; }
+        else if (/^(class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|this|self|import|export|from|using|require|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace|new|null|undefined|true|false|typeof|instanceof|lambda|global|nonlocal|as|True|False|None)$/.test(val)) { cat = "keyword"; }
+        else if (/^[+\-*\/%=<>!&|^~:@]+$/.test(val)) { cat = "operator"; }
+        else if (/^\w+$/.test(val)) { cat = /^[A-Z]/.test(val) ? "type" : "variable"; }
 
-        if (val.startsWith("//") || val.startsWith("#") || val.startsWith("/*")) {
-            category = "comment";
-        } else if (val.startsWith('"') || val.startsWith("'") || val.startsWith("`")) {
-            category = "string";
-        } else if (/^\d+$/.test(val)) {
-            category = "number";
-        } else if (/^(if|else|elif|for|while|return|switch|case|break|continue|try|catch|finally)$/.test(val)) {
-            category = "control-flow";
-        } else if (/^(class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|import|export|from|using|require|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace)$/.test(val)) {
-            category = "keyword";
-        } else if (/^[+\-*\/%=<>!&|^~:]+$/.test(val)) {
-            category = "operator";
+        if (cat === "comment") {
+            const parts = val.split(/(@\w+)/g);
+            for (const p of parts) {
+                if (p.startsWith("@")) tokens.push({ text: p, category: "keyword", isKey: false });
+                else if (p) tokens.push({ text: p, category: "comment", isKey: false });
+            }
+        } else {
+            tokens.push({ text: val, category: cat, isKey: false });
         }
+    }
 
-        tokens.push({ text: val, category });
+    for (let i = 0; i < tokens.length; i++) {
+        // Property access: word after .
+        if (tokens[i].text === "." && i + 1 < tokens.length &&
+            (tokens[i+1].category === "variable" || tokens[i+1].category === "type")) {
+            tokens[i+1].category = "property";
+        }
+        // Function calls: word before (
+        if (tokens[i].category === "variable" || tokens[i].category === "type" || tokens[i].category === "property") {
+            let n = i + 1;
+            while (n < tokens.length && /^\s+$/.test(tokens[n].text)) n++;
+            if (n < tokens.length && tokens[n].text === "(") tokens[i].category = "function";
+        }
+        // JSON string keys
+        if (isJson && tokens[i].category === "string") {
+            let n = i + 1;
+            while (n < tokens.length && /^\s+$/.test(tokens[n].text)) n++;
+            if (n < tokens.length && tokens[n].text === ":") tokens[i].isKey = true;
+        }
+        // JS object keys: variable before :
+        if (!isJson && tokens[i].category === "variable") {
+            let n = i + 1;
+            while (n < tokens.length && /^\s+$/.test(tokens[n].text)) n++;
+            if (n < tokens.length && tokens[n].text === ":") tokens[i].category = "property";
+        }
     }
     return tokens;
 }
 
-function colorForCategory(category) {
+function colorForCategory(category, isKey) {
+    if (isKey) return "#9cdcfe";
     switch (category) {
         case "comment": return "#6a9955";
         case "string": return "#ce9178";
@@ -234,11 +339,26 @@ function colorForCategory(category) {
         case "control-flow": return "#c586c0";
         case "keyword": return "#569cd6";
         case "operator": return "#cccccc";
-        default: return "#9cdcfe";
+        case "function": return "#dcdcaa";
+        case "type": return "#4ec9b0";
+        case "variable": return "#9cdcfe";
+        case "property": return "#9cdcfe";
+        case "selector": return "#d7ba7d";
+        case "css-property": return "#9cdcfe";
+        case "css-value": return "#ce9178";
+        case "tag": return "#569cd6";
+        case "tag-bracket": return "#808080";
+        case "attribute": return "#9cdcfe";
+        default: return "#d4d4d4";
     }
 }
 
 function drawMinimap(file, x, y, w, h) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+
     const lines = file.lines || [];
     const lineCount = Math.max(file.lineCount || lines.length, 1);
     const stepY = h / lineCount;
@@ -272,22 +392,35 @@ function drawMinimap(file, x, y, w, h) {
                 Math.max(stepY, 2.0)
             );
         } else {
-            const tokens = tokenizeLine(trimmedText);
+            const lang = detectLang(file.path);
+            const tokens = tokenizeLine(trimmedText, lang);
             const totalTextChars = Math.max(lineTextLength, 1);
+
+            const useText = stepY >= 2.5;
+            if (useText) {
+                ctx.font = `${Math.max(4, Math.floor(stepY * 0.85))}px Consolas, monospace`;
+            }
 
             let currentX = startX;
             for (const tok of tokens) {
-                const tokLen = tok.text.length;
-                const tokW = (tokLen / totalTextChars) * lineW;
+                if (currentX >= x + w) break;
 
-                ctx.fillStyle = colorForCategory(tok.category);
-                ctx.fillRect(
-                    currentX,
-                    y + i * stepY,
-                    Math.min(tokW, x + w - currentX),
-                    Math.max(stepY, 0.7)
-                );
-                currentX += tokW;
+                ctx.fillStyle = colorForCategory(tok.category, tok.isKey);
+                if (useText) {
+                    ctx.fillText(tok.text, currentX, y + i * stepY + stepY * 0.8);
+                    currentX += ctx.measureText(tok.text).width;
+                } else {
+                    const tokLen = tok.text.length;
+                    const tokW = (tokLen / totalTextChars) * lineW;
+
+                    ctx.fillRect(
+                        currentX,
+                        y + i * stepY,
+                        Math.min(tokW, x + w - currentX),
+                        Math.max(stepY, 0.7)
+                    );
+                    currentX += tokW;
+                }
             }
         }
     }
@@ -307,6 +440,41 @@ function drawMinimap(file, x, y, w, h) {
             Math.max((endL - startL + 1) * stepY, 4.0)
         );
     }
+
+    ctx.restore();
+}
+
+function fitPathText(path, maxWidth) {
+    if (ctx.measureText(path).width <= maxWidth) {
+        return path;
+    }
+    const parts = path.split("/");
+    const filename = parts.pop();
+    const directory = parts.join("/");
+    
+    if (ctx.measureText(filename).width > maxWidth) {
+        let fitName = filename;
+        while (fitName.length > 0 && ctx.measureText(fitName + "...").width > maxWidth) {
+            fitName = fitName.slice(0, -1);
+        }
+        return fitName + "...";
+    }
+    
+    let left = 1;
+    let right = directory.length;
+    let bestFit = "..." + filename;
+    
+    while (left <= right) {
+        const mid = Math.floor((left + right) / 2);
+        const candidate = directory.substring(0, mid) + "..." + filename;
+        if (ctx.measureText(candidate).width <= maxWidth) {
+            bestFit = candidate;
+            left = mid + 1;
+        } else {
+            right = mid - 1;
+        }
+    }
+    return bestFit;
 }
 
 function render() {
@@ -409,9 +577,7 @@ function render() {
         ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
         ctx.font = "10px system-ui, sans-serif";
 
-        const label = file.path.length > 38
-            ? "..." + file.path.slice(-35)
-            : file.path;
+        const label = fitPathText(file.path, cellW - 24);
 
         ctx.fillText(label, x + 10, y + 18);
 
@@ -545,7 +711,8 @@ canvas.addEventListener("mousemove", event => {
             const line = hoveredFile.lines[i];
             const isHoveredLine = i === hoveredLineIdx;
             const lineText = line ? line.text : "";
-            const tokens = tokenizeLine(lineText);
+            const lang = detectLang(hoveredFile.path);
+            const tokens = tokenizeLine(lineText, lang);
 
             let lineHtml = "";
             for (const tok of tokens) {
@@ -560,7 +727,7 @@ canvas.addEventListener("mousemove", event => {
                     escapedText = escapedText.replace(regex, `<span style="background: rgba(236, 72, 153, 0.35); color: #f472b6; font-weight: 600; border-radius: 2px; padding: 0 2px;">$1</span>`);
                 }
 
-                const color = colorForCategory(tok.category);
+                const color = colorForCategory(tok.category, tok.isKey);
                 lineHtml += `<span style="color: ${color}">${escapedText}</span>`;
             }
 

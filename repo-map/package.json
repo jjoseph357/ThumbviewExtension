@@ -1,20 +1,64 @@
 {
-  "name": "repo-map",
-  "displayName": "Repository Map",
-  "publisher": "SpatialCodeMap",
-  "version": "0.0.1",
+  "name": "thumbview",
+  "displayName": "Thumbview",
+  "publisher": "Thumbview",
+  "version": "0.0.3",
   "engines": {
-    "vscode": "^1.125.0"
+    "vscode": "^1.107.0"
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onCommand:repomap.open"
+    "onCommand:thumbview.open",
+    "onCommand:thumbview.reflow"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "repomap.open",
-        "title": "Repository Map: Open"
+        "command": "thumbview.open",
+        "title": "Thumbview",
+        "icon": "media/icon.svg"
+      },
+      {
+        "command": "thumbview.reflow",
+        "title": "Reflow Layout"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "thumbview.open",
+        "key": "f4"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "thumbview.open",
+          "when": "view == workbench.explorer.fileView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "thumbview-container",
+          "title": "Thumbview",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "thumbview-container": [
+        {
+          "id": "thumbview-sidebar",
+          "name": "Thumbview Actions"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "thumbview-sidebar",
+        "contents": "Manage your visual workspace.\n\n[Open Thumbview](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)"
       }
     ]
   },
@@ -27,7 +71,7 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.125.0",
+    "@types/vscode": "^1.107.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
     "typescript-eslint": "^8.61.1",
