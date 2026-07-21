@@ -17,12 +17,18 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let activePanel: vscode.WebviewPanel | undefined;
 
+    // Reads the user setting fresh each call (rather than caching) so a config change
+    // picked up by the onDidChangeConfiguration listener below is always honored.
     const getLayoutMode = (): "uniform_grid" | "spanning_grid" => {
         const config = vscode.workspace.getConfiguration("thumbview");
         const mode = config.get<string>("layoutMode");
         return mode === "spanning_grid" ? "spanning_grid" : "uniform_grid";
     };
 
+    // Four progressively-fainter pink decoration types used to fade a "jump" search
+    // match out over ~2s (see the "jump" message handler below) instead of an abrupt
+    // on/off highlight — VS Code decorations don't support CSS transitions, so the
+    // fade is faked by swapping between discrete opacity steps on a timer.
     const searchFlashSteps = [
         vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
@@ -92,6 +98,9 @@ export async function activate(context: vscode.ExtensionContext) {
             const mode = getLayoutMode();
 
             if (mode === "spanning_grid") {
+                // Allocations/rows are persisted so a file's cell count and the grid's
+                // row count don't get recomputed (and reshuffle everyone else's slot)
+                // on every rescan — see spanning_layout.ts's buildSpanningGrid doc.
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("repomap.spanningAllocations") || {};
                 const savedRows = context.workspaceState.get<number | null>("repomap.spanningRows") || null;
 
@@ -229,6 +238,8 @@ export async function activate(context: vscode.ExtensionContext) {
                                 }
                             }
                             if (matchingRanges.length > 0) {
+                                // Chained setTimeouts step through searchFlashSteps to fake
+                                // a fade-out, since decoration opacity can't be animated.
                                 setTimeout(() => {
                                     if (editor && !editor.document.isClosed) {
                                         // Step 1: 0.35 opacity (lasts 1500ms)
@@ -351,7 +362,9 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(editorDisposable);
 
-    // Watch cursor selection changes (debounced cursor line highlight)
+    // Watch cursor selection changes (debounced 150ms — much shorter than the file
+    // watcher's 800ms, since this only cheaply re-sends the current cursor map rather
+    // than re-scanning the whole workspace)
     let cursorDebounce: NodeJS.Timeout | undefined;
     const selectionDisposable = vscode.window.onDidChangeTextEditorSelection(event => {
         const uri = event.textEditor.document.uri.toString();
@@ -373,7 +386,9 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(tabDisposable);
 
-    // Watch workspace changes
+    // Watch workspace changes. Debounced 800ms so a batch of file operations (e.g. a
+    // git branch switch, or a build writing many files) triggers one rescan/postMessage
+    // instead of flooding the webview with a message per file event.
     const watcher = vscode.workspace.createFileSystemWatcher("**/*");
     let debounceTimer: NodeJS.Timeout | undefined;
     const triggerUpdate = () => {
@@ -428,6 +443,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() { }
 
+// Builds the webview's HTML shell. media/overview.js is loaded via a nonce'd <script>
+// tag under a strict CSP (script-src limited to that nonce) so no inline/remote script
+// can run in the panel — see getNonce() below.
 function getHtml(
     webview: vscode.Webview,
     context: vscode.ExtensionContext
