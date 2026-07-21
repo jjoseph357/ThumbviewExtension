@@ -1,28 +1,87 @@
 {
-    "name": "repo-map",
-    "displayName": "Repository Map",
-    "version": "0.0.1",
-    "engines": {
-        "vscode": "^1.92.0"
-    },
-    "main": "./out/extension.js",
-    "activationEvents": [
-        "onCommand:repomap.open"
+  "name": "thumbview",
+  "displayName": "Thumbview",
+  "publisher": "Thumbview",
+  "version": "0.0.3",
+  "engines": {
+    "vscode": "^1.107.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:thumbview.open",
+    "onCommand:thumbview.reflow"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "thumbview.open",
+        "title": "Thumbview",
+        "icon": "media/icon.svg"
+      },
+      {
+        "command": "thumbview.reflow",
+        "title": "Reflow Layout"
+      }
     ],
-    "contributes": {
-        "commands": [
-            {
-                "command": "repomap.open",
-                "title": "Repository Map: Open"
-            }
-        ]
+    "keybindings": [
+      {
+        "command": "thumbview.open",
+        "key": "f4"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "thumbview.open",
+          "when": "view == workbench.explorer.fileView",
+          "group": "navigation"
+        }
+      ]
     },
-    "scripts": {
-        "compile": "tsc -p ."
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "thumbview-container",
+          "title": "Thumbview",
+          "icon": "media/icon.svg"
+        }
+      ]
     },
-    "devDependencies": {
-        "@types/node": "^20.11.0",
-        "@types/vscode": "^1.92.0",
-        "typescript": "^5.5.0"
-    }
+    "views": {
+      "thumbview-container": [
+        {
+          "id": "thumbview-sidebar",
+          "name": "Thumbview Actions"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "thumbview-sidebar",
+        "contents": "Manage your visual workspace.\n\n[Open Thumbview](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.107.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "typescript-eslint": "^8.61.1",
+    "eslint": "^10.5.0",
+    "typescript": "^6.0.3",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
 }
