@@ -158,6 +158,20 @@ speculatively.
 - Keep an unrelated bug fix out of a feature/refactor commit (or at least call it out
   separately in the message), so fixes are easy to find in `git log` later.
 
+## Branch workflow
+
+This repo is worked on across personal dev branches (e.g. `woody-dev`), not directly on
+`main` — both maintainers follow this pattern. New work is committed to the contributor's
+own branch first, then merged into `main` only once it's ready.
+
+- Commit to whatever branch is currently checked out, not `main` directly, unless
+  explicitly told otherwise.
+- Only merge a branch into `main` when explicitly asked to.
+- After merging into `main`, switch back to the personal dev branch rather than leaving
+  the session on `main` — that's where new work continues.
+- Don't `git push` anything (a branch, `main`, or otherwise) unless explicitly asked to —
+  merging/committing locally is not authorization to push.
+
 ## Responding to a reported problem/issue/bug
 
 When the user reports a problem, issue, or bug (as opposed to requesting a new feature or
