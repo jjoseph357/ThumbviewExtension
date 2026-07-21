@@ -86,46 +86,55 @@ function categorizeLine(line: string): MiniLine["category"] {
     return "normal";
 }
 
+function matchSingleRule(pathStr: string, rule: string): boolean {
+    const ruleStr = rule.replace(/\\/g, "/");
+    const isDirRule = ruleStr.endsWith("/");
+    const cleanRule = isDirRule ? ruleStr.slice(0, -1) : ruleStr;
+
+    let regexPattern = cleanRule
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.');
+
+    if (cleanRule.startsWith("/")) {
+        regexPattern = "^" + regexPattern.slice(1);
+    } else {
+        regexPattern = "(^|/)" + regexPattern;
+    }
+
+    if (isDirRule) {
+        regexPattern = regexPattern + "(/|$)";
+    } else {
+        regexPattern = regexPattern + "($|/)";
+    }
+
+    try {
+        const rx = new RegExp(regexPattern);
+        return rx.test(pathStr);
+    } catch {
+        return pathStr.includes(cleanRule);
+    }
+}
+
 // Hand-rolled gitignore-glob-to-regex translator (falls back to a plain substring
-// match if the generated pattern fails to compile). Does NOT handle negation
-// patterns ("!foo") — those get treated as an ordinary rule to match, effectively
-// the opposite of their intended meaning. Known limitation, not yet fixed.
+// match if the generated pattern fails to compile). Evaluates rules sequentially
+// in order and supports negation patterns ("!foo") to un-ignore files.
 function shouldIgnore(relativePath: string, rules: string[]): boolean {
     const pathStr = relativePath.replace(/\\/g, "/");
+    let ignored = false;
+
     for (const rule of rules) {
-        const ruleStr = rule.replace(/\\/g, "/");
-        const isDirRule = ruleStr.endsWith("/");
-        const cleanRule = isDirRule ? ruleStr.slice(0, -1) : ruleStr;
+        if (!rule) continue;
+        const isNegated = rule.startsWith("!");
+        const pattern = isNegated ? rule.slice(1).trim() : rule.trim();
+        if (!pattern) continue;
 
-        let regexPattern = cleanRule
-            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-            .replace(/\*/g, '.*')
-            .replace(/\?/g, '.');
-
-        if (cleanRule.startsWith("/")) {
-            regexPattern = "^" + regexPattern.slice(1);
-        } else {
-            regexPattern = "(^|/)" + regexPattern;
-        }
-
-        if (isDirRule) {
-            regexPattern = regexPattern + "(/|$)";
-        } else {
-            regexPattern = regexPattern + "($|/)";
-        }
-
-        try {
-            const rx = new RegExp(regexPattern);
-            if (rx.test(pathStr)) {
-                return true;
-            }
-        } catch {
-            if (pathStr.includes(cleanRule)) {
-                return true;
-            }
+        if (matchSingleRule(pathStr, pattern)) {
+            ignored = !isNegated;
         }
     }
-    return false;
+
+    return ignored;
 }
 
 export async function scanRepository(): Promise<RepoFile[]> {
