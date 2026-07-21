@@ -22,6 +22,15 @@ class PersistentFileOrder {
             }
         }
     }
+    reflow(currentIds) {
+        const current = new Set(currentIds);
+        this.seenFiles = this.seenFiles.filter(id => current.has(id));
+        for (const id of currentIds) {
+            if (!this.seenFiles.includes(id)) {
+                this.seenFiles.push(id);
+            }
+        }
+    }
     getOrder() {
         return this.seenFiles;
     }

@@ -2,16 +2,30 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.0.3",
+  "version": "0.0.5",
   "engines": {
     "vscode": "^1.107.0"
   },
   "main": "./out/extension.js",
-  "activationEvents": [
-    "onCommand:thumbview.open",
-    "onCommand:thumbview.reflow"
-  ],
   "contributes": {
+    "configuration": {
+      "title": "Thumbview",
+      "properties": {
+        "thumbview.layoutMode": {
+          "type": "string",
+          "enum": [
+            "uniform_grid",
+            "spanning_grid"
+          ],
+          "enumDescriptions": [
+            "Standard uniform grid (1 cell per file)",
+            "Spanning Grid (tall files span multiple vertical cells)"
+          ],
+          "default": "uniform_grid",
+          "description": "Select the layout algorithm mode for displaying codebase minimaps."
+        }
+      }
+    },
     "commands": [
       {
         "command": "thumbview.open",
@@ -21,6 +35,14 @@
       {
         "command": "thumbview.reflow",
         "title": "Reflow Layout"
+      },
+      {
+        "command": "thumbview.setUniformGrid",
+        "title": "Use Uniform Grid Layout"
+      },
+      {
+        "command": "thumbview.setSpanningGrid",
+        "title": "Use Spanning Grid Layout"
       }
     ],
     "keybindings": [
@@ -29,15 +51,6 @@
         "key": "f4"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "thumbview.open",
-          "when": "view == workbench.explorer.fileView",
-          "group": "navigation"
-        }
-      ]
-    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -51,14 +64,15 @@
       "thumbview-container": [
         {
           "id": "thumbview-sidebar",
-          "name": "Thumbview Actions"
+          "name": "Thumbview Actions",
+          "icon": "media/icon.svg"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "Manage your visual workspace.\n\n[Open Thumbview](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)"
+        "contents": "Manage your visual workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)\n\n--- Layout Mode ---\n\n[Switch to Uniform Grid](command:thumbview.setUniformGrid)\n\n[Switch to Spanning Grid](command:thumbview.setSpanningGrid)\n\n--- Shortcuts ---\n\n• Click '×' or Middle-click open tab cards to close tabs\n• Click card header path label to isolate folder view"
       }
     ]
   },

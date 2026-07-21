@@ -38,6 +38,7 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const scanner_1 = require("./scanner");
 const layout_1 = require("./layout");
+const spanning_layout_1 = require("./spanning_layout");
 const state_1 = require("./state");
 async function activate(context) {
     console.log("REPOMAP EXTENSION ACTIVATED");
@@ -48,6 +49,11 @@ async function activate(context) {
     }
     const cursorLocations = {};
     let activePanel;
+    const getLayoutMode = () => {
+        const config = vscode.workspace.getConfiguration("thumbview");
+        const mode = config.get("layoutMode");
+        return mode === "spanning_grid" ? "spanning_grid" : "uniform_grid";
+    };
     const searchFlashSteps = [
         vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
@@ -108,19 +114,47 @@ async function activate(context) {
             fileOrder.update(files.map(f => f.id));
             await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
             const order = fileOrder.getOrder();
-            const layout = (0, layout_1.buildStableGrid)(order.length);
-            const filesWithSlots = files.map(file => ({
-                ...file,
-                slot: layout.slots[order.indexOf(file.id)]
-            }));
-            panel.webview.postMessage({
-                command: "data",
-                files: filesWithSlots,
-                layout: {
-                    cols: layout.cols,
-                    rows: layout.rows
-                }
-            });
+            const mode = getLayoutMode();
+            if (mode === "spanning_grid") {
+                const savedAllocations = context.workspaceState.get("repomap.spanningAllocations") || {};
+                const savedRows = context.workspaceState.get("repomap.spanningRows") || null;
+                const layout = (0, spanning_layout_1.buildSpanningGrid)(files, order, savedAllocations, savedRows);
+                await context.workspaceState.update("repomap.spanningAllocations", layout.allocations);
+                await context.workspaceState.update("repomap.spanningRows", layout.rows);
+                const filesWithSlots = layout.placements.map(p => ({
+                    ...p.file,
+                    slot: [p.col, p.row],
+                    nCells: p.nCells,
+                    slots: p.slots
+                }));
+                panel.webview.postMessage({
+                    command: "data",
+                    mode: "spanning_grid",
+                    files: filesWithSlots,
+                    layout: {
+                        cols: layout.cols,
+                        rows: layout.rows
+                    }
+                });
+            }
+            else {
+                const layout = (0, layout_1.buildStableGrid)(order.length);
+                const filesWithSlots = files.map(file => ({
+                    ...file,
+                    slot: layout.slots[order.indexOf(file.id)],
+                    nCells: 1,
+                    slots: [layout.slots[order.indexOf(file.id)]]
+                }));
+                panel.webview.postMessage({
+                    command: "data",
+                    mode: "uniform_grid",
+                    files: filesWithSlots,
+                    layout: {
+                        cols: layout.cols,
+                        rows: layout.rows
+                    }
+                });
+            }
             // Send open files list & cursor positions
             panel.webview.postMessage({
                 command: "openState",
@@ -202,12 +236,6 @@ async function activate(context) {
                                         }
                                     }, 1650);
                                     // Step 4: 0.05 opacity (starts at 1800ms, lasts 200ms)
-                                    setTimeout(() => {
-                                        if (editor && !editor.document.isClosed) {
-                                            editor.setDecorations(searchFlashSteps[2], []);
-                                            editor.setDecorations(searchFlashSteps[3], matchingRanges);
-                                        }
-                                    }, 1800);
                                     // Clear all (at 2000ms)
                                     setTimeout(() => {
                                         if (editor && !editor.document.isClosed) {
@@ -223,6 +251,21 @@ async function activate(context) {
                     vscode.window.showErrorMessage(`Repository Map jump failed: ${err?.message ?? String(err)}`);
                 }
             }
+            if (msg.command === "close") {
+                try {
+                    const targetUriStr = msg.uri;
+                    for (const group of vscode.window.tabGroups.all) {
+                        for (const tab of group.tabs) {
+                            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === targetUriStr) {
+                                await vscode.window.tabGroups.close(tab);
+                            }
+                        }
+                    }
+                }
+                catch (err) {
+                    console.error("REPOMAP CLOSE ERROR:", err);
+                }
+            }
         });
         panel.onDidDispose(() => {
             if (activePanel === panel) {
@@ -232,13 +275,45 @@ async function activate(context) {
     });
     context.subscriptions.push(disposable);
     const reflowDisposable = vscode.commands.registerCommand("thumbview.reflow", async () => {
-        await context.workspaceState.update("repomap.seenFiles", undefined);
+        const files = await (0, scanner_1.scanRepository)();
+        fileOrder.reflow(files.map(f => f.id));
+        await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
+        await context.workspaceState.update("repomap.spanningAllocations", undefined);
+        await context.workspaceState.update("repomap.spanningRows", undefined);
         if (activePanel) {
             refreshRepositoryMap(activePanel);
         }
-        vscode.window.showInformationMessage("Thumbview layout reflowed.");
+        else {
+            vscode.commands.executeCommand("thumbview.open");
+        }
+        vscode.window.showInformationMessage("Thumbview layout reflowed and gaps filled.");
     });
     context.subscriptions.push(reflowDisposable);
+    const setUniformGridDisposable = vscode.commands.registerCommand("thumbview.setUniformGrid", async () => {
+        const config = vscode.workspace.getConfiguration("thumbview");
+        await config.update("layoutMode", "uniform_grid", vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage("Thumbview Layout set to Uniform Grid.");
+        if (activePanel) {
+            refreshRepositoryMap(activePanel);
+        }
+    });
+    context.subscriptions.push(setUniformGridDisposable);
+    const setSpanningGridDisposable = vscode.commands.registerCommand("thumbview.setSpanningGrid", async () => {
+        const config = vscode.workspace.getConfiguration("thumbview");
+        await config.update("layoutMode", "spanning_grid", vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage("Thumbview Layout set to Spanning Grid.");
+        if (activePanel) {
+            refreshRepositoryMap(activePanel);
+        }
+    });
+    context.subscriptions.push(setSpanningGridDisposable);
+    // Watch configuration changes
+    const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration("thumbview.layoutMode") && activePanel) {
+            refreshRepositoryMap(activePanel);
+        }
+    });
+    context.subscriptions.push(configDisposable);
     // Watch active editor changes
     const editorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
         if (activePanel) {
