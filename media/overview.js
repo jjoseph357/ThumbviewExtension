@@ -1,3 +1,11 @@
+// Webview/browser-side counterpart to extension.ts (the "host"). Receives postMessage
+// data from the host and re-tokenizes/redraws everything to a single <canvas> on
+// every render() call — there is no virtual DOM or per-tile element, for performance
+// with large workspaces. Not compiled/bundled: loaded as-is via a nonce'd <script> tag
+// (see extension.ts's getHtml), so it can't `import` the extension-host TypeScript in
+// src/ — hence buildStableGrid below being a hand-kept-in-sync duplicate of layout.ts's,
+// and tokenizeJS/tokenizeCSS/tokenizeHTML being a second, independent highlighter from
+// scanner.ts's coarse per-line categorizer.
 const vscode = acquireVsCodeApi();
 
 const canvas = document.getElementById("map");
@@ -77,6 +85,10 @@ canvas.addEventListener("contextrestored", () => {
     resize();
 });
 
+// Host -> webview protocol (extension.ts is the sender in each case): "status" (loading/
+// error text), "data" (the full file/layout payload), "activeFile" (URI of the focused
+// editor), "openState" (open tab URIs + cursor lines). No shared type with extension.ts
+// — see CLAUDE.md's "Cross-module interface" note.
 window.addEventListener("message", event => {
     const msg = event.data;
 
@@ -103,6 +115,9 @@ window.addEventListener("message", event => {
     }
 });
 
+// Duplicate of layout.ts's buildStableGrid (uniform_grid mode only) — used here only
+// to lay out a focused folder's subset of files (see render() below), since the host
+// never computes a layout for that subset. Keep in sync with layout.ts by hand.
 function buildStableGrid(nCells, targetAspect = 1.777) {
     let rows = 1;
     let cols = Math.max(2, Math.ceil(rows * targetAspect));
@@ -217,6 +232,9 @@ function detectLang(path) {
     return 'js';
 }
 
+// Dispatches to one of three small regex-based tokenizers by detected language.
+// This is a real (if approximate) syntax highlighter, independent of scanner.ts's
+// coarse per-line categorizer — see this file's header comment.
 function tokenizeLine(text, lang) {
     if (!text) return [];
     if (lang === 'css') return tokenizeCSS(text);
@@ -224,6 +242,10 @@ function tokenizeLine(text, lang) {
     return tokenizeJS(text, lang);
 }
 
+// Single regex splits the line into candidate tokens (comments/strings/@rules/colors/
+// units/identifiers/punctuation), then each token is classified by shape. A trailing
+// pass re-labels a value/selector token as "function" if it's immediately followed by
+// "(" (e.g. `rgba(`, `calc(`).
 function tokenizeCSS(text) {
     const tokens = [];
     const regex = /(\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|@[\w-]+|!important|#[\da-fA-F]{3,8}\b|\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|vmin|vmax|s|ms|deg|fr|ch|ex|pt)?|:[\w-]+|\.[\w-]+|[\w-]+|[{}();:,>+~\[\]*=]|\s+|.)/g;
@@ -262,6 +284,8 @@ function tokenizeCSS(text) {
     return tokens;
 }
 
+// Same single-regex-then-classify approach as tokenizeCSS, tracking a small bit of
+// state (inTag/seenTagName) across matches to tell a tag name from an attribute name.
 function tokenizeHTML(text) {
     const tokens = [];
     const regex = /(<!--[\s\S]*?-->|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|<\/?|\/?>|=|&\w+;|[\w:-]+|\s+|.)/g;
@@ -282,6 +306,11 @@ function tokenizeHTML(text) {
     return tokens;
 }
 
+// Covers JS/TS/most C-like languages plus a separate Python keyword list, picked by a
+// single shared regex per lang (JSON reuses the JS path). After the initial token pass,
+// a second loop re-labels tokens using their neighbors: identifier-after-"." becomes
+// "property", identifier-before-"(" becomes "function", and (JSON only) a string
+// immediately before ":" becomes a highlighted key.
 function tokenizeJS(text, lang) {
     const isJson = lang === 'json';
     const isPy = lang === 'python';
@@ -364,6 +393,11 @@ function colorForCategory(category, isKey) {
     }
 }
 
+// Draws one file's minimap into the given cell rect, one row per source line scaled to
+// fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
+// render real glyphs, so each token is drawn as a flat colored rect proportional to its
+// character length instead ("useText" branch below) — this is what makes small tiles
+// still readable as a rough shape/density map rather than unreadable tiny text.
 function drawMinimap(file, x, y, w, h) {
     ctx.save();
     ctx.beginPath();
@@ -455,6 +489,10 @@ function drawMinimap(file, x, y, w, h) {
     ctx.restore();
 }
 
+// Truncates a file path to fit maxWidth, preferring to drop leading directory segments
+// ("...dir/file.ts") over the filename itself. Binary-searches the cut point in the
+// directory portion rather than trimming a character at a time, since ctx.measureText
+// is comparatively expensive and this runs once per visible card per frame.
 function fitPathText(path, maxWidth) {
     if (ctx.measureText(path).width <= maxWidth) {
         return path;
@@ -510,6 +548,10 @@ function render() {
         return;
     }
 
+    // At root, use the host's own layout/slots (data.layout, file.slot) as sent in the
+    // "data" message — supports both uniform_grid and spanning_grid modes. Once a
+    // folder is focused, that's a subset the host never laid out, so it's repacked
+    // on the fly with the local buildStableGrid duplicate (uniform_grid shape only).
     let gridCols, gridRows, slots;
     if (!focusedFolder) {
         gridCols = data.layout.cols;
@@ -624,6 +666,10 @@ function render() {
     }
 }
 
+// Three click targets within a card, checked most-specific first: the '×' close
+// button (only present when the tab is open), the header/path-label strip (isolates
+// that file's parent folder), then the minimap body (jumps the real editor to the
+// clicked line — see extension.ts's "jump" handler).
 canvas.addEventListener("click", event => {
     if (!data) {
         return;
@@ -760,6 +806,9 @@ canvas.addEventListener("mousemove", event => {
         }
     }
 
+    // Magnifying tooltip: re-renders the real (untruncated) text for the ~15 lines
+    // around the hovered one, re-tokenized at readable size, since the minimap itself
+    // may be too small/dense to read directly.
     if (hoveredFile && hoveredLineIdx >= 0 && hoveredLineIdx < hoveredFile.lineCount) {
         const start = Math.max(0, hoveredLineIdx - 7);
         const end = Math.min(hoveredFile.lineCount - 1, hoveredLineIdx + 7);
