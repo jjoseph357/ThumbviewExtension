@@ -130,9 +130,11 @@ isolation:
   currently either fail or no-op.
 - `.vscode/tasks.json` + `launch.json` wire up F5 debugging with a `tsc -watch` background
   build task — standard `yo code` scaffold, undocumented beyond the auto-generated comments.
-- Two `.vsix` packages (`thumbview-0.0.1.vsix`, `thumbview-0.0.2.vsix`) are committed
-  directly into the repo. There's no documented release process (how/when these are built,
-  whether they're published to a marketplace, whether old ones should be deleted).
+- ~~Two `.vsix` packages were committed directly into the repo.~~ **Resolved** — both were
+  removed (`git rm`) since `*.vsix` is gitignored and the package should be built from
+  source via `vsce package` (see README → Development). There's still no documented
+  release/publish process (e.g. whether this extension is meant to reach the VS Code
+  Marketplace) if that becomes relevant later.
 
 ## 3. Areas most in need of documentation
 
@@ -167,8 +169,9 @@ Ordered roughly by how much confusion/risk each one currently causes:
 8. **No CONTRIBUTING or architecture doc** explaining the canvas-based rendering approach
    (why a single `<canvas>` instead of DOM nodes per tile — almost certainly a performance
    choice for large workspaces, but that reasoning isn't recorded anywhere).
-9. **Release process for the `.vsix` files** is undocumented — how they're built, whether
-   they're meant to be committed at all, and whether a marketplace publish step exists.
+9. **Release/publish process** is undocumented — whether this extension is meant to reach
+   the VS Code Marketplace, and if so, how versions get tagged/published. (Whether `.vsix`
+   files belong in the repo is resolved: they don't — see above.)
 10. ~~No root `LICENSE`.~~ **Resolved** — `LICENSE` now lives at the repo root as part of
     the flatten.
 
