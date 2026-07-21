@@ -23,6 +23,14 @@
           ],
           "default": "uniform_grid",
           "description": "Select the layout algorithm mode for displaying codebase minimaps."
+        },
+        "thumbview.ignorePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "List of file paths or glob patterns to ignore in Thumbview minimap."
         }
       }
     },
@@ -43,8 +51,54 @@
       {
         "command": "thumbview.setSpanningGrid",
         "title": "Use Spanning Grid Layout"
+      },
+      {
+        "command": "thumbview.addIgnorePattern",
+        "title": "Add Ignore Pattern...",
+        "icon": "$(add)"
+      },
+      {
+        "command": "thumbview.removeIgnorePattern",
+        "title": "Remove Ignore Pattern",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "thumbview.focusFolder",
+        "title": "Focus Directory in Thumbview",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "thumbview.showAllFolders",
+        "title": "Show All Workspace Directories",
+        "icon": "$(clear-all)"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "thumbview.addIgnorePattern",
+          "when": "view == thumbview-ignores",
+          "group": "navigation"
+        },
+        {
+          "command": "thumbview.showAllFolders",
+          "when": "view == thumbview-directories",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "thumbview.removeIgnorePattern",
+          "when": "view == thumbview-ignores",
+          "group": "inline"
+        },
+        {
+          "command": "thumbview.focusFolder",
+          "when": "view == thumbview-directories",
+          "group": "inline"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "thumbview.open",
@@ -64,7 +118,17 @@
       "thumbview-container": [
         {
           "id": "thumbview-sidebar",
-          "name": "Thumbview Actions",
+          "name": "Actions & Settings",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "thumbview-directories",
+          "name": "Directory Navigation",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "thumbview-ignores",
+          "name": "Ignored Files & Directories",
           "icon": "media/icon.svg"
         }
       ]
@@ -72,7 +136,7 @@
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "Manage your visual workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)\n\n--- Layout Mode ---\n\n[Switch to Uniform Grid](command:thumbview.setUniformGrid)\n\n[Switch to Spanning Grid](command:thumbview.setSpanningGrid)\n\n--- Shortcuts ---\n\n• Click '×' or Middle-click open tab cards to close tabs\n• Click card header path label to isolate folder view"
+        "contents": "Manage your visual workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)\n\n--- Layout Mode ---\n\n[Switch to Uniform Grid](command:thumbview.setUniformGrid)\n\n[Switch to Spanning Grid](command:thumbview.setSpanningGrid)\n\n--- Shortcuts ---\n\n• Click '×' or Middle-click open tab cards to close tabs\n• Right click file cards for Explorer options & ignore rules"
       }
     ]
   },
@@ -85,14 +149,14 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.107.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "24.x",
-    "typescript-eslint": "^8.61.1",
+    "@types/node": "^24.13.3",
+    "@types/vscode": "^1.125.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
     "eslint": "^10.5.0",
     "typescript": "^6.0.3",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "typescript-eslint": "^8.61.1"
   },
   "overrides": {
     "diff": "^8.0.4",

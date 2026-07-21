@@ -101,6 +101,12 @@ window.addEventListener("message", event => {
         cursorLocations = msg.cursorLocations || {};
         render();
     }
+
+    if (msg.command === "setFocusedFolder") {
+        focusedFolder = msg.folder || "";
+        updateBreadcrumbs();
+        render();
+    }
 });
 
 function buildStableGrid(nCells, targetAspect = 1.777) {
@@ -761,8 +767,19 @@ canvas.addEventListener("mousemove", event => {
     }
 
     if (hoveredFile && hoveredLineIdx >= 0 && hoveredLineIdx < hoveredFile.lineCount) {
-        const start = Math.max(0, hoveredLineIdx - 7);
-        const end = Math.min(hoveredFile.lineCount - 1, hoveredLineIdx + 7);
+        const radius = 12;
+        const totalLinesWanted = radius * 2 + 1;
+        let start = hoveredLineIdx - radius;
+        let end = hoveredLineIdx + radius;
+
+        if (start < 0) {
+            end = Math.min(hoveredFile.lineCount - 1, end + (-start));
+            start = 0;
+        }
+        if (end >= hoveredFile.lineCount) {
+            start = Math.max(0, start - (end - (hoveredFile.lineCount - 1)));
+            end = hoveredFile.lineCount - 1;
+        }
 
         const isOpen = openFiles.includes(hoveredFile.uri);
         const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
@@ -834,6 +851,163 @@ canvas.addEventListener("mousemove", event => {
 
 canvas.addEventListener("mouseleave", () => {
     tooltip.style.display = "none";
+});
+
+const contextMenu = document.getElementById("context-menu");
+
+function hideContextMenu() {
+    if (contextMenu) {
+        contextMenu.style.display = "none";
+    }
+}
+
+document.addEventListener("click", event => {
+    if (contextMenu && !contextMenu.contains(event.target)) {
+        hideContextMenu();
+    }
+});
+
+canvas.addEventListener("contextmenu", event => {
+    event.preventDefault();
+    if (!data) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    const filteredFiles = getFilteredFiles();
+    let targetFile = null;
+
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (
+            px >= c.x &&
+            px <= c.x + c.w &&
+            py >= c.y &&
+            py <= c.y + c.h
+        ) {
+            targetFile = file;
+            break;
+        }
+    }
+
+    if (!targetFile) {
+        hideContextMenu();
+        return;
+    }
+
+    tooltip.style.display = "none";
+
+    const isOpen = openFiles.includes(targetFile.uri);
+
+    contextMenu.innerHTML = `
+        <div class="menu-item" id="menu-open">Open</div>
+        <div class="menu-item" id="menu-open-side">Open to the Side</div>
+        <div class="menu-item" id="menu-open-preview">Open Preview</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" id="menu-select-compare">Select for Compare</div>
+        <div class="menu-item" id="menu-compare-selected">Compare with Selected</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" id="menu-reveal">Reveal in Explorer</div>
+        <div class="menu-item" id="menu-open-containing-folder">Open Containing Folder</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" id="menu-cut">Cut</div>
+        <div class="menu-item" id="menu-copy">Copy</div>
+        <div class="menu-item" id="menu-copy-path">Copy Path</div>
+        <div class="menu-item" id="menu-copy-rel-path">Copy Relative Path</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" id="menu-rename">Rename...</div>
+        <div class="menu-item danger" id="menu-delete">Delete</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" id="menu-ignore">Ignore in Thumbview</div>
+    `;
+
+    document.getElementById("menu-open").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "jump", uri: targetFile.uri, line: 0 });
+    };
+
+    document.getElementById("menu-open-side").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "openToSide", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-open-preview").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "openPreview", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-select-compare").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "selectForCompare", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-compare-selected").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "compareWithSelected", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-reveal").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "revealInFiles", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-open-containing-folder").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "openContainingFolder", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-cut").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "cutFile", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-copy").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "copyFile", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-copy-path").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "copyPath", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-copy-rel-path").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "copyRelativePath", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-rename").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "renameFile", uri: targetFile.uri, path: targetFile.path });
+    };
+
+    document.getElementById("menu-delete").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "deleteFile", uri: targetFile.uri });
+    };
+
+    document.getElementById("menu-ignore").onclick = () => {
+        hideContextMenu();
+        vscode.postMessage({ command: "ignoreFile", uri: targetFile.uri, path: targetFile.path });
+    };
+
+    contextMenu.style.display = "block";
+
+    let cx = event.clientX;
+    let cy = event.clientY;
+
+    if (cx + contextMenu.offsetWidth > window.innerWidth) {
+        cx = window.innerWidth - contextMenu.offsetWidth - 8;
+    }
+    if (cy + contextMenu.offsetHeight > window.innerHeight) {
+        cy = window.innerHeight - contextMenu.offsetHeight - 8;
+    }
+
+    contextMenu.style.left = `${cx}px`;
+    contextMenu.style.top = `${cy}px`;
 });
 
 resize();

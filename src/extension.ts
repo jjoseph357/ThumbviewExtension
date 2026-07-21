@@ -3,6 +3,8 @@ import { scanRepository } from "./scanner";
 import { buildStableGrid } from "./layout";
 import { buildSpanningGrid } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
+import { IgnoreTreeDataProvider, IgnoreTreeItem } from "./ignoreProvider";
+import { DirectoryTreeDataProvider, DirectoryTreeItem } from "./directoryProvider";
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log("REPOMAP EXTENSION ACTIVATED");
@@ -203,7 +205,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             vscode.Uri.parse(msg.uri)
                         );
 
-                        const editor = await vscode.window.showTextDocument(doc);
+                        const editor = await vscode.window.showTextDocument(doc, { preview: false });
 
                         const safeLine = Math.max(
                             0,
@@ -282,6 +284,173 @@ export async function activate(context: vscode.ExtensionContext) {
                         console.error("REPOMAP CLOSE ERROR:", err);
                     }
                 }
+
+                if (msg.command === "openPreview") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("vscode.open", uri, { preview: true });
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to open preview: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "openToSide") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("vscode.open", uri, { viewColumn: vscode.ViewColumn.Beside });
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to open to side: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "revealInFiles") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("revealInExplorer", uri);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to reveal in explorer: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "renameFile") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        const oldPath = msg.path || vscode.workspace.asRelativePath(uri);
+                        const newName = await vscode.window.showInputBox({
+                            prompt: "Enter new name/relative path for file",
+                            value: oldPath
+                        });
+                        if (newName && newName !== oldPath) {
+                            const wsFolder = vscode.workspace.getWorkspaceFolder(uri);
+                            if (wsFolder) {
+                                const newUri = vscode.Uri.joinPath(wsFolder.uri, newName);
+                                const edit = new vscode.WorkspaceEdit();
+                                edit.renameFile(uri, newUri, { overwrite: false });
+                                const success = await vscode.workspace.applyEdit(edit);
+                                if (success && activePanel) {
+                                    refreshRepositoryMap(activePanel);
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to rename file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "deleteFile") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        const fileName = vscode.workspace.asRelativePath(uri);
+                        const confirm = await vscode.window.showWarningMessage(
+                            `Are you sure you want to delete '${fileName}'?`,
+                            { modal: true },
+                            "Move to Trash",
+                            "Delete Permanently"
+                        );
+                        if (confirm === "Move to Trash") {
+                            await vscode.workspace.fs.delete(uri, { useTrash: true });
+                            if (activePanel) {
+                                refreshRepositoryMap(activePanel);
+                            }
+                        } else if (confirm === "Delete Permanently") {
+                            await vscode.workspace.fs.delete(uri, { useTrash: false });
+                            if (activePanel) {
+                                refreshRepositoryMap(activePanel);
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to delete file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "ignoreFile") {
+                    try {
+                        const relPath = msg.path;
+                        if (relPath) {
+                            const config = vscode.workspace.getConfiguration("thumbview");
+                            const current = config.get<string[]>("ignorePatterns") || [];
+                            if (!current.includes(relPath)) {
+                                await config.update("ignorePatterns", [...current, relPath], vscode.ConfigurationTarget.Global);
+                                vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
+                            }
+                            if (activePanel) {
+                                refreshRepositoryMap(activePanel);
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to ignore file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "copyPath") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.env.clipboard.writeText(uri.fsPath);
+                        vscode.window.showInformationMessage("Copied path to clipboard.");
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to copy path: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "copyRelativePath") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        const rel = vscode.workspace.asRelativePath(uri);
+                        await vscode.env.clipboard.writeText(rel);
+                        vscode.window.showInformationMessage("Copied relative path to clipboard.");
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to copy relative path: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "copyFile") {
+                    const uri = vscode.Uri.parse(msg.uri);
+                    try {
+                        await vscode.commands.executeCommand("filesExplorer.copy", uri);
+                    } catch (err: any) {
+                        // Fallback to clipboard path if native explorer command fails
+                        await vscode.env.clipboard.writeText(uri.fsPath);
+                        vscode.window.showInformationMessage("Copied file path to clipboard.");
+                    }
+                }
+
+                if (msg.command === "cutFile") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("filesExplorer.cut", uri);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to cut file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "selectForCompare") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("selectForCompare", uri);
+                        vscode.window.showInformationMessage(`Selected '${vscode.workspace.asRelativePath(uri)}' for compare.`);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to select for compare: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "compareWithSelected") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("compareFiles", uri);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to compare: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "openContainingFolder") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        const folderUri = vscode.Uri.joinPath(uri, "..");
+                        await vscode.commands.executeCommand("revealFileInOS", folderUri);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to open containing folder: ${err?.message ?? String(err)}`);
+                    }
+                }
             });
 
             panel.onDidDispose(() => {
@@ -330,10 +499,92 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(setSpanningGridDisposable);
 
+    const ignoreProvider = new IgnoreTreeDataProvider();
+    vscode.window.registerTreeDataProvider("thumbview-ignores", ignoreProvider);
+
+    const directoryProvider = new DirectoryTreeDataProvider();
+    vscode.window.registerTreeDataProvider("thumbview-directories", directoryProvider);
+
+    const refreshProviders = () => {
+        ignoreProvider.refresh();
+        directoryProvider.refresh();
+    };
+
+    const addIgnoreDisposable = vscode.commands.registerCommand("thumbview.addIgnorePattern", async () => {
+        const input = await vscode.window.showInputBox({
+            prompt: "Enter file/directory relative path or pattern to ignore in Thumbview",
+            placeHolder: "e.g. src/legacy/ or *.test.js"
+        });
+        if (input && input.trim()) {
+            const config = vscode.workspace.getConfiguration("thumbview");
+            const current = config.get<string[]>("ignorePatterns") || [];
+            const pattern = input.trim();
+            if (!current.includes(pattern)) {
+                await config.update("ignorePatterns", [...current, pattern], vscode.ConfigurationTarget.Global);
+                vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
+                refreshProviders();
+                if (activePanel) {
+                    refreshRepositoryMap(activePanel);
+                }
+            }
+        }
+    });
+    context.subscriptions.push(addIgnoreDisposable);
+
+    const removeIgnoreDisposable = vscode.commands.registerCommand("thumbview.removeIgnorePattern", async (item?: IgnoreTreeItem) => {
+        let pattern = item?.pattern;
+        const config = vscode.workspace.getConfiguration("thumbview");
+        const current = config.get<string[]>("ignorePatterns") || [];
+        if (!pattern && current.length > 0) {
+            pattern = await vscode.window.showQuickPick(current, { placeHolder: "Select pattern to remove" });
+        }
+        if (pattern) {
+            const updated = current.filter(p => p !== pattern);
+            await config.update("ignorePatterns", updated, vscode.ConfigurationTarget.Global);
+            vscode.window.showInformationMessage(`Removed '${pattern}' from ignore list.`);
+            refreshProviders();
+            if (activePanel) {
+                refreshRepositoryMap(activePanel);
+            }
+        }
+    });
+    context.subscriptions.push(removeIgnoreDisposable);
+
+    const focusFolderDisposable = vscode.commands.registerCommand("thumbview.focusFolder", async (folderPath?: string | DirectoryTreeItem) => {
+        let targetFolder = typeof folderPath === "string" ? folderPath : folderPath?.folderPath || "";
+        if (targetFolder === "(root files)/") {
+            targetFolder = "";
+        }
+        let panel = activePanel;
+        if (!panel) {
+            await vscode.commands.executeCommand("thumbview.open");
+            panel = activePanel;
+        }
+        if (panel) {
+            panel.webview.postMessage({
+                command: "setFocusedFolder",
+                folder: targetFolder
+            });
+            panel.reveal(vscode.ViewColumn.Active);
+        }
+    });
+    context.subscriptions.push(focusFolderDisposable);
+
+    const showAllFoldersDisposable = vscode.commands.registerCommand("thumbview.showAllFolders", async () => {
+        vscode.commands.executeCommand("thumbview.focusFolder", "");
+    });
+    context.subscriptions.push(showAllFoldersDisposable);
+
     // Watch configuration changes
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration("thumbview.layoutMode") && activePanel) {
             refreshRepositoryMap(activePanel);
+        }
+        if (e.affectsConfiguration("thumbview.ignorePatterns")) {
+            refreshProviders();
+            if (activePanel) {
+                refreshRepositoryMap(activePanel);
+            }
         }
     });
     context.subscriptions.push(configDisposable);
@@ -381,42 +632,10 @@ export async function activate(context: vscode.ExtensionContext) {
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(async () => {
-            if (!activePanel) {
-                return;
+            if (activePanel) {
+                refreshRepositoryMap(activePanel);
             }
-            try {
-                const files = await scanRepository();
-                fileOrder.update(files.map(f => f.id));
-                await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
-
-                const order = fileOrder.getOrder();
-                const layout = buildStableGrid(order.length);
-
-                const filesWithSlots = files.map(file => ({
-                    ...file,
-                    slot: layout.slots[order.indexOf(file.id)]
-                }));
-
-                activePanel.webview.postMessage({
-                    command: "data",
-                    files: filesWithSlots,
-                    layout: {
-                        cols: layout.cols,
-                        rows: layout.rows
-                    }
-                });
-
-                const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
-                activePanel.webview.postMessage({
-                    command: "activeFile",
-                    uri: activeUri
-                });
-
-                sendOpenState();
-            } catch (err) {
-                console.error("REPOMAP WATCHER UPDATE ERROR:", err);
-            }
-        }, 800);
+        }, 500);
     };
 
     watcher.onDidCreate(() => triggerUpdate());
@@ -576,11 +795,11 @@ function getHtml(
             padding: 12px;
             box-shadow: 0 12px 36px rgba(0, 0, 0, 0.75);
             font-family: Consolas, "Liberation Mono", Courier, monospace;
-            font-size: 11px;
+            font-size: 13px;
             color: #d4d4d4;
             pointer-events: none;
             z-index: 1000;
-            max-width: 550px;
+            max-width: 750px;
             line-height: 1.4;
             white-space: pre;
             overflow: hidden;
@@ -595,12 +814,53 @@ function getHtml(
             padding-bottom: 4px;
             font-size: 12px;
         }
+
+        /* Right-click Context Menu */
+        #context-menu {
+            position: absolute;
+            display: none;
+            background: #252526;
+            border: 1px solid #454545;
+            border-radius: 6px;
+            padding: 4px 0;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+            z-index: 2000;
+            min-width: 180px;
+            font-size: 12px;
+            color: #cccccc;
+        }
+
+        .menu-item {
+            padding: 6px 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            transition: background 0.1s ease;
+        }
+
+        .menu-item:hover {
+            background: #04395e;
+            color: #ffffff;
+        }
+
+        .menu-item.danger:hover {
+            background: #900c3f;
+            color: #ffffff;
+        }
+
+        .menu-separator {
+            height: 1px;
+            background: #3c3c3c;
+            margin: 4px 0;
+        }
     </style>
 </head>
 <body>
     <div id="canvas-container">
         <canvas id="map"></canvas>
         <div id="hover-tooltip"></div>
+        <div id="context-menu"></div>
         <div class="controls-overlay">
             <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
                 <span class="breadcrumb-item" id="breadcrumb-root">root</span>

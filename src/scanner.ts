@@ -126,16 +126,21 @@ export async function scanRepository(): Promise<RepoFile[]> {
     );
 
     let gitignoreRules: string[] = [];
+    const config = vscode.workspace.getConfiguration("thumbview");
+    const customIgnored = config.get<string[]>("ignorePatterns") || [];
+    gitignoreRules.push(...customIgnored);
+
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (workspaceFolders && workspaceFolders.length > 0) {
         const gitignorePath = path.join(workspaceFolders[0].uri.fsPath, ".gitignore");
         if (fs.existsSync(gitignorePath)) {
             try {
                 const content = fs.readFileSync(gitignorePath, "utf-8");
-                gitignoreRules = content
+                const fileRules = content
                     .split("\n")
                     .map(line => line.trim())
                     .filter(line => line && !line.startsWith("#"));
+                gitignoreRules.push(...fileRules);
             } catch {
             }
         }
