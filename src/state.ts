@@ -1,7 +1,15 @@
+// Keeps a stable file-id -> array-index mapping across rescans. buildStableGrid/
+// buildSpanningGrid (layout.ts/spanning_layout.ts) assign grid slots purely by index
+// into getOrder()'s array, so an existing file must never change index just because
+// other files were added or removed elsewhere in the workspace.
 export class PersistentFileOrder {
 
     private seenFiles: string[] = [];
 
+    // Deleted files leave "holes" (their old index) rather than shifting everything
+    // down; newly discovered files fill the oldest hole first, and only append past
+    // the end once no holes remain. This is what keeps every other file's grid slot
+    // untouched when the file set changes.
     update(ids: string[]) {
 
         const current = new Set(ids);
@@ -28,6 +36,9 @@ export class PersistentFileOrder {
         }
     }
 
+    // Unlike update(), this drops holes entirely by compacting the array — used by
+    // the explicit "Reflow Layout" command when the user wants the grid to close its
+    // gaps rather than preserve them for future backfilling.
     reflow(currentIds: string[]) {
         const current = new Set(currentIds);
         this.seenFiles = this.seenFiles.filter(id => current.has(id));

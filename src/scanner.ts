@@ -1,3 +1,6 @@
+// Walks the workspace, applies a hand-rolled .gitignore emulation, and reads every
+// remaining file into per-line records (RepoFile[]) for the layout builders to place
+// and the webview to tokenize/draw. Runs on the extension-host side only.
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
@@ -17,6 +20,9 @@ export interface RepoFile {
     lineCount: number;
 }
 
+// Coarse per-line category guess from leading/contained keywords, not a real parser.
+// NOTE: media/overview.js does its own independent full tokenization from raw text and
+// does not appear to read this field — confirm it's actually unused before extending it.
 function categorizeLine(line: string): MiniLine["category"] {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -80,6 +86,10 @@ function categorizeLine(line: string): MiniLine["category"] {
     return "normal";
 }
 
+// Hand-rolled gitignore-glob-to-regex translator (falls back to a plain substring
+// match if the generated pattern fails to compile). Does NOT handle negation
+// patterns ("!foo") — those get treated as an ordinary rule to match, effectively
+// the opposite of their intended meaning. Known limitation, not yet fixed.
 function shouldIgnore(relativePath: string, rules: string[]): boolean {
     const pathStr = relativePath.replace(/\\/g, "/");
     for (const rule of rules) {
@@ -125,6 +135,9 @@ export async function scanRepository(): Promise<RepoFile[]> {
         "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv}/**"
     );
 
+    // Second, finer-grained exclusion layer on top of the glob above: the workspace's
+    // own .gitignore, applied manually via shouldIgnore() since findFiles' exclude glob
+    // can't read an arbitrary file at scan time.
     let gitignoreRules: string[] = [];
     const config = vscode.workspace.getConfiguration("thumbview");
     const customIgnored = config.get<string[]>("ignorePatterns") || [];
