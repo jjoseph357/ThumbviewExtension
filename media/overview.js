@@ -57,7 +57,7 @@ window.addEventListener("keydown", event => {
 });
 
 function resize() {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.floor(window.innerWidth * dpr);
     canvas.height = Math.floor(window.innerHeight * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -65,6 +65,17 @@ function resize() {
 }
 
 window.addEventListener("resize", resize);
+
+// Handle canvas context loss gracefully (e.g. GPU crash on Linux Wayland/Mesa drivers)
+canvas.addEventListener("contextlost", (event) => {
+    event.preventDefault();
+    console.warn("Thumbview Canvas context lost. Waiting for restoration...");
+});
+
+canvas.addEventListener("contextrestored", () => {
+    console.log("Thumbview Canvas context restored.");
+    resize();
+});
 
 window.addEventListener("message", event => {
     const msg = event.data;
@@ -305,8 +316,8 @@ function tokenizeJS(text, lang) {
     for (let i = 0; i < tokens.length; i++) {
         // Property access: word after .
         if (tokens[i].text === "." && i + 1 < tokens.length &&
-            (tokens[i+1].category === "variable" || tokens[i+1].category === "type")) {
-            tokens[i+1].category = "property";
+            (tokens[i + 1].category === "variable" || tokens[i + 1].category === "type")) {
+            tokens[i + 1].category = "property";
         }
         // Function calls: word before (
         if (tokens[i].category === "variable" || tokens[i].category === "type" || tokens[i].category === "property") {
@@ -451,7 +462,7 @@ function fitPathText(path, maxWidth) {
     const parts = path.split("/");
     const filename = parts.pop();
     const directory = parts.join("/");
-    
+
     if (ctx.measureText(filename).width > maxWidth) {
         let fitName = filename;
         while (fitName.length > 0 && ctx.measureText(fitName + "...").width > maxWidth) {
@@ -459,11 +470,11 @@ function fitPathText(path, maxWidth) {
         }
         return fitName + "...";
     }
-    
+
     let left = 1;
     let right = directory.length;
     let bestFit = "..." + filename;
-    
+
     while (left <= right) {
         const mid = Math.floor((left + right) / 2);
         const candidate = directory.substring(0, mid) + "..." + filename;
@@ -530,15 +541,17 @@ function render() {
 
         const col = slot[0];
         const row = slot[1];
+        const nCells = file.nCells || 1;
 
         const x = sideMargin + col * cellW;
         const y = topMargin + row * cellH;
+        const fileH = cellH * nCells;
 
         file._cell = {
             x,
             y,
             w: cellW,
-            h: cellH
+            h: fileH
         };
 
         const isContentMatch = queryActive && file.lines.some(l => l.text.toLowerCase().includes(searchQuery));
@@ -556,7 +569,7 @@ function render() {
 
         // Draw card background
         ctx.fillStyle = "#1e1e24";
-        ctx.fillRect(x + 4, y + 4, cellW - 8, cellH - 8);
+        ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
 
         // Border rendering prioritisation
         if (queryActive && isSearchMatch) {
@@ -572,21 +585,39 @@ function render() {
             ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
             ctx.lineWidth = 1;
         }
-        ctx.strokeRect(x + 4, y + 4, cellW - 8, cellH - 8);
+        ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
 
         ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
         ctx.font = "10px system-ui, sans-serif";
 
-        const label = fitPathText(file.path, cellW - 24);
+        const label = fitPathText(file.path, cellW - 36);
 
         ctx.fillText(label, x + 10, y + 18);
+
+        // Draw close '×' button if tab is open
+        if (isOpen) {
+            const closeBtnX = x + cellW - 20;
+            const closeBtnY = y + 10;
+            file._closeBtn = {
+                x: closeBtnX,
+                y: closeBtnY,
+                w: 12,
+                h: 12
+            };
+
+            ctx.fillStyle = "#707075";
+            ctx.font = "12px system-ui, sans-serif";
+            ctx.fillText("×", closeBtnX, closeBtnY + 8);
+        } else {
+            delete file._closeBtn;
+        }
 
         drawMinimap(
             file,
             x + 10,
             y + 24,
             Math.max(1, cellW - 20),
-            Math.max(1, cellH - 34)
+            Math.max(1, fileH - 34)
         );
 
         ctx.restore();
@@ -613,7 +644,33 @@ canvas.addEventListener("click", event => {
             py >= c.y &&
             py <= c.y + c.h
         ) {
-            const minimapTop = c.y + 24;
+            // Check if click was on close '×' button
+            const cb = file._closeBtn;
+            if (cb && px >= cb.x - 4 && px <= cb.x + cb.w + 4 && py >= cb.y - 4 && py <= cb.y + cb.h + 4) {
+                vscode.postMessage({
+                    command: "close",
+                    uri: file.uri
+                });
+                return;
+            }
+
+            const headerHeight = 24;
+            const isHeaderClick = py < c.y + headerHeight;
+
+            if (isHeaderClick) {
+                // Clicked the file path/folder header bar -> isolate parent folder
+                const lastSlash = file.path.lastIndexOf('/');
+                if (lastSlash !== -1) {
+                    const folder = file.path.substring(0, lastSlash + 1);
+                    focusedFolder = folder;
+                    updateBreadcrumbs();
+                    render();
+                }
+                return;
+            }
+
+            // Clicked inside the minimap body -> jump to line in document
+            const minimapTop = c.y + headerHeight;
             const minimapHeight = Math.max(1, c.h - 34);
 
             const relativeY = Math.max(
@@ -635,8 +692,9 @@ canvas.addEventListener("click", event => {
     }
 });
 
-canvas.addEventListener("dblclick", event => {
-    if (!data) {
+// Middle-click (auxclick) to close tab
+canvas.addEventListener("auxclick", event => {
+    if (!data || event.button !== 1) { // 1 = middle mouse button
         return;
     }
 
@@ -655,12 +713,12 @@ canvas.addEventListener("dblclick", event => {
             py >= c.y &&
             py <= c.y + c.h
         ) {
-            const lastSlash = file.path.lastIndexOf('/');
-            if (lastSlash !== -1) {
-                const folder = file.path.substring(0, lastSlash + 1);
-                focusedFolder = folder;
-                updateBreadcrumbs();
-                render();
+            const isOpen = openFiles.includes(file.uri);
+            if (isOpen) {
+                vscode.postMessage({
+                    command: "close",
+                    uri: file.uri
+                });
             }
             return;
         }
@@ -706,7 +764,9 @@ canvas.addEventListener("mousemove", event => {
         const start = Math.max(0, hoveredLineIdx - 7);
         const end = Math.min(hoveredFile.lineCount - 1, hoveredLineIdx + 7);
 
-        let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})</div>`;
+        const isOpen = openFiles.includes(hoveredFile.uri);
+        const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
+        let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
         for (let i = start; i <= end; i++) {
             const line = hoveredFile.lines[i];
             const isHoveredLine = i === hoveredLineIdx;
