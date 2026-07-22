@@ -82,15 +82,16 @@ Webview panel ("thumbview")
  └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines") ──┐
                                                                                                        │
 media/overview.js (webview/browser side)                                                               │
- ├─ Receives the messages above, re-tokenizes each line client-side                                    │
- │  (its own regex-based tokenizeJS/tokenizeCSS/tokenizeHTML etc.)                                     │
- │  and draws everything to a single <canvas> every frame.                                             │
+ ├─ Receives the messages above (including openState with viewLocations { startLine, endLine }),       │
+ │  re-tokenizes each line client-side and draws everything to a single <canvas> every frame.          │
+ ├─ Renders a transparent gray viewport band representing the editor's visible scroll range.           │
  ├─ Displays a custom right-click context menu with VS Code Explorer options:                          │
  │  (Open, Open to Side, Open Preview, Select for Compare, Compare with Selected,                      │
  │   Reveal in Explorer, Open Containing Folder, Cut, Copy, Copy Path, Copy Rel Path,                  │
  │   Rename..., Delete, Ignore in Thumbview).                                                           │
- └─ postMessage("ready" | "jump" | "close" | "getHoverLines" | "openPreview" | ...) ───────────────────┘
+ └─ postMessage("ready" | "jump" | "switchTab" | "close" | "getHoverLines" | "openPreview" | ...) ───────┘
       "jump"          -> opens doc in pinned tab (preview: false), reveals line, flashes match lines.
+      "switchTab"     -> switches focus directly to an open editor tab without altering scroll or cursor.
       "getHoverLines" -> requests host to fetch lines beyond initial 2000-line scan cap for hover tooltip.
       "close"         -> closes matching tab across all tab groups.
 ```
@@ -98,7 +99,7 @@ media/overview.js (webview/browser side)                                        
 ### Cross-module interface
 
 The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`, `"setFocusedFolder"`, `"hoverLines"`,
-`"ready"`, `"jump"`, `"close"`, `"getHoverLines"`, `"openPreview"`, `"openToSide"`, `"revealInFiles"`, `"openContainingFolder"`,
+`"ready"`, `"jump"`, `"switchTab"`, `"close"`, `"getHoverLines"`, `"openPreview"`, `"openToSide"`, `"revealInFiles"`, `"openContainingFolder"`,
 `"renameFile"`, `"deleteFile"`, `"ignoreFile"`, `"copyPath"`, `"copyRelativePath"`, `"copyFile"`, `"cutFile"`,
 `"selectForCompare"`, `"compareWithSelected"`) is implicit string-literal matching between `extension.ts`
 and `media/overview.js`. When adding a command or changing an existing one's shape, note its fields in a

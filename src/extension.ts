@@ -62,6 +62,9 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     ];
 
+    // Map of open file URIs to their active visible viewport ranges { startLine, endLine, scrollLine }
+    let viewLocations: { [uri: string]: { startLine: number; endLine: number; scrollLine: number } } = {};
+
     const getOpenTabUris = (): string[] => {
         const uris = new Set<string>();
         for (const group of vscode.window.tabGroups.all) {
@@ -75,11 +78,12 @@ export async function activate(context: vscode.ExtensionContext) {
     };
 
     const sendOpenState = () => {
+        updateVisibleRanges();
         if (activePanel) {
             activePanel.webview.postMessage({
                 command: "openState",
                 openFiles: getOpenTabUris(),
-                cursorLocations
+                viewLocations
             });
         }
     };
@@ -148,11 +152,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 });
             }
 
-            // Send open files list & cursor positions
+            // Send open files list & viewport ranges
             panel.webview.postMessage({
                 command: "openState",
                 openFiles: getOpenTabUris(),
-                cursorLocations
+                viewLocations
             });
 
             // Send active editor file URI
@@ -208,6 +212,15 @@ export async function activate(context: vscode.ExtensionContext) {
                     refreshRepositoryMap(panel);
                 }
 
+                if (msg.command === "switchTab") {
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(msg.uri));
+                        await vscode.window.showTextDocument(doc, { preview: false });
+                    } catch (err: any) {
+                        console.error("THUMBVIEW SWITCH TAB ERROR:", err);
+                    }
+                }
+
                 if (msg.command === "jump") {
                     try {
                         const doc = await vscode.workspace.openTextDocument(
@@ -220,11 +233,8 @@ export async function activate(context: vscode.ExtensionContext) {
                             0,
                             Math.min(Number(msg.line) || 0, doc.lineCount - 1)
                         );
-
                         const pos = new vscode.Position(safeLine, 0);
-
                         editor.selection = new vscode.Selection(pos, pos);
-
                         editor.revealRange(
                             new vscode.Range(pos, pos),
                             vscode.TextEditorRevealType.InCenter
@@ -636,10 +646,34 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(configDisposable);
 
+    const updateVisibleRanges = (editor?: vscode.TextEditor | undefined) => {
+        for (const visibleEditor of vscode.window.visibleTextEditors) {
+            if (visibleEditor.visibleRanges.length > 0) {
+                const uri = visibleEditor.document.uri.toString();
+                const primaryRange = visibleEditor.visibleRanges[0];
+                viewLocations[uri] = {
+                    startLine: primaryRange.start.line,
+                    endLine: primaryRange.end.line,
+                    scrollLine: primaryRange.start.line
+                };
+            }
+        }
+        if (editor && editor.visibleRanges.length > 0) {
+            const uri = editor.document.uri.toString();
+            const primaryRange = editor.visibleRanges[0];
+            viewLocations[uri] = {
+                startLine: primaryRange.start.line,
+                endLine: primaryRange.end.line,
+                scrollLine: primaryRange.start.line
+            };
+        }
+    };
+
     // Watch active editor changes
-    const editorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
+    const editorDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
+        updateVisibleRanges(editor);
         if (activePanel) {
-            const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
+            const activeUri = editor?.document.uri.toString() || null;
             activePanel.webview.postMessage({
                 command: "activeFile",
                 uri: activeUri
@@ -649,23 +683,12 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(editorDisposable);
 
-    // Watch cursor selection changes (debounced 150ms — much shorter than the file
-    // watcher's 800ms, since this only cheaply re-sends the current cursor map rather
-    // than re-scanning the whole workspace)
-    let cursorDebounce: NodeJS.Timeout | undefined;
-    const selectionDisposable = vscode.window.onDidChangeTextEditorSelection(event => {
-        const uri = event.textEditor.document.uri.toString();
-        const line = event.selections[0].active.line;
-        cursorLocations[uri] = line;
-
-        if (cursorDebounce) {
-            clearTimeout(cursorDebounce);
-        }
-        cursorDebounce = setTimeout(() => {
-            sendOpenState();
-        }, 150);
+    // Watch text editor visible range changes (scroll/viewport movements)
+    const visibleRangesDisposable = vscode.window.onDidChangeTextEditorVisibleRanges(event => {
+        updateVisibleRanges(event.textEditor);
+        sendOpenState();
     });
-    context.subscriptions.push(selectionDisposable);
+    context.subscriptions.push(visibleRangesDisposable);
 
     // Watch tab changes
     const tabDisposable = vscode.window.tabGroups.onDidChangeTabs(() => {

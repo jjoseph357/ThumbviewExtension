@@ -91,6 +91,7 @@ canvas.addEventListener("contextrestored", () => {
 // — see CLAUDE.md's "Cross-module interface" note.
 let hoverLineCache = {}; // Cache of fetched line ranges for long files { uri: { lineIdx: lineObj } }
 let pendingHoverRequest = null;
+let viewLocations = {}; // Map of file URIs to current visible range { startLine, endLine }
 
 window.addEventListener("message", event => {
     const msg = event.data;
@@ -114,7 +115,7 @@ window.addEventListener("message", event => {
 
     if (msg.command === "openState") {
         openFiles = msg.openFiles || [];
-        cursorLocations = msg.cursorLocations || {};
+        viewLocations = msg.viewLocations || {};
         render();
     }
 
@@ -495,22 +496,33 @@ function drawMinimap(file, x, y, w, h) {
         }
     }
 
-    // Highlight cursor location in transparent gray if the file tab is open (highlighted orange)
+    // Highlight editor visible viewport range in transparent gray overlay if file is open
     const isFileOpen = openFiles.includes(file.uri);
-    if (isFileOpen && (file.uri in cursorLocations)) {
+    if (isFileOpen && (file.uri in viewLocations)) {
         const totalRealLines = Math.max(file.lineCount || lines.length, 1);
         const realStepY = h / totalRealLines;
-        const cursorLine = cursorLocations[file.uri];
-        const startL = Math.max(0, cursorLine - 15);
-        const endL = Math.min(totalRealLines - 1, cursorLine + 15);
+        const viewLoc = viewLocations[file.uri];
+        const startL = Math.max(0, viewLoc.startLine);
+        const endL = Math.min(totalRealLines - 1, viewLoc.endLine);
 
-        ctx.fillStyle = "rgba(255, 255, 255, 0.22)"; // Transparent gray overlay
+        const bandY = y + startL * realStepY;
+        const bandH = Math.max((endL - startL + 1) * realStepY, 4.0);
+
+        // Store bounding rect of view band on cell for click detection
+        file._cell._viewBand = {
+            y: bandY,
+            h: bandH
+        };
+
+        ctx.fillStyle = "rgba(255, 255, 255, 0.22)"; // Transparent gray viewport overlay
         ctx.fillRect(
             x,
-            y + startL * realStepY,
+            bandY,
             w,
-            Math.max((endL - startL + 1) * realStepY, 4.0)
+            bandH
         );
+    } else if (file._cell) {
+        delete file._cell._viewBand;
     }
 
     ctx.restore();
@@ -739,6 +751,15 @@ canvas.addEventListener("click", event => {
                     updateBreadcrumbs();
                     render();
                 }
+                return;
+            }
+
+            // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
+            if (c._viewBand && py >= c._viewBand.y && py <= c._viewBand.y + c._viewBand.h) {
+                vscode.postMessage({
+                    command: "switchTab",
+                    uri: file.uri
+                });
                 return;
             }
 

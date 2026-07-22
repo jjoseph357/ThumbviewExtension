@@ -114,3 +114,4 @@ entry into a dedicated section above once it's substantial enough to warrant one
 - **Pinned Tabs on Jump**: Opened files with `{ preview: false }` so VS Code keeps tabs open and preserves active tab history.
 - **Full Explorer Context Menu & Sidebar Views**: Integrated custom context menu and sidebar TreeDataProviders (`thumbview-directories`, `thumbview-ignores`) for workspace management.
 - **Scanner Safety Caps & Dynamic Hover Fetching**: Added file size caps (>2MB), line scan caps (2,000 lines), line length truncation (300 chars), and `getHoverLines` dynamic IPC fetching for overlay previews.
+- **Editor Viewport Overlay & Return Click**: Tracked `vscode.window.onDidChangeTextEditorVisibleRanges` to display a transparent gray viewport band representing exact editor view bounds. Clicking directly within the gray band returns the user precisely to their previous scroll position in the document.
