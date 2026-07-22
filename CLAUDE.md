@@ -67,49 +67,40 @@ and the webview (browser JS, `media/overview.js`, not compiled/bundled, loaded a
 
 ```
 extension.ts (host)
- ├─ scanRepository()        [scanner.ts]         walks the workspace, applies a hand-rolled
- │                                                .gitignore emulation, reads files, splits
- │                                                into lines, coarsely categorizes each line
- │                                                (comment/import/function/class/control-flow/
- │                                                normal) into RepoFile/MiniLine.
- ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9
- │                                                grid of [col,row] slots, filled row-by-row
- │                                                (why growth never repositions an existing
- │                                                file: see DESIGN.md).
- ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: files with more lines
- │                                                occupy multiple vertically-stacked cells
- │                                                (cellsNeeded), placed column-major; per-file
- │                                                cell allocations/row count persisted across
- │                                                rescans.
- └─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across
-                                                  rescans by backfilling "holes" (why: see
-                                                  DESIGN.md), persisted under the key
-                                                  "repomap.seenFiles" (see Terminology below).
+ ├─ scanRepository()        [scanner.ts]         walks the workspace, applies .gitignore emulation
+ │                                                (supporting negation patterns '!'), respects custom
+ │                                                thumbview.ignorePatterns, reads files, splits into lines.
+ ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9 grid slots.
+ ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
+ ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
+ ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view.
+ └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical,
+                                                  with cumulative file counts including subdirectories).
 
 Webview panel ("thumbview")
- └─ postMessage("data" | "status" | "activeFile" | "openState") ──────┐
-                                                                       │
-media/overview.js (webview/browser side)                             │
- ├─ Receives the messages above, re-tokenizes each line client-side   │
- │  (its own regex-based tokenizeJS/tokenizeCSS/tokenizeHTML etc.)    │
- │  and draws everything to a single <canvas> every frame.            │
- ├─ Has its own inline buildStableGrid() duplicate, used only when a  │
- │  folder is "focused" (breadcrumb drill-down) — that subset needs   │
- │  its own layout the extension host never computed.                │
- └─ postMessage("ready" | "jump" | "close") back to the extension ────┘
-      "jump"  -> extension opens the doc, moves the cursor, and flashes
-                 matching lines pink via 4 staged TextEditorDecorationTypes
-                 (extension.ts, searchFlashSteps).
-      "close" -> extension closes the matching tab across all tab groups.
+ └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder") ──┐
+                                                                                       │
+media/overview.js (webview/browser side)                                               │
+ ├─ Receives the messages above, re-tokenizes each line client-side                    │
+ │  (its own regex-based tokenizeJS/tokenizeCSS/tokenizeHTML etc.)                     │
+ │  and draws everything to a single <canvas> every frame.                             │
+ ├─ Displays a custom right-click context menu with VS Code Explorer options:          │
+ │  (Open, Open to Side, Open Preview, Select for Compare, Compare with Selected,      │
+ │   Reveal in Explorer, Open Containing Folder, Cut, Copy, Copy Path, Copy Rel Path,  │
+ │   Rename..., Delete, Ignore in Thumbview).                                           │
+ └─ postMessage("ready" | "jump" | "close" | "openPreview" | "openToSide" | ...) ──────┘
+      "jump"  -> opens doc in pinned tab (preview: false), reveals line, flashes match lines.
+      "close" -> closes matching tab across all tab groups.
 ```
 
 ### Cross-module interface
 
-The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`, `"jump"`,
-`"close"`, `"ready"`) is implicit string-literal matching between `extension.ts` and `media/
-overview.js` — there's no shared type to catch a typo or drift at compile time. When adding
-a command or changing an existing one's shape, note its fields in a short comment at both
-ends: the `postMessage(...)` call site in `extension.ts`, and the matching branch in
+The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`, `"setFocusedFolder"`,
+`"ready"`, `"jump"`, `"close"`, `"openPreview"`, `"openToSide"`, `"revealInFiles"`, `"openContainingFolder"`,
+`"renameFile"`, `"deleteFile"`, `"ignoreFile"`, `"copyPath"`, `"copyRelativePath"`, `"copyFile"`, `"cutFile"`,
+`"selectForCompare"`, `"compareWithSelected"`) is implicit string-literal matching between `extension.ts`
+and `media/overview.js`. When adding a command or changing an existing one's shape, note its fields in a
+short comment at both ends: the `postMessage(...)` call site in `extension.ts`, and the matching branch in
 `overview.js`'s message listener.
 
 ### Non-obvious things worth knowing before changing this code
@@ -119,9 +110,10 @@ ends: the `postMessage(...)` call site in `extension.ts`, and the matching branc
   DESIGN.md's "Duplicated grid/tokenizer logic".
 - **`scanner.ts`'s per-line `category` field** is computed but not consumed anywhere — see
   the comment at its definition, and DESIGN.md's Known Limitations, before extending it.
-- **`shouldIgnore` in `scanner.ts`** doesn't handle `.gitignore` negation patterns (`!foo`)
-  — known limitation, not a bug to silently "fix" without checking callers. See DESIGN.md's
-  "Hand-rolled .gitignore emulation".
+- **`shouldIgnore` in `scanner.ts`** supports `.gitignore` negation patterns (`!foo`) evaluated
+  sequentially in order (later matching rules override earlier ones).
+- **Opening files from Thumbview** uses `{ preview: false }` so tabs are opened as pinned tabs,
+  populating VS Code's tab groups and recency history properly.
 - **Layout mode** is a user setting (`thumbview.layoutMode`), read fresh on every call.
   Switching modes clears the persisted spanning-grid allocations (`repomap
   .spanningAllocations`, `repomap.spanningRows`).

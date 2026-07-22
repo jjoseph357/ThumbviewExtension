@@ -65,32 +65,26 @@ file's slot. Backfilling a hole means only the newly-added file's position is
 exists for when a user *does* want to intentionally compact and reset — e.g. after a
 lot of churn has left many holes and the grid feels sparse.
 
-## Hand-rolled `.gitignore` emulation instead of a library
+## Hand-rolled `.gitignore` emulation & custom ignore patterns
 
-`scanner.ts`'s `shouldIgnore` is a quick glob-to-regex translator rather than a
-dependency on a maintained gitignore-parsing library. It's known incomplete — no
-negation pattern (`!foo`) support (see the comment in `scanner.ts`). Accepted for now
-because the main failure mode is a false-negative (a file that should be ignored but
-isn't), which just adds noise to the grid rather than breaking anything. Revisit if
-this becomes a real pain point, or swap in a maintained library if negation support is
-needed.
+`scanner.ts`'s `shouldIgnore` translates glob patterns to regular expressions without external dependencies.
+Rules are evaluated sequentially in order, supporting negation patterns (`!pattern`) where subsequent rules
+override preceding ones. In addition to workspace `.gitignore` files, custom ignore patterns defined in
+`thumbview.ignorePatterns` are combined into the ignore filter and managed visually in the sidebar tree view.
 
-## Persisted state keys keep the pre-rename "repomap" name
+## Sidebar Tree Views & Navigation
 
-The extension was renamed from **Repository Map** (`repomap`) to **Thumbview** after
-users may already have had state persisted under the old name. Renaming
-`context.workspaceState` keys would silently drop existing users' saved file
-order/layout on their next update, so they were deliberately left as `"repomap.*"`
-rather than "cleaned up" for cosmetic consistency. See CLAUDE.md's Terminology section
-for the specific keys, and what a safe migration would need to do.
+To improve navigation in large repositories where canvas headers are small:
+1. **Directory Navigation Tree**: Built hierarchically in `directoryProvider.ts`. Focuses the Thumbview canvas
+   to specific folders with accurate cumulative file counts (including subdirectories).
+2. **Ignored Files & Directories Tree**: Built in `ignoreProvider.ts`. Allows adding or removing ignore patterns directly from the sidebar.
 
-## Search/highlight color choices
+## Webview Context Menu & Pinned Editors
 
-Pink (`#ec4899`) = search match, purple (`#a855f7`) = active editor tab, orange
-(`#f97316`) = an open-but-inactive tab. Chosen to be visually distinguishable from each
-other at a glance across many small tiles. The canvas draws its own fixed dark palette
-rather than trying to match the user's actual VS Code theme — reliably deriving a
-matching palette from an arbitrary theme isn't attempted here.
+Right-clicking minimap file cards triggers a custom HTML context menu supporting standard VS Code Explorer
+actions (Open, Open to Side, Open Preview, Select for Compare, Compare with Selected, Reveal in Explorer,
+Open Containing Folder, Cut, Copy, Copy Path, Copy Relative Path, Rename..., Delete, Ignore in Thumbview).
+Jumping to files opens them with `{ preview: false }` to ensure tabs pin permanently and populate recency history.
 
 ## Known limitations / accepted tradeoffs
 
@@ -99,7 +93,6 @@ matching palette from an arbitrary theme isn't attempted here.
 - **`MiniLine.category`** (`scanner.ts`) is computed host-side but not read by the
   webview, which does its own independent tokenization. Left unresolved as either dead
   code or an unfinished feature — see the comment at its definition.
-- **`.gitignore` negation patterns are unsupported** (see above).
 - **No shared type definitions for the `postMessage` protocol** between `extension.ts`
   and `media/overview.js` (see CLAUDE.md's "Cross-module interface" note) — protocol
   drift is caught only by manual review/testing, not the compiler.
@@ -110,4 +103,6 @@ Record new design decisions here as they're made — before or while implementin
 not only after. For each: the decision, the alternatives considered, and why. Move an
 entry into a dedicated section above once it's substantial enough to warrant one.
 
-*(None yet.)*
+- **`.gitignore` Negation Pattern Support**: Updated `shouldIgnore` to evaluate rules sequentially so `!pattern` rules explicitly override earlier matches.
+- **Pinned Tabs on Jump**: Opened files with `{ preview: false }` so VS Code keeps tabs open and preserves active tab history.
+- **Full Explorer Context Menu & Sidebar Views**: Integrated custom context menu and sidebar TreeDataProviders (`thumbview-directories`, `thumbview-ignores`) for workspace management.
