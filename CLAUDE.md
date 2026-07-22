@@ -67,9 +67,10 @@ and the webview (browser JS, `media/overview.js`, not compiled/bundled, loaded a
 
 ```
 extension.ts (host)
- ├─ scanRepository()        [scanner.ts]         walks the workspace, applies .gitignore emulation
- │                                                (supporting negation patterns '!'), respects custom
- │                                                thumbview.ignorePatterns, reads files, splits into lines.
+ ├─ scanRepository()        [scanner.ts]         walks workspace, applies .gitignore (including '!'),
+ │                                                respects custom ignorePatterns, enforces safety caps
+ │                                                (max 2MB per file, max 2000 lines sampled evenly spaced
+ │                                                across entire file, max 300 chars per line) while preserving doc.lineCount.
  ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9 grid slots.
  ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
  ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
@@ -78,25 +79,26 @@ extension.ts (host)
                                                   with cumulative file counts including subdirectories).
 
 Webview panel ("thumbview")
- └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder") ──┐
-                                                                                       │
-media/overview.js (webview/browser side)                                               │
- ├─ Receives the messages above, re-tokenizes each line client-side                    │
- │  (its own regex-based tokenizeJS/tokenizeCSS/tokenizeHTML etc.)                     │
- │  and draws everything to a single <canvas> every frame.                             │
- ├─ Displays a custom right-click context menu with VS Code Explorer options:          │
- │  (Open, Open to Side, Open Preview, Select for Compare, Compare with Selected,      │
- │   Reveal in Explorer, Open Containing Folder, Cut, Copy, Copy Path, Copy Rel Path,  │
- │   Rename..., Delete, Ignore in Thumbview).                                           │
- └─ postMessage("ready" | "jump" | "close" | "openPreview" | "openToSide" | ...) ──────┘
-      "jump"  -> opens doc in pinned tab (preview: false), reveals line, flashes match lines.
-      "close" -> closes matching tab across all tab groups.
+ └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines") ──┐
+                                                                                                       │
+media/overview.js (webview/browser side)                                                               │
+ ├─ Receives the messages above, re-tokenizes each line client-side                                    │
+ │  (its own regex-based tokenizeJS/tokenizeCSS/tokenizeHTML etc.)                                     │
+ │  and draws everything to a single <canvas> every frame.                                             │
+ ├─ Displays a custom right-click context menu with VS Code Explorer options:                          │
+ │  (Open, Open to Side, Open Preview, Select for Compare, Compare with Selected,                      │
+ │   Reveal in Explorer, Open Containing Folder, Cut, Copy, Copy Path, Copy Rel Path,                  │
+ │   Rename..., Delete, Ignore in Thumbview).                                                           │
+ └─ postMessage("ready" | "jump" | "close" | "getHoverLines" | "openPreview" | ...) ───────────────────┘
+      "jump"          -> opens doc in pinned tab (preview: false), reveals line, flashes match lines.
+      "getHoverLines" -> requests host to fetch lines beyond initial 2000-line scan cap for hover tooltip.
+      "close"         -> closes matching tab across all tab groups.
 ```
 
 ### Cross-module interface
 
-The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`, `"setFocusedFolder"`,
-`"ready"`, `"jump"`, `"close"`, `"openPreview"`, `"openToSide"`, `"revealInFiles"`, `"openContainingFolder"`,
+The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`, `"setFocusedFolder"`, `"hoverLines"`,
+`"ready"`, `"jump"`, `"close"`, `"getHoverLines"`, `"openPreview"`, `"openToSide"`, `"revealInFiles"`, `"openContainingFolder"`,
 `"renameFile"`, `"deleteFile"`, `"ignoreFile"`, `"copyPath"`, `"copyRelativePath"`, `"copyFile"`, `"cutFile"`,
 `"selectForCompare"`, `"compareWithSelected"`) is implicit string-literal matching between `extension.ts`
 and `media/overview.js`. When adding a command or changing an existing one's shape, note its fields in a
@@ -112,6 +114,9 @@ short comment at both ends: the `postMessage(...)` call site in `extension.ts`, 
   the comment at its definition, and DESIGN.md's Known Limitations, before extending it.
 - **`shouldIgnore` in `scanner.ts`** supports `.gitignore` negation patterns (`!foo`) evaluated
   sequentially in order (later matching rules override earlier ones).
+- **Scanner Safety Limits & Dynamic Hover Fetching**: Files >2MB are skipped, line length is capped at 300 chars,
+  and initial line rendering is capped at 2,000 lines per file to prevent memory crashes. Lines beyond 2,000 are
+  fetched on demand via `getHoverLines` IPC so the hover magnifying tooltip works for all lines in files up to 4000+ lines.
 - **Opening files from Thumbview** uses `{ preview: false }` so tabs are opened as pinned tabs,
   populating VS Code's tab groups and recency history properly.
 - **Layout mode** is a user setting (`thumbview.layoutMode`), read fresh on every call.

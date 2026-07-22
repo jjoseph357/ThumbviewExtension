@@ -86,6 +86,13 @@ actions (Open, Open to Side, Open Preview, Select for Compare, Compare with Sele
 Open Containing Folder, Cut, Copy, Copy Path, Copy Relative Path, Rename..., Delete, Ignore in Thumbview).
 Jumping to files opens them with `{ preview: false }` to ensure tabs pin permanently and populate recency history.
 
+## Host Safety Limits & Dynamic Hover Fetching
+
+To prevent extension crashes or main thread freezes when scanning repositories with massive files or long minified code:
+1. **File Size Cap**: Files over **2 MB** in size are skipped from initial workspace scanning.
+2. **Line Length Truncation**: Lines are truncated at **300 characters** for minimap rendering.
+3. **Evenly Spaced Line Sampling & Dynamic IPC Fetching**: For files over 2,000 lines, initial scanning samples up to **2,000 lines evenly spaced across the entire file** using uniform striding (`step = doc.lineCount / 2000`). This preserves the visual shape and structure of long files from top to bottom on the minimap card without overloading memory. `doc.lineCount` remains untruncated so tile heights and scrolling positions remain accurate. Any missing lines requested during hover overlay browsing are dynamically fetched on demand via `getHoverLines` IPC.
+
 ## Known limitations / accepted tradeoffs
 
 - **No automated tests** (see README's "Notes" section). `layout.ts`/`state.ts` are
@@ -106,3 +113,4 @@ entry into a dedicated section above once it's substantial enough to warrant one
 - **`.gitignore` Negation Pattern Support**: Updated `shouldIgnore` to evaluate rules sequentially so `!pattern` rules explicitly override earlier matches.
 - **Pinned Tabs on Jump**: Opened files with `{ preview: false }` so VS Code keeps tabs open and preserves active tab history.
 - **Full Explorer Context Menu & Sidebar Views**: Integrated custom context menu and sidebar TreeDataProviders (`thumbview-directories`, `thumbview-ignores`) for workspace management.
+- **Scanner Safety Caps & Dynamic Hover Fetching**: Added file size caps (>2MB), line scan caps (2,000 lines), line length truncation (300 chars), and `getHoverLines` dynamic IPC fetching for overlay previews.

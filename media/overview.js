@@ -89,6 +89,9 @@ canvas.addEventListener("contextrestored", () => {
 // error text), "data" (the full file/layout payload), "activeFile" (URI of the focused
 // editor), "openState" (open tab URIs + cursor lines). No shared type with extension.ts
 // — see CLAUDE.md's "Cross-module interface" note.
+let hoverLineCache = {}; // Cache of fetched line ranges for long files { uri: { lineIdx: lineObj } }
+let pendingHoverRequest = null;
+
 window.addEventListener("message", event => {
     const msg = event.data;
 
@@ -100,6 +103,7 @@ window.addEventListener("message", event => {
     if (msg.command === "data") {
         data = msg;
         statusText = "";
+        hoverLineCache = {};
         render();
     }
 
@@ -118,6 +122,21 @@ window.addEventListener("message", event => {
         focusedFolder = msg.folder || "";
         updateBreadcrumbs();
         render();
+    }
+
+    if (msg.command === "hoverLines") {
+        if (!hoverLineCache[msg.uri]) {
+            hoverLineCache[msg.uri] = {};
+        }
+        if (msg.lines && Array.isArray(msg.lines)) {
+            for (let idx = 0; idx < msg.lines.length; idx++) {
+                hoverLineCache[msg.uri][msg.start + idx] = msg.lines[idx];
+            }
+        }
+        // Force hover re-evaluation to update tooltip with newly fetched lines
+        if (lastMousePos) {
+            updateHoverTooltip(lastMousePos.x, lastMousePos.y);
+        }
     }
 });
 
@@ -411,7 +430,7 @@ function drawMinimap(file, x, y, w, h) {
     ctx.clip();
 
     const lines = file.lines || [];
-    const lineCount = Math.max(file.lineCount || lines.length, 1);
+    const lineCount = Math.max(lines.length, 1);
     const stepY = h / lineCount;
     const maxLineChars = 120;
 
@@ -479,16 +498,18 @@ function drawMinimap(file, x, y, w, h) {
     // Highlight cursor location in transparent gray if the file tab is open (highlighted orange)
     const isFileOpen = openFiles.includes(file.uri);
     if (isFileOpen && (file.uri in cursorLocations)) {
+        const totalRealLines = Math.max(file.lineCount || lines.length, 1);
+        const realStepY = h / totalRealLines;
         const cursorLine = cursorLocations[file.uri];
         const startL = Math.max(0, cursorLine - 15);
-        const endL = Math.min(lineCount - 1, cursorLine + 15);
+        const endL = Math.min(totalRealLines - 1, cursorLine + 15);
 
         ctx.fillStyle = "rgba(255, 255, 255, 0.22)"; // Transparent gray overlay
         ctx.fillRect(
             x,
-            y + startL * stepY,
+            y + startL * realStepY,
             w,
-            Math.max((endL - startL + 1) * stepY, 4.0)
+            Math.max((endL - startL + 1) * realStepY, 4.0)
         );
     }
 
@@ -777,12 +798,14 @@ canvas.addEventListener("auxclick", event => {
     }
 });
 
-canvas.addEventListener("mousemove", event => {
+let lastMousePos = null;
+
+function updateHoverTooltip(clientX, clientY) {
     if (!data) return;
 
     const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
 
     const filteredFiles = getFilteredFiles();
     let hoveredFile = null;
@@ -812,12 +835,8 @@ canvas.addEventListener("mousemove", event => {
         }
     }
 
-    // Magnifying tooltip: re-renders the real (untruncated) text for the ~15 lines
-    // around the hovered one, re-tokenized at readable size, since the minimap itself
-    // may be too small/dense to read directly.
     if (hoveredFile && hoveredLineIdx >= 0 && hoveredLineIdx < hoveredFile.lineCount) {
         const radius = 12;
-        const totalLinesWanted = radius * 2 + 1;
         let start = hoveredLineIdx - radius;
         let end = hoveredLineIdx + radius;
 
@@ -830,13 +849,39 @@ canvas.addEventListener("mousemove", event => {
             end = hoveredFile.lineCount - 1;
         }
 
+        // Check if any required lines are missing from both scan results and cache
+        let missingLines = false;
+        const uriCache = hoverLineCache[hoveredFile.uri] || {};
+
+        for (let i = start; i <= end; i++) {
+            if (!hoveredFile.lines[i] && !uriCache[i]) {
+                missingLines = true;
+                break;
+            }
+        }
+
+        if (missingLines) {
+            const reqKey = `${hoveredFile.uri}:${start}:${end}`;
+            if (pendingHoverRequest !== reqKey) {
+                pendingHoverRequest = reqKey;
+                vscode.postMessage({
+                    command: "getHoverLines",
+                    uri: hoveredFile.uri,
+                    start,
+                    end,
+                    requestId: reqKey
+                });
+            }
+        }
+
         const isOpen = openFiles.includes(hoveredFile.uri);
         const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
         let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
+
         for (let i = start; i <= end; i++) {
-            const line = hoveredFile.lines[i];
+            const line = hoveredFile.lines[i] || uriCache[i];
             const isHoveredLine = i === hoveredLineIdx;
-            const lineText = line ? line.text : "";
+            const lineText = line ? line.text : "Loading line...";
             const lang = detectLang(hoveredFile.path);
             const tokens = tokenizeLine(lineText, lang);
 
@@ -879,13 +924,13 @@ canvas.addEventListener("mousemove", event => {
         tooltip.style.display = "block";
 
         let tx;
-        if (event.clientX > window.innerWidth / 2) {
-            tx = event.clientX - tooltip.offsetWidth - 20;
+        if (clientX > window.innerWidth / 2) {
+            tx = clientX - tooltip.offsetWidth - 20;
         } else {
-            tx = event.clientX + 20;
+            tx = clientX + 20;
         }
 
-        let ty = event.clientY + 16;
+        let ty = clientY + 16;
 
         if (ty + tooltip.offsetHeight > window.innerHeight) {
             ty = window.innerHeight - tooltip.offsetHeight - 16;
@@ -896,6 +941,11 @@ canvas.addEventListener("mousemove", event => {
     } else {
         tooltip.style.display = "none";
     }
+}
+
+canvas.addEventListener("mousemove", event => {
+    lastMousePos = { x: event.clientX, y: event.clientY };
+    updateHoverTooltip(event.clientX, event.clientY);
 });
 
 canvas.addEventListener("mouseleave", () => {

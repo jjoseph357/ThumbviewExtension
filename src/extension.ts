@@ -276,8 +276,44 @@ export async function activate(context: vscode.ExtensionContext) {
                         }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(
-                            `Repository Map jump failed: ${err?.message ?? String(err)}`
+                            `Thumbview jump failed: ${err?.message ?? String(err)}`
                         );
+                    }
+                }
+
+                if (msg.command === "getHoverLines") {
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(msg.uri));
+                        const start = Math.max(0, Math.min(Number(msg.start) || 0, doc.lineCount - 1));
+                        const end = Math.max(0, Math.min(Number(msg.end) || 0, doc.lineCount - 1));
+                        const lines: { text: string; indent: number; length: number; category: string }[] = [];
+                        const MAX_LINE_LEN = 500;
+
+                        for (let i = start; i <= end; i++) {
+                            let textLine = doc.lineAt(i).text;
+                            if (textLine.length > MAX_LINE_LEN) {
+                                textLine = textLine.substring(0, MAX_LINE_LEN);
+                            }
+                            const trimmedRight = textLine.trimEnd();
+                            const indent = textLine.length - textLine.trimStart().length;
+                            lines.push({
+                                text: textLine,
+                                indent,
+                                length: trimmedRight.length,
+                                category: "normal"
+                            });
+                        }
+
+                        panel.webview.postMessage({
+                            command: "hoverLines",
+                            requestId: msg.requestId,
+                            uri: msg.uri,
+                            start,
+                            end,
+                            lines
+                        });
+                    } catch (err: any) {
+                        console.error("THUMBVIEW GET HOVER LINES ERROR:", err);
                     }
                 }
 

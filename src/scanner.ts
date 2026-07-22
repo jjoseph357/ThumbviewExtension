@@ -177,14 +177,30 @@ export async function scanRepository(): Promise<RepoFile[]> {
         }
 
         try {
+            const stat = await vscode.workspace.fs.stat(file);
+            // Skip massive files (>2MB) to prevent memory overload
+            if (stat.size > 2 * 1024 * 1024) {
+                continue;
+            }
+
             const doc = await vscode.workspace.openTextDocument(file);
             if (doc.lineCount === 0) {
                 continue;
             }
 
+            const MAX_LINES = 2000;
+            const MAX_LINE_LENGTH = 300;
+            const step = doc.lineCount > MAX_LINES ? doc.lineCount / MAX_LINES : 1;
+
             const rawLines: MiniLine[] = [];
-            for (let i = 0; i < doc.lineCount; i++) {
-                const textLine = doc.lineAt(i).text;
+            for (let idx = 0; idx < Math.min(doc.lineCount, MAX_LINES); idx++) {
+                const i = Math.floor(idx * step);
+                if (i >= doc.lineCount) break;
+
+                let textLine = doc.lineAt(i).text;
+                if (textLine.length > MAX_LINE_LENGTH) {
+                    textLine = textLine.substring(0, MAX_LINE_LENGTH);
+                }
                 const trimmedRight = textLine.trimEnd();
                 const indent = textLine.length - textLine.trimStart().length;
                 const len = trimmedRight.length;
