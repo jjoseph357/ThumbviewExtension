@@ -6,8 +6,43 @@ import { PersistentFileOrder } from "./state";
 import { IgnoreTreeDataProvider, IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeDataProvider, DirectoryTreeItem } from "./directoryProvider";
 
+import * as fs from "fs";
+import * as path from "path";
+
 export async function activate(context: vscode.ExtensionContext) {
     console.log("REPOMAP EXTENSION ACTIVATED");
+
+    // Auto-populate ignorePatterns setting with workspace .gitignore rules once initialized
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders && workspaceFolders.length > 0) {
+        const gitignorePath = path.join(workspaceFolders[0].uri.fsPath, ".gitignore");
+        if (fs.existsSync(gitignorePath)) {
+            try {
+                const content = fs.readFileSync(gitignorePath, "utf-8");
+                const gitignoreRules = content
+                    .split("\n")
+                    .map(line => line.trim())
+                    .filter(line => line && !line.startsWith("#"));
+
+                const config = vscode.workspace.getConfiguration("thumbview");
+                const currentIgnored = config.get<string[]>("ignorePatterns") || [];
+                const updatedIgnored = [...currentIgnored];
+                let changed = false;
+
+                for (const rule of gitignoreRules) {
+                    if (!updatedIgnored.includes(rule)) {
+                        updatedIgnored.push(rule);
+                        changed = true;
+                    }
+                }
+
+                if (changed) {
+                    await config.update("ignorePatterns", updatedIgnored, vscode.ConfigurationTarget.Global);
+                }
+            } catch {
+            }
+        }
+    }
 
     const fileOrder = new PersistentFileOrder();
     const savedOrder = context.workspaceState.get<string[]>("repomap.seenFiles");
@@ -556,16 +591,46 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(setSpanningGridDisposable);
 
-    const ignoreProvider = new IgnoreTreeDataProvider();
-    vscode.window.registerTreeDataProvider("thumbview-ignores", ignoreProvider);
-
     const directoryProvider = new DirectoryTreeDataProvider();
-    vscode.window.registerTreeDataProvider("thumbview-directories", directoryProvider);
+    const directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
+        treeDataProvider: directoryProvider,
+        dragAndDropController: directoryProvider
+    });
+    context.subscriptions.push(directoryTreeView);
+
+    const ignoreProvider = new IgnoreTreeDataProvider(() => {
+        if (activePanel) {
+            refreshRepositoryMap(activePanel);
+        }
+        directoryProvider.refresh();
+    });
+    const ignoreTreeView = vscode.window.createTreeView("thumbview-ignores", {
+        treeDataProvider: ignoreProvider,
+        dragAndDropController: ignoreProvider
+    });
+    context.subscriptions.push(ignoreTreeView);
 
     const refreshProviders = () => {
         ignoreProvider.refresh();
         directoryProvider.refresh();
     };
+
+    const ignoreDirectoryDisposable = vscode.commands.registerCommand("thumbview.ignoreDirectory", async (item?: DirectoryTreeItem) => {
+        const folderPath = item?.folderPath;
+        if (folderPath) {
+            const config = vscode.workspace.getConfiguration("thumbview");
+            const current = config.get<string[]>("ignorePatterns") || [];
+            if (!current.includes(folderPath)) {
+                await config.update("ignorePatterns", [...current, folderPath], vscode.ConfigurationTarget.Global);
+                vscode.window.showInformationMessage(`Added '${folderPath}' to ignore list.`);
+                refreshProviders();
+                if (activePanel) {
+                    refreshRepositoryMap(activePanel);
+                }
+            }
+        }
+    });
+    context.subscriptions.push(ignoreDirectoryDisposable);
 
     const addIgnoreDisposable = vscode.commands.registerCommand("thumbview.addIgnorePattern", async () => {
         const input = await vscode.window.showInputBox({

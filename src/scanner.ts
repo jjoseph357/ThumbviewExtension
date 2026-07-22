@@ -144,29 +144,9 @@ export async function scanRepository(): Promise<RepoFile[]> {
         "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv}/**"
     );
 
-    // Second, finer-grained exclusion layer on top of the glob above: the workspace's
-    // own .gitignore, applied manually via shouldIgnore() since findFiles' exclude glob
-    // can't read an arbitrary file at scan time.
-    let gitignoreRules: string[] = [];
+    // Apply ignore patterns configured in thumbview.ignorePatterns setting
     const config = vscode.workspace.getConfiguration("thumbview");
-    const customIgnored = config.get<string[]>("ignorePatterns") || [];
-    gitignoreRules.push(...customIgnored);
-
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (workspaceFolders && workspaceFolders.length > 0) {
-        const gitignorePath = path.join(workspaceFolders[0].uri.fsPath, ".gitignore");
-        if (fs.existsSync(gitignorePath)) {
-            try {
-                const content = fs.readFileSync(gitignorePath, "utf-8");
-                const fileRules = content
-                    .split("\n")
-                    .map(line => line.trim())
-                    .filter(line => line && !line.startsWith("#"));
-                gitignoreRules.push(...fileRules);
-            } catch {
-            }
-        }
-    }
+    const gitignoreRules = config.get<string[]>("ignorePatterns") || [];
 
     const result: RepoFile[] = [];
 

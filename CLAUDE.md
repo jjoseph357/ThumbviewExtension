@@ -67,16 +67,15 @@ and the webview (browser JS, `media/overview.js`, not compiled/bundled, loaded a
 
 ```
 extension.ts (host)
- ├─ scanRepository()        [scanner.ts]         walks workspace, applies .gitignore (including '!'),
- │                                                respects custom ignorePatterns, enforces safety caps
- │                                                (max 2MB per file, max 2000 lines sampled evenly spaced
- │                                                across entire file, max 300 chars per line) while preserving doc.lineCount.
- ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9 grid slots.
- ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
- ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
- ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view.
- └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical,
-                                                  with cumulative file counts including subdirectories).
+  ├─ scanRepository()        [scanner.ts]         walks workspace, applies custom ignorePatterns setting (pre-populated from .gitignore on startup),
+  │                                                enforces safety caps (max 2MB per file, max 2000 lines sampled evenly spaced
+  │                                                across entire file, max 300 chars per line) while preserving doc.lineCount.
+  ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9 grid slots.
+  ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
+  ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
+  ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view; supports DragAndDropController for dragging folders.
+  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical,
+                                                   with cumulative file counts including subdirectories); supports DragAndDropController.
 
 Webview panel ("thumbview")
  └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines") ──┐

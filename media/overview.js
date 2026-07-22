@@ -469,7 +469,8 @@ function drawMinimap(file, x, y, w, h) {
 
             const useText = stepY >= 2.5;
             if (useText) {
-                ctx.font = `${Math.max(4, Math.floor(stepY * 0.85))}px Consolas, monospace`;
+                const fontSize = Math.min(12, Math.max(4, Math.floor(stepY * 0.85)));
+                ctx.font = `${fontSize}px Consolas, monospace`;
             }
 
             let currentX = startX;
@@ -591,17 +592,11 @@ function render() {
     // "data" message — supports both uniform_grid and spanning_grid modes. Once a
     // folder is focused, that's a subset the host never laid out, so it's repacked
     // on the fly with the local buildStableGrid duplicate (uniform_grid shape only).
-    let gridCols, gridRows, slots;
-    if (!focusedFolder) {
-        gridCols = data.layout.cols;
-        gridRows = data.layout.rows;
-        slots = filteredFiles.map(f => f.slot);
-    } else {
-        const subLayout = buildStableGrid(filteredFiles.length);
-        gridCols = subLayout.cols;
-        gridRows = subLayout.rows;
-        slots = subLayout.slots;
-    }
+    // Use the host-assigned layout geometry and slots (file.slot) for all views so
+    // grid geometry and cell slots remain 100% stable when files or subfolders are ignored.
+    const gridCols = data.layout.cols;
+    const gridRows = data.layout.rows;
+    const slots = filteredFiles.map(f => f.slot);
 
     const topMargin = 64;
     const bottomMargin = 40;
@@ -614,6 +609,11 @@ function render() {
     const cellH = availableH / gridRows;
 
     const queryActive = !!searchQuery;
+
+    // Clear stale cell bounding boxes across all files
+    for (const f of data.files) {
+        delete f._cell;
+    }
 
     for (let i = 0; i < filteredFiles.length; i++) {
         const file = filteredFiles[i];
