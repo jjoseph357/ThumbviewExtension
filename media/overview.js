@@ -19,6 +19,7 @@ let searchQuery = "";
 let focusedFolder = ""; // empty means root
 
 let openFiles = []; // Array of open file URIs (orange borders)
+let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
 
 let searchDebounceTimer = null;
@@ -139,14 +140,26 @@ window.addEventListener("message", event => {
             for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
                 const f = data.files[fIdx];
                 f._lowerPath = f.path ? f.path.toLowerCase() : "";
+                const lang = detectLang(f.path);
+                const textArr = [];
+                if (f.path) textArr.push(f.path.toLowerCase());
                 if (f.lines) {
                     for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
-                        f.lines[lIdx]._lowerText = f.lines[lIdx].text ? f.lines[lIdx].text.toLowerCase() : "";
+                        const l = f.lines[lIdx];
+                        const lower = l.text ? l.text.toLowerCase() : "";
+                        l._lowerText = lower;
+                        l._tokens = tokenizeLine(l.text ? l.text.trimStart() : "", lang);
+                        textArr.push(lower);
                     }
                 }
                 if (f.fullLines) {
-                    f._lowerFullLines = f.fullLines.map(str => str.toLowerCase());
+                    f._lowerFullLines = f.fullLines.map(str => {
+                        const lower = str.toLowerCase();
+                        textArr.push(lower);
+                        return lower;
+                    });
                 }
+                f._combinedText = textArr.join("\n");
             }
         }
         render();
@@ -161,7 +174,10 @@ window.addEventListener("message", event => {
         if ("activeFileUri" in msg) {
             activeFileUri = msg.activeFileUri;
         }
-        openFiles = msg.openFiles || [];
+        if ("openFiles" in msg) {
+            openFiles = msg.openFiles;
+            openFilesSet = new Set(openFiles);
+        }
         viewLocations = msg.viewLocations || {};
         render();
     }
@@ -712,8 +728,7 @@ function drawMinimap(file, x, y, w, h) {
                 Math.max(stepY, 2.0)
             );
         } else {
-            const lang = detectLang(file.path);
-            const tokens = tokenizeLine(trimmedText, lang);
+            const tokens = line._tokens || tokenizeLine(trimmedText, detectLang(file.path));
             const totalTextChars = Math.max(lineTextLength, 1);
 
             const useText = stepY >= 3;
@@ -915,33 +930,15 @@ function render() {
             h: fileH
         };
 
-        const isPathMatch = queryActive && (file._lowerPath ? file._lowerPath.includes(searchQuery) : file.path.toLowerCase().includes(searchQuery));
-        let isContentMatch = false;
-        if (queryActive) {
-            const checkLines = file._lowerFullLines || file.fullLines;
-            if (checkLines) {
-                for (let lIdx = 0; lIdx < checkLines.length; lIdx++) {
-                    const lText = file._lowerFullLines ? checkLines[lIdx] : checkLines[lIdx].toLowerCase();
-                    if (lText.includes(searchQuery)) {
-                        isContentMatch = true;
-                        break;
-                    }
-                }
-            } else {
-                for (let lIdx = 0; lIdx < file.lines.length; lIdx++) {
-                    const l = file.lines[lIdx];
-                    const lText = l._lowerText !== undefined ? l._lowerText : l.text.toLowerCase();
-                    if (lText.includes(searchQuery)) {
-                        isContentMatch = true;
-                        break;
-                    }
-                }
-            }
+        // View Frustum Culling: skip rendering offscreen cards that are outside the visible window
+        if (y + fileH < -50 || y > rectH + 50) {
+            continue;
         }
-        const isSearchMatch = isContentMatch || isPathMatch;
+
+        const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
 
         const isActive = file.uri === activeFileUri;
-        const isOpen = openFiles.includes(file.uri);
+        const isOpen = openFilesSet.has(file.uri);
 
         ctx.save();
 
@@ -972,9 +969,12 @@ function render() {
         ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
         ctx.font = "10px system-ui, sans-serif";
 
-        const label = fitPathText(file.path, cellW - 36);
+        if (file._lastCellW !== cellW || !file._fittedLabel) {
+            file._lastCellW = cellW;
+            file._fittedLabel = fitPathText(file.path, cellW - 36);
+        }
 
-        ctx.fillText(label, x + 10, y + 18);
+        ctx.fillText(file._fittedLabel, x + 10, y + 18);
 
         // Draw close '×' button if tab is open
         if (isOpen) {

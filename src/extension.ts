@@ -104,8 +104,11 @@ export async function activate(context: vscode.ExtensionContext) {
         const uris = new Set<string>();
         for (const group of vscode.window.tabGroups.all) {
             for (const tab of group.tabs) {
-                if (tab.input instanceof vscode.TabInputText) {
-                    uris.add(tab.input.uri.toString());
+                const input: any = tab.input;
+                if (input && input.uri && typeof input.uri.toString === "function") {
+                    uris.add(input.uri.toString());
+                } else if (input && input.resource && typeof input.resource.toString === "function") {
+                    uris.add(input.resource.toString());
                 }
             }
         }
@@ -396,7 +399,9 @@ export async function activate(context: vscode.ExtensionContext) {
                         const tabsToClose: vscode.Tab[] = [];
                         for (const group of vscode.window.tabGroups.all) {
                             for (const tab of group.tabs) {
-                                if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === targetUriStr) {
+                                const input: any = tab.input;
+                                const tabUri = input?.uri?.toString?.() || input?.resource?.toString?.();
+                                if (tabUri === targetUriStr) {
                                     tabsToClose.push(tab);
                                 }
                             }
