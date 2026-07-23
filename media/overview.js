@@ -1131,10 +1131,32 @@ canvas.addEventListener("auxclick", event => {
     }
 });
 
-let lastMousePos = null;
+let isCtrlDown = false;
+let hoverRafId = null;
+
+window.addEventListener("keydown", event => {
+    if (event.key === "Control" || event.ctrlKey) {
+        isCtrlDown = true;
+        if (lastMousePos) {
+            updateHoverTooltip(lastMousePos.x, lastMousePos.y);
+        }
+    }
+});
+
+window.addEventListener("keyup", event => {
+    if (event.key === "Control" || !event.ctrlKey) {
+        isCtrlDown = false;
+        tooltip.style.display = "none";
+    }
+});
 
 function updateHoverTooltip(clientX, clientY) {
     if (!data) return;
+
+    if (!isCtrlDown) {
+        tooltip.style.display = "none";
+        return;
+    }
 
     const rect = canvas.getBoundingClientRect();
     const px = clientX - rect.left;
@@ -1187,7 +1209,7 @@ function updateHoverTooltip(clientX, clientY) {
             end = hoveredFile.lineCount - 1;
         }
 
-        // Check if any required lines are missing from both scan results and cache
+        // Check if any required lines are missing from scan results and cache
         let missingLines = false;
         const uriCache = hoverLineCache[hoveredFile.uri] || {};
 
@@ -1212,7 +1234,7 @@ function updateHoverTooltip(clientX, clientY) {
             }
         }
 
-        const isOpen = openFiles.includes(hoveredFile.uri);
+        const isOpen = openFilesSet.has(hoveredFile.uri);
         const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
         let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
 
@@ -1221,25 +1243,29 @@ function updateHoverTooltip(clientX, clientY) {
             const isHoveredLine = i === hoveredLineIdx;
             const lineText = line ? line.text : "Loading line...";
             const lang = detectLang(hoveredFile.path);
-            const tokens = tokenizeLine(lineText, lang);
 
-            let lineHtml = "";
-            for (const tok of tokens) {
-                let escapedText = tok.text
-                    .replace(/&/g, "&amp;")
-                    .replace(/</g, "&lt;")
-                    .replace(/>/g, "&gt;");
+            if (line && !line._htmlCache) {
+                const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
+                let lineHtml = "";
+                for (const tok of tokens) {
+                    let escapedText = tok.text
+                        .replace(/&/g, "&amp;")
+                        .replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;");
 
-                if (searchQuery && tok.text.toLowerCase().includes(searchQuery)) {
-                    const escapedQuery = searchQuery.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(`(${escapedQuery})`, 'gi');
-                    escapedText = escapedText.replace(regex, `<span style="background: rgba(236, 72, 153, 0.35); color: #f472b6; font-weight: 600; border-radius: 2px; padding: 0 2px;">$1</span>`);
+                    if (searchQuery && tok.text.toLowerCase().includes(searchQuery)) {
+                        const escapedQuery = searchQuery.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+                        const regex = new RegExp(`(${escapedQuery})`, 'gi');
+                        escapedText = escapedText.replace(regex, `<span style="background: rgba(236, 72, 153, 0.35); color: #f472b6; font-weight: 600; border-radius: 2px; padding: 0 2px;">$1</span>`);
+                    }
+
+                    const color = colorForCategory(tok.category, tok.isKey);
+                    lineHtml += `<span style="color: ${color}">${escapedText}</span>`;
                 }
-
-                const color = colorForCategory(tok.category, tok.isKey);
-                lineHtml += `<span style="color: ${color}">${escapedText}</span>`;
+                line._htmlCache = lineHtml || " ";
             }
 
+            const lineHtml = (line && line._htmlCache) ? line._htmlCache : lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
             const isMatchLine = searchQuery && lineText.toLowerCase().includes(searchQuery);
             let bgStyle = "";
             let prefix = "  ";
@@ -1255,7 +1281,7 @@ function updateHoverTooltip(clientX, clientY) {
                 bgStyle = "background: rgba(236, 72, 153, 0.2); display: inline-block; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px;";
             }
 
-            tooltipHtml += `<div style="${bgStyle}">${prefix}${lineHtml || " "}</div>`;
+            tooltipHtml += `<div style="${bgStyle}">${prefix}${lineHtml}</div>`;
         }
 
         tooltip.innerHTML = tooltipHtml;
@@ -1295,9 +1321,27 @@ function updateHoverTooltip(clientX, clientY) {
     }
 }
 
+let lastFocusRequestTime = 0;
+function checkWindowFocus() {
+    if (!document.hasFocus()) {
+        const now = Date.now();
+        if (now - lastFocusRequestTime > 500) { // Throttle IPC focus messages
+            lastFocusRequestTime = now;
+            vscode.postMessage({ command: "focusWindow" });
+        }
+    }
+}
+
+window.addEventListener("mouseenter", checkWindowFocus);
 canvas.addEventListener("mousemove", event => {
+    checkWindowFocus();
     lastMousePos = { x: event.clientX, y: event.clientY };
-    updateHoverTooltip(event.clientX, event.clientY);
+    if (!hoverRafId) {
+        hoverRafId = requestAnimationFrame(() => {
+            hoverRafId = null;
+            updateHoverTooltip(event.clientX, event.clientY);
+        });
+    }
 });
 
 canvas.addEventListener("mouseleave", () => {
@@ -1466,6 +1510,28 @@ const themeObserver = new MutationObserver(() => {
     render();
 });
 themeObserver.observe(document.body, { attributes: true, attributeFilter: ["style", "class"] });
+
+// Actions & Shortcuts Modal Toggle
+const actionsBtn = document.getElementById("actions-btn");
+const actionsModal = document.getElementById("actions-modal");
+const closeModal = document.getElementById("close-modal");
+
+if (actionsBtn && actionsModal) {
+    actionsBtn.onclick = (e) => {
+        e.stopPropagation();
+        actionsModal.style.display = actionsModal.style.display === "block" ? "none" : "block";
+    };
+}
+if (closeModal && actionsModal) {
+    closeModal.onclick = () => {
+        actionsModal.style.display = "none";
+    };
+}
+document.addEventListener("click", event => {
+    if (actionsModal && actionsModal.style.display === "block" && !actionsModal.contains(event.target) && event.target !== actionsBtn) {
+        actionsModal.style.display = "none";
+    }
+});
 
 resize();
 

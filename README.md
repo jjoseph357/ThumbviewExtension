@@ -13,4 +13,14 @@ A VS Code extension that visualizes your workspace files as a stable, syntax-hig
   - **Ignored Files & Directories**: View, add (`+`), and remove (`trash`) custom ignore patterns.
 - **.gitignore & Negation Support**: Respects `.gitignore` rules including negation patterns (`!pattern`).
 - **Tab & Window Management**: Click `×` or middle-click open file cards to close tabs. Jump to lines in pinned tabs.
-- **Magnifying Floating Tooltip**: Hover over any minimap line to preview full-sized code blocks with surrounding context lines.
+- **Magnifying Floating Tooltip**: Hold `Left CTRL` (or `CTRL`) while hovering over any minimap card to preview full-sized code blocks with surrounding context lines.
+
+## Keyboard & Mouse Shortcuts
+
+- **`F4`**: Open or focus the Thumbview visual workspace.
+- **`Left CTRL` + Mouse Hover**: Hold `Left CTRL` while hovering over a file card to reveal the code magnifying preview tooltip.
+- **Left Click Tile**: Jump directly to that line in the document editor tab.
+- **Middle Click (or `×` button)**: Close open document or media tab.
+- **Left Click Header Bar**: Isolate and focus on that parent folder.
+- **Right Click Card**: Open Explorer context menu.
+- **`⚙ Actions & Shortcuts` Button**: Toggle the interactive overlay panel in the top-right corner.

@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.107.0"
@@ -155,7 +155,7 @@
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "Manage your visual workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)\n\nLayout Mode\n\n[Switch to Uniform Grid](command:thumbview.setUniformGrid)\n\n[Switch to Spanning Grid](command:thumbview.setSpanningGrid)\n\nShortcuts\n\n• Click '×' or Middle-click open tab cards to close tabs\n• Right click file cards for Explorer options & ignore rules"
+        "contents": "Manage your visual workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)\n\nLayout Mode\n\n[Switch to Uniform Grid](command:thumbview.setUniformGrid)\n\n[Switch to Spanning Grid](command:thumbview.setSpanningGrid)"
       }
     ]
   },

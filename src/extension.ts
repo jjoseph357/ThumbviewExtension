@@ -267,6 +267,12 @@ export async function activate(context: vscode.ExtensionContext) {
                     refreshRepositoryMap(panel);
                 }
 
+                if (msg.command === "focusWindow") {
+                    if (activePanel && !activePanel.active) {
+                        activePanel.reveal(undefined, true);
+                    }
+                }
+
                 if (msg.command === "switchTab") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
@@ -1044,10 +1050,99 @@ function getHtml(
             color: #ffffff;
         }
 
-        .menu-separator {
-            height: 1px;
-            background: #3c3c3c;
-            margin: 4px 0;
+        .actions-btn {
+            background: rgba(30, 30, 34, 0.85);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            color: #e1e1e6;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            pointer-events: auto;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            transition: all 0.15s ease;
+            margin-left: auto;
+        }
+
+        .actions-btn:hover {
+            background: rgba(168, 85, 247, 0.25);
+            border-color: rgba(168, 85, 247, 0.6);
+            color: #ffffff;
+        }
+
+        /* Glassmorphic Actions & Settings Modal */
+        #actions-modal {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+            width: 480px;
+            max-width: 90vw;
+            background: rgba(20, 20, 26, 0.95);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(168, 85, 247, 0.4);
+            border-radius: 12px;
+            padding: 20px 24px;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.8);
+            z-index: 3000;
+            font-size: 13px;
+            color: #d4d4d8;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 15px;
+            font-weight: 600;
+            color: #ffffff;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+            padding-bottom: 10px;
+            margin-bottom: 16px;
+        }
+
+        .modal-close {
+            background: transparent;
+            border: none;
+            color: #a0a0a5;
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        .modal-close:hover { color: #ffffff; }
+
+        .modal-section { margin-bottom: 16px; }
+        .modal-section-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #a855f7;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .shortcut-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            font-size: 12px;
+        }
+
+        .kbd {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #f472b6;
         }
     </style>
 </head>
@@ -1056,6 +1151,39 @@ function getHtml(
         <canvas id="map"></canvas>
         <div id="hover-tooltip"></div>
         <div id="context-menu"></div>
+        <div id="actions-modal">
+            <div class="modal-header">
+                <span>⚙ Actions &amp; Shortcuts</span>
+                <button class="modal-close" id="close-modal">&times;</button>
+            </div>
+            <div class="modal-section">
+                <div class="modal-section-title">Keyboard &amp; Mouse Shortcuts</div>
+                <div class="shortcut-row">
+                    <span>Open / Focus Thumbview</span>
+                    <span>Press <span class="kbd">F4</span></span>
+                </div>
+                <div class="shortcut-row">
+                    <span>Magnifying Code Preview</span>
+                    <span>Hold <span class="kbd">Left CTRL</span> + Hover</span>
+                </div>
+                <div class="shortcut-row">
+                    <span>Jump to Document Line</span>
+                    <span><span class="kbd">Left Click</span> Minimap Tile</span>
+                </div>
+                <div class="shortcut-row">
+                    <span>Close Tab</span>
+                    <span><span class="kbd">Middle Click</span> or <span class="kbd">×</span> Button</span>
+                </div>
+                <div class="shortcut-row">
+                    <span>Isolate Folder</span>
+                    <span><span class="kbd">Left Click</span> Header Path Strip</span>
+                </div>
+                <div class="shortcut-row">
+                    <span>Explorer Commands</span>
+                    <span><span class="kbd">Right Click</span> Card Tile</span>
+                </div>
+            </div>
+        </div>
         <div class="controls-overlay">
             <div class="search-container">
                 <input type="text" id="search-input" class="search-input" placeholder="Search files (e.g. auth)...">
@@ -1064,6 +1192,7 @@ function getHtml(
             <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
                 <span class="breadcrumb-item" id="breadcrumb-root">root</span>
             </div>
+            <button id="actions-btn" class="actions-btn">⚙ Actions &amp; Shortcuts</button>
         </div>
     </div>
     <script nonce="${nonce}">
