@@ -31,22 +31,9 @@ interface FolderNode {
     children: Map<string, FolderNode>;
 }
 
-const DIRECTORY_MIME_TYPE = "application/vnd.code.tree.thumbview-directories";
-
-export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<DirectoryTreeItem>, vscode.TreeDragAndDropController<DirectoryTreeItem> {
-    dropMimeTypes = [DIRECTORY_MIME_TYPE];
-    dragMimeTypes = [DIRECTORY_MIME_TYPE];
-
+export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<DirectoryTreeItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<DirectoryTreeItem | undefined | void> = new vscode.EventEmitter<DirectoryTreeItem | undefined | void>();
     readonly onDidChangeTreeData: vscode.Event<DirectoryTreeItem | undefined | void> = this._onDidChangeTreeData.event;
-
-    handleDrag(source: readonly DirectoryTreeItem[], treeDataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): void | Thenable<void> {
-        const payload = source.map(item => ({
-            folderPath: item.folderPath,
-            labelName: item.labelName
-        }));
-        treeDataTransfer.set(DIRECTORY_MIME_TYPE, new vscode.DataTransferItem(payload));
-    }
 
     refresh(): void {
         this._onDidChangeTreeData.fire();

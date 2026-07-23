@@ -115,8 +115,10 @@ export async function activate(context: vscode.ExtensionContext) {
     const sendOpenState = () => {
         updateVisibleRanges();
         if (activePanel) {
+            const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
             activePanel.webview.postMessage({
                 command: "openState",
+                activeFileUri: activeUri,
                 openFiles: getOpenTabUris(),
                 viewLocations
             });
@@ -217,7 +219,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
             if (activePanel) {
                 activePanel.reveal(vscode.ViewColumn.Active);
-                refreshRepositoryMap(activePanel);
+                sendOpenState();
                 return;
             }
 
@@ -365,15 +367,19 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "close") {
                     try {
                         const targetUriStr = msg.uri;
+                        const tabsToClose: vscode.Tab[] = [];
                         for (const group of vscode.window.tabGroups.all) {
                             for (const tab of group.tabs) {
                                 if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === targetUriStr) {
-                                    await vscode.window.tabGroups.close(tab);
+                                    tabsToClose.push(tab);
                                 }
                             }
                         }
+                        if (tabsToClose.length > 0) {
+                            await vscode.window.tabGroups.close(tabsToClose);
+                        }
                     } catch (err: any) {
-                        console.error("REPOMAP CLOSE ERROR:", err);
+                        console.error("THUMBVIEW CLOSE ERROR:", err);
                     }
                 }
 
@@ -545,6 +551,17 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             });
 
+            panel.onDidChangeViewState(e => {
+                if (e.webviewPanel.visible) {
+                    const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
+                    panel.webview.postMessage({
+                        command: "activeFile",
+                        uri: activeUri
+                    });
+                    sendOpenState();
+                }
+            });
+
             panel.onDidDispose(() => {
                 if (activePanel === panel) {
                     activePanel = undefined;
@@ -593,8 +610,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const directoryProvider = new DirectoryTreeDataProvider();
     const directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
-        treeDataProvider: directoryProvider,
-        dragAndDropController: directoryProvider
+        treeDataProvider: directoryProvider
     });
     context.subscriptions.push(directoryTreeView);
 
@@ -605,8 +621,7 @@ export async function activate(context: vscode.ExtensionContext) {
         directoryProvider.refresh();
     });
     const ignoreTreeView = vscode.window.createTreeView("thumbview-ignores", {
-        treeDataProvider: ignoreProvider,
-        dragAndDropController: ignoreProvider
+        treeDataProvider: ignoreProvider
     });
     context.subscriptions.push(ignoreTreeView);
 
@@ -712,46 +727,47 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(configDisposable);
 
     const updateVisibleRanges = (editor?: vscode.TextEditor | undefined) => {
-        for (const visibleEditor of vscode.window.visibleTextEditors) {
-            if (visibleEditor.visibleRanges.length > 0) {
-                const uri = visibleEditor.document.uri.toString();
-                const primaryRange = visibleEditor.visibleRanges[0];
+        const processEditor = (e: vscode.TextEditor) => {
+            if (e && e.visibleRanges && e.visibleRanges.length > 0) {
+                const uri = e.document.uri.toString();
+                const primaryRange = e.visibleRanges[0];
                 viewLocations[uri] = {
                     startLine: primaryRange.start.line,
                     endLine: primaryRange.end.line,
                     scrollLine: primaryRange.start.line
                 };
             }
+        };
+
+        for (const visibleEditor of vscode.window.visibleTextEditors) {
+            processEditor(visibleEditor);
         }
-        if (editor && editor.visibleRanges.length > 0) {
-            const uri = editor.document.uri.toString();
-            const primaryRange = editor.visibleRanges[0];
-            viewLocations[uri] = {
-                startLine: primaryRange.start.line,
-                endLine: primaryRange.end.line,
-                scrollLine: primaryRange.start.line
-            };
+        if (editor) {
+            processEditor(editor);
         }
+    };
+
+    let stateDebounceTimer: NodeJS.Timeout | undefined;
+    const scheduleSendOpenState = (delayMs = 30) => {
+        if (stateDebounceTimer) {
+            clearTimeout(stateDebounceTimer);
+        }
+        stateDebounceTimer = setTimeout(() => {
+            sendOpenState();
+        }, delayMs);
     };
 
     // Watch active editor changes
     const editorDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
         updateVisibleRanges(editor);
-        if (activePanel) {
-            const activeUri = editor?.document.uri.toString() || null;
-            activePanel.webview.postMessage({
-                command: "activeFile",
-                uri: activeUri
-            });
-            sendOpenState();
-        }
+        scheduleSendOpenState(0);
     });
     context.subscriptions.push(editorDisposable);
 
     // Watch text editor visible range changes (scroll/viewport movements)
     const visibleRangesDisposable = vscode.window.onDidChangeTextEditorVisibleRanges(event => {
         updateVisibleRanges(event.textEditor);
-        sendOpenState();
+        scheduleSendOpenState(250);
     });
     context.subscriptions.push(visibleRangesDisposable);
 

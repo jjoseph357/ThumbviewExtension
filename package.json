@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.0.8",
+  "version": "0.1.2",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.107.0"
@@ -32,6 +32,11 @@
           },
           "default": [],
           "description": "List of file paths or glob patterns to ignore in Thumbview minimap."
+        },
+        "thumbview.autoIgnoreThreshold": {
+          "type": "number",
+          "default": 30,
+          "description": "Automatically ignore subdirectories containing more than this number of files (set to 0 to disable)."
         }
       }
     },
@@ -125,17 +130,20 @@
         {
           "id": "thumbview-sidebar",
           "name": "Actions & Settings",
-          "icon": "media/icon.svg"
+          "icon": "media/icon.svg",
+          "size": 2
         },
         {
           "id": "thumbview-directories",
           "name": "Directory Navigation",
-          "icon": "media/icon.svg"
+          "icon": "media/icon.svg",
+          "size": 6
         },
         {
           "id": "thumbview-ignores",
           "name": "Ignored Files & Directories",
-          "icon": "media/icon.svg"
+          "icon": "media/icon.svg",
+          "size": 2
         }
       ]
     },

@@ -21,6 +21,21 @@ let focusedFolder = ""; // empty means root
 let openFiles = []; // Array of open file URIs (orange borders)
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
 
+let searchDebounceTimer = null;
+function triggerSearchRender(immediate = false) {
+    if (searchDebounceTimer) {
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = null;
+    }
+    if (immediate) {
+        render();
+    } else {
+        searchDebounceTimer = setTimeout(() => {
+            render();
+        }, 80);
+    }
+}
+
 // Setup search inputs
 const searchInput = document.getElementById("search-input");
 const clearSearch = document.getElementById("clear-search");
@@ -28,14 +43,14 @@ const clearSearch = document.getElementById("clear-search");
 searchInput.addEventListener("input", e => {
     searchQuery = e.target.value.toLowerCase().trim();
     clearSearch.style.display = searchQuery ? "block" : "none";
-    render();
+    triggerSearchRender(false);
 });
 
 clearSearch.addEventListener("click", () => {
     searchInput.value = "";
     searchQuery = "";
     clearSearch.style.display = "none";
-    render();
+    triggerSearchRender(true);
 });
 
 // Capture global keystrokes and type directly into search box
@@ -53,14 +68,14 @@ window.addEventListener("keydown", event => {
         searchInput.value += event.key;
         searchQuery = searchInput.value.toLowerCase().trim();
         clearSearch.style.display = searchQuery ? "block" : "none";
-        render();
+        triggerSearchRender(false);
     } else if (event.key === "Backspace") {
         event.preventDefault();
         searchInput.focus();
         searchInput.value = searchInput.value.slice(0, -1);
         searchQuery = searchInput.value.toLowerCase().trim();
         clearSearch.style.display = searchQuery ? "block" : "none";
-        render();
+        triggerSearchRender(false);
     }
 });
 
@@ -98,13 +113,29 @@ window.addEventListener("message", event => {
 
     if (msg.command === "status") {
         statusText = msg.text;
-        render();
+        if (!data) {
+            drawStatus();
+        }
     }
 
     if (msg.command === "data") {
         data = msg;
         statusText = "";
         hoverLineCache = {};
+        if (data && data.files) {
+            for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
+                const f = data.files[fIdx];
+                f._lowerPath = f.path ? f.path.toLowerCase() : "";
+                if (f.lines) {
+                    for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
+                        f.lines[lIdx]._lowerText = f.lines[lIdx].text ? f.lines[lIdx].text.toLowerCase() : "";
+                    }
+                }
+                if (f.fullLines) {
+                    f._lowerFullLines = f.fullLines.map(str => str.toLowerCase());
+                }
+            }
+        }
         render();
     }
 
@@ -114,6 +145,9 @@ window.addEventListener("message", event => {
     }
 
     if (msg.command === "openState") {
+        if ("activeFileUri" in msg) {
+            activeFileUri = msg.activeFileUri;
+        }
         openFiles = msg.openFiles || [];
         viewLocations = msg.viewLocations || {};
         render();
@@ -241,16 +275,24 @@ function drawStatus() {
 
     ctx.fillStyle = "#e1e1e6";
     ctx.font = "16px system-ui";
-    ctx.fillText(statusText, 24, 48);
+    ctx.fillText(statusText, 24, 74);
 
     ctx.fillStyle = "#707075";
     ctx.font = "12px system-ui";
-    ctx.fillText("Waiting for repository data...", 24, 74);
+    ctx.fillText("Waiting for repository data...", 24, 100);
 }
 
 function detectLang(path) {
-    if (!path) return 'js';
-    const ext = path.split('.').pop().toLowerCase();
+    if (!path) return 'plaintext';
+    const filename = path.split('/').pop().toLowerCase();
+    if (filename === '.gitignore' || filename === 'license' || filename.startsWith('license.')) {
+        return 'plaintext';
+    }
+    const ext = filename.includes('.') ? filename.split('.').pop() : '';
+    if (ext === 'md' || ext === 'markdown') return 'markdown';
+    if (!ext || ext === 'txt' || ext === 'log' || ext === 'conf' || ext === 'ini' || ext === 'env') {
+        return 'plaintext';
+    }
     if (ext === 'css' || ext === 'scss' || ext === 'less') return 'css';
     if (ext === 'html' || ext === 'htm' || ext === 'xml' || ext === 'svg' || ext === 'vue') return 'html';
     if (ext === 'json') return 'json';
@@ -263,9 +305,42 @@ function detectLang(path) {
 // coarse per-line categorizer — see this file's header comment.
 function tokenizeLine(text, lang) {
     if (!text) return [];
+    if (lang === 'plaintext') return [{ text, category: 'normal', isKey: false }];
+    if (lang === 'markdown') return tokenizeMarkdown(text);
     if (lang === 'css') return tokenizeCSS(text);
     if (lang === 'html') return tokenizeHTML(text);
     return tokenizeJS(text, lang);
+}
+
+function tokenizeMarkdown(text) {
+    const tokens = [];
+    // Split markdown line into granular syntax elements (headers, hash symbols, code spans, bold, italic, links, lists, blockquotes)
+    const regex = /(^#{1,6}\s+.*|`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|[*_][^*_]+[*_]|\[[^\]]+\]|\([^)]+\)|^\s*[-*+]\s+|^\s*\d+\.\s+|>.*|\s+|.)/g;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+        const val = match[0];
+        let cat = "normal";
+        if (val.startsWith('#')) {
+            cat = "tag"; // In VS Code, Markdown headers (e.g. # Title) use dark blue markup.heading (#569cd6)
+        } else if (val.startsWith('`') && val.endsWith('`') && val.length > 1) {
+            cat = "string"; // Inline code (`code`) uses string orange (#ce9178)
+        } else if (val.startsWith('**') || val.startsWith('__')) {
+            cat = "keyword"; // Bold text uses markup.bold keyword purple/blue (#569cd6 / #c586c0)
+        } else if ((val.startsWith('*') || val.startsWith('_')) && val.length > 1) {
+            cat = "variable"; // Italic text uses cyan/variable (#9cdcfe)
+        } else if (val.startsWith('[')) {
+            cat = "type"; // Link text [text] uses teal/class (#4ec9b0)
+        } else if (val.startsWith('(') && val.endsWith(')')) {
+            cat = "string"; // Link URL (url) uses string orange (#ce9178)
+        } else if (/^\s*[-*+]\s+/.test(val) || /^\s*\d+\.\s+/.test(val)) {
+            cat = "keyword"; // List markers (-, *, 1.) use keyword blue (#569cd6)
+        } else if (val.startsWith('>')) {
+            cat = "comment"; // Blockquotes (> quote) use comment green (#6a9955)
+        }
+
+        tokens.push({ text: val, category: cat, isKey: false });
+    }
+    return tokens;
 }
 
 // Single regex splits the line into candidate tokens (comments/strings/@rules/colors/
@@ -321,12 +396,27 @@ function tokenizeHTML(text) {
     while ((match = regex.exec(text)) !== null) {
         const val = match[0];
         let cat = "normal";
-        if (val.startsWith('<!--')) { cat = "comment"; }
-        else if (val.startsWith('"') || val.startsWith("'")) { cat = "string"; }
-        else if (val === '<' || val === '</') { cat = "tag-bracket"; inTag = true; seenTagName = false; }
-        else if (val === '>' || val === '/>') { cat = "tag-bracket"; inTag = false; }
-        else if (inTag && /^[\w:-]+$/.test(val)) { cat = seenTagName ? "attribute" : "tag"; seenTagName = true; }
-        else if (val.startsWith('&') && val.endsWith(';')) { cat = "keyword"; }
+        if (val.startsWith('<!--')) {
+            cat = "comment"; // HTML comments <!-- --> (green #6a9955)
+        } else if ((val.startsWith('"') && val.endsWith('"') && val.length > 1) ||
+            (val.startsWith("'") && val.endsWith("'") && val.length > 1)) {
+            cat = "string"; // Attribute values "val" (orange #ce9178)
+        } else if (val === '<' || val === '</' || val === '>' || val === '/>' || val === '=') {
+            cat = "tag-bracket"; // Brackets & equals < > </ /> = (gray #808080)
+            if (val === '<' || val === '</') {
+                inTag = true;
+                seenTagName = false;
+            }
+            if (val === '>' || val === '/>') {
+                inTag = false;
+            }
+        } else if (inTag && /^[\w:-]+$/.test(val)) {
+            cat = seenTagName ? "attribute" : "tag"; // Tag name (blue #569cd6) vs Attribute name (cyan #9cdcfe)
+            seenTagName = true;
+        } else if (val.startsWith('&') && val.endsWith(';')) {
+            cat = "keyword"; // HTML Entities &nbsp; (purple/blue #c586c0)
+        }
+
         tokens.push({ text: val, category: cat, isKey: false });
     }
     return tokens;
@@ -350,7 +440,10 @@ function tokenizeJS(text, lang) {
         const val = match[0];
         let cat = "normal";
         if (val.startsWith("//") || (isPy && val.startsWith("#")) || val.startsWith("/*")) { cat = "comment"; }
-        else if (val.startsWith('"') || val.startsWith("'") || val.startsWith("`")) { cat = "string"; }
+        else if ((val.startsWith('"') && val.endsWith('"') && val.length > 1) ||
+            (val.startsWith("'") && val.endsWith("'") && val.length > 1) ||
+            (val.startsWith("`") && val.endsWith("`") && val.length > 1) ||
+            val.startsWith('"""') || val.startsWith("'''")) { cat = "string"; }
         else if (/^\d+$/.test(val)) { cat = "number"; }
         else if (/^(if|else|elif|for|while|return|switch|case|break|continue|try|catch|except|finally|raise|with|yield|pass|and|or|not|in|is)$/.test(val)) { cat = "control-flow"; }
         else if (/^(class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|this|self|import|export|from|using|require|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace|new|null|undefined|true|false|typeof|instanceof|lambda|global|nonlocal|as|True|False|None)$/.test(val)) { cat = "keyword"; }
@@ -374,11 +467,18 @@ function tokenizeJS(text, lang) {
             (tokens[i + 1].category === "variable" || tokens[i + 1].category === "type")) {
             tokens[i + 1].category = "property";
         }
-        // Function calls: word before (
-        if (tokens[i].category === "variable" || tokens[i].category === "type" || tokens[i].category === "property") {
+        // Function declarations & calls: word before ( or word after function/def/fn
+        if (tokens[i].category === "variable" || tokens[i].category === "type" || tokens[i].category === "property" || tokens[i].category === "keyword") {
             let n = i + 1;
             while (n < tokens.length && /^\s+$/.test(tokens[n].text)) n++;
-            if (n < tokens.length && tokens[n].text === "(") tokens[i].category = "function";
+            if (n < tokens.length && tokens[n].text === "(") {
+                tokens[i].category = "function";
+            }
+            if ((tokens[i].text === "function" || tokens[i].text === "def" || tokens[i].text === "fn" || tokens[i].text === "func") && n < tokens.length) {
+                if (tokens[n].category === "variable" || tokens[n].category === "type" || tokens[n].category === "property") {
+                    tokens[n].category = "function";
+                }
+            }
         }
         // JSON string keys
         if (isJson && tokens[i].category === "string") {
@@ -396,26 +496,46 @@ function tokenizeJS(text, lang) {
     return tokens;
 }
 
+function getThemeColor(varName, fallbackHex) {
+    const val = getComputedStyle(document.body).getPropertyValue(varName).trim();
+    return val || fallbackHex;
+}
+
 function colorForCategory(category, isKey) {
-    if (isKey) return "#9cdcfe";
+    if (isKey) return getThemeColor("--vscode-symbolIcon-propertyForeground", getThemeColor("--vscode-editorLineNumber-activeForeground", "#9cdcfe"));
+
     switch (category) {
-        case "comment": return "#6a9955";
-        case "string": return "#ce9178";
-        case "number": return "#b5cea8";
-        case "control-flow": return "#c586c0";
-        case "keyword": return "#569cd6";
-        case "operator": return "#cccccc";
-        case "function": return "#dcdcaa";
-        case "type": return "#4ec9b0";
-        case "variable": return "#9cdcfe";
-        case "property": return "#9cdcfe";
-        case "selector": return "#d7ba7d";
-        case "css-property": return "#9cdcfe";
-        case "css-value": return "#ce9178";
-        case "tag": return "#569cd6";
-        case "tag-bracket": return "#808080";
-        case "attribute": return "#9cdcfe";
-        default: return "#d4d4d4";
+        case "comment":
+            return getThemeColor("--vscode-editorComment-foreground", "#6a9955");
+        case "string":
+            return getThemeColor("--vscode-symbolIcon-stringForeground", getThemeColor("--vscode-charts-orange", "#ce9178"));
+        case "number":
+            return getThemeColor("--vscode-symbolIcon-numberForeground", getThemeColor("--vscode-charts-green", "#b5cea8"));
+        case "control-flow":
+            return getThemeColor("--vscode-symbolIcon-keywordForeground", getThemeColor("--vscode-charts-purple", "#c586c0"));
+        case "keyword":
+            return getThemeColor("--vscode-symbolIcon-keywordForeground", getThemeColor("--vscode-charts-blue", "#569cd6"));
+        case "operator":
+        case "normal":
+            return getThemeColor("--vscode-editor-foreground", "#cccccc");
+        case "function":
+            return getThemeColor("--vscode-symbolIcon-functionForeground", getThemeColor("--vscode-charts-yellow", "#dcdcaa"));
+        case "type":
+            return getThemeColor("--vscode-symbolIcon-classForeground", getThemeColor("--vscode-charts-teal", "#4ec9b0"));
+        case "variable":
+        case "property":
+        case "css-property":
+        case "attribute":
+            return getThemeColor("--vscode-symbolIcon-variableForeground", getThemeColor("--vscode-symbolIcon-propertyForeground", "#9cdcfe"));
+        case "selector":
+        case "css-value":
+            return getThemeColor("--vscode-symbolIcon-stringForeground", "#ce9178");
+        case "tag":
+            return getThemeColor("--vscode-symbolIcon-elementForeground", getThemeColor("--vscode-symbolIcon-keywordForeground", "#569cd6"));
+        case "tag-bracket":
+            return getThemeColor("--vscode-editor-foreground", "#808080");
+        default:
+            return getThemeColor("--vscode-editor-foreground", "#d4d4d4");
     }
 }
 
@@ -452,7 +572,25 @@ function drawMinimap(file, x, y, w, h) {
 
         const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * 0.7;
 
-        const isMatchedLine = searchQuery && line.text.toLowerCase().includes(searchQuery);
+        let isMatchedLine = false;
+        if (searchQuery) {
+            const checkFull = file._lowerFullLines || file.fullLines;
+            if (checkFull && file.lineCount > lines.length) {
+                const step = file.lineCount / lines.length;
+                const startLineIdx = Math.floor(i * step);
+                const endLineIdx = Math.min(Math.floor((i + 1) * step), checkFull.length);
+                for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
+                    const str = file._lowerFullLines ? checkFull[fullI] : checkFull[fullI].toLowerCase();
+                    if (str.includes(searchQuery)) {
+                        isMatchedLine = true;
+                        break;
+                    }
+                }
+            } else {
+                const lText = line._lowerText !== undefined ? line._lowerText : line.text.toLowerCase();
+                isMatchedLine = lText.includes(searchQuery);
+            }
+        }
 
         if (isMatchedLine) {
             ctx.fillStyle = "#ec4899"; // Highlight pink for search match
@@ -501,13 +639,18 @@ function drawMinimap(file, x, y, w, h) {
     const isFileOpen = openFiles.includes(file.uri);
     if (isFileOpen && (file.uri in viewLocations)) {
         const totalRealLines = Math.max(file.lineCount || lines.length, 1);
-        const realStepY = h / totalRealLines;
         const viewLoc = viewLocations[file.uri];
-        const startL = Math.max(0, viewLoc.startLine);
-        const endL = Math.min(totalRealLines - 1, viewLoc.endLine);
+        const startL = Math.max(0, Math.min(viewLoc.startLine, totalRealLines - 1));
+        const endL = Math.max(startL, Math.min(viewLoc.endLine, totalRealLines - 1));
 
-        const bandY = y + startL * realStepY;
-        const bandH = Math.max((endL - startL + 1) * realStepY, 4.0);
+        const startRatio = startL / totalRealLines;
+        const endRatio = (endL + 1) / totalRealLines;
+
+        const minimapY = y;
+        const minimapH = h;
+
+        const bandY = minimapY + startRatio * minimapH;
+        const bandH = Math.max((endRatio - startRatio) * minimapH, 4.0);
 
         // Store bounding rect of view band on cell for click detection
         file._cell._viewBand = {
@@ -520,7 +663,7 @@ function drawMinimap(file, x, y, w, h) {
             x,
             bandY,
             w,
-            bandH
+            Math.min(bandH, minimapY + minimapH - bandY)
         );
     } else if (file._cell) {
         delete file._cell._viewBand;
@@ -577,7 +720,7 @@ function render() {
     }
 
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-    ctx.fillStyle = "#18181c";
+    ctx.fillStyle = getThemeColor("--vscode-editor-background", "#18181c");
     ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
 
     const filteredFiles = getFilteredFiles();
@@ -635,8 +778,29 @@ function render() {
             h: fileH
         };
 
-        const isContentMatch = queryActive && file.lines.some(l => l.text.toLowerCase().includes(searchQuery));
-        const isPathMatch = queryActive && file.path.toLowerCase().includes(searchQuery);
+        const isPathMatch = queryActive && (file._lowerPath ? file._lowerPath.includes(searchQuery) : file.path.toLowerCase().includes(searchQuery));
+        let isContentMatch = false;
+        if (queryActive) {
+            const checkLines = file._lowerFullLines || file.fullLines;
+            if (checkLines) {
+                for (let lIdx = 0; lIdx < checkLines.length; lIdx++) {
+                    const lText = file._lowerFullLines ? checkLines[lIdx] : checkLines[lIdx].toLowerCase();
+                    if (lText.includes(searchQuery)) {
+                        isContentMatch = true;
+                        break;
+                    }
+                }
+            } else {
+                for (let lIdx = 0; lIdx < file.lines.length; lIdx++) {
+                    const l = file.lines[lIdx];
+                    const lText = l._lowerText !== undefined ? l._lowerText : l.text.toLowerCase();
+                    if (lText.includes(searchQuery)) {
+                        isContentMatch = true;
+                        break;
+                    }
+                }
+            }
+        }
         const isSearchMatch = isContentMatch || isPathMatch;
 
         const isActive = file.uri === activeFileUri;
@@ -732,6 +896,8 @@ canvas.addEventListener("click", event => {
             // Check if click was on close '×' button
             const cb = file._closeBtn;
             if (cb && px >= cb.x - 4 && px <= cb.x + cb.w + 4 && py >= cb.y - 4 && py <= cb.y + cb.h + 4) {
+                openFiles = openFiles.filter(u => u !== file.uri);
+                render();
                 vscode.postMessage({
                     command: "close",
                     uri: file.uri
@@ -944,18 +1110,32 @@ function updateHoverTooltip(clientX, clientY) {
         tooltip.innerHTML = tooltipHtml;
         tooltip.style.display = "block";
 
+        const c = hoveredFile._cell;
+        const gap = 12;
+        const cellCenterX = c.x + c.w / 2;
         let tx;
-        if (clientX > window.innerWidth / 2) {
-            tx = clientX - tooltip.offsetWidth - 20;
+
+        if (cellCenterX > window.innerWidth / 2) {
+            // Right half of screen -> place to the left of the tile
+            tx = c.x - gap - tooltip.offsetWidth;
+            if (tx < 16) {
+                // If overflowing left edge, clamp to viewport margin
+                tx = 16;
+            }
         } else {
-            tx = clientX + 20;
+            // Left half of screen -> place to the right of the tile
+            tx = c.x + c.w + gap;
+            if (tx + tooltip.offsetWidth > window.innerWidth - 16) {
+                // If overflowing right edge, clamp to viewport margin
+                tx = window.innerWidth - tooltip.offsetWidth - 16;
+            }
         }
 
         let ty = clientY + 16;
-
-        if (ty + tooltip.offsetHeight > window.innerHeight) {
+        if (ty + tooltip.offsetHeight > window.innerHeight - 16) {
             ty = window.innerHeight - tooltip.offsetHeight - 16;
         }
+        ty = Math.max(16, ty);
 
         tooltip.style.left = `${tx}px`;
         tooltip.style.top = `${ty}px`;
@@ -1129,6 +1309,12 @@ canvas.addEventListener("contextmenu", event => {
     contextMenu.style.left = `${cx}px`;
     contextMenu.style.top = `${cy}px`;
 });
+
+// Re-render canvas automatically when user switches VS Code color theme
+const themeObserver = new MutationObserver(() => {
+    render();
+});
+themeObserver.observe(document.body, { attributes: true, attributeFilter: ["style", "class"] });
 
 resize();
 

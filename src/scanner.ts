@@ -18,6 +18,7 @@ export interface RepoFile {
     uri: string;
     lines: MiniLine[];
     lineCount: number;
+    fullLines?: string[];
 }
 
 // Coarse per-line category guess from leading/contained keywords, not a real parser.
@@ -138,15 +139,42 @@ function shouldIgnore(relativePath: string, rules: string[]): boolean {
 }
 
 export async function scanRepository(): Promise<RepoFile[]> {
-    // Scan all files but exclude non-code or build folders
+    // Scan all files but exclude non-code, library, or build folders
     const files = await vscode.workspace.findFiles(
         "**/*",
-        "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv}/**"
+        "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv,env,.env,lib,vendor}/**"
     );
 
     // Apply ignore patterns configured in thumbview.ignorePatterns setting
     const config = vscode.workspace.getConfiguration("thumbview");
     const gitignoreRules = config.get<string[]>("ignorePatterns") || [];
+
+    // Prioritize auto-ignoring 'lib' or 'vendor' subdirectories & dense folders (>threshold files)
+    const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
+    const folderCounts = new Map<string, number>();
+    for (const file of files) {
+        const relative = vscode.workspace.asRelativePath(file);
+        const parts = relative.split("/");
+        if (parts.length > 1) {
+            const folderDir = parts.slice(0, parts.length - 1).join("/") + "/";
+            folderCounts.set(folderDir, (folderCounts.get(folderDir) || 0) + 1);
+        }
+    }
+
+    const denseFolders: string[] = [];
+    for (const [folderDir, count] of folderCounts.entries()) {
+        const isLibFolder = /(^|\/)(lib|vendor|libraries)(\/|$)/i.test(folderDir);
+        if ((isLibFolder || (threshold > 0 && count > threshold)) && !gitignoreRules.includes(folderDir)) {
+            denseFolders.push(folderDir);
+        }
+    }
+
+    if (denseFolders.length > 0) {
+        const updatedIgnored = [...gitignoreRules, ...denseFolders];
+        await config.update("ignorePatterns", updatedIgnored, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage(`Auto-ignored ${denseFolders.length} library/dense directory (e.g. ${denseFolders[0]}). You can un-ignore them anytime in the sidebar.`);
+        gitignoreRules.push(...denseFolders);
+    }
 
     const result: RepoFile[] = [];
 
@@ -193,12 +221,25 @@ export async function scanRepository(): Promise<RepoFile[]> {
                 });
             }
 
+            let fullLines: string[] | undefined = undefined;
+            if (doc.lineCount > MAX_LINES) {
+                fullLines = [];
+                for (let i = 0; i < doc.lineCount; i++) {
+                    let text = doc.lineAt(i).text;
+                    if (text.length > MAX_LINE_LENGTH) {
+                        text = text.substring(0, MAX_LINE_LENGTH);
+                    }
+                    fullLines.push(text);
+                }
+            }
+
             result.push({
                 id: file.fsPath,
                 path: vscode.workspace.asRelativePath(file),
                 uri: file.toString(),
                 lines: rawLines,
-                lineCount: doc.lineCount
+                lineCount: doc.lineCount,
+                fullLines
             });
         } catch {
             // Ignore unreadable files
