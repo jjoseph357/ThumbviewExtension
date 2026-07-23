@@ -29,6 +29,18 @@ export class IgnoreTreeDataProvider implements vscode.TreeDataProvider<IgnoreTre
         }
         const config = vscode.workspace.getConfiguration("thumbview");
         const patterns = config.get<string[]>("ignorePatterns") || [];
-        return Promise.resolve(patterns.map(p => new IgnoreTreeItem(p)));
+        
+        // Filter out redundant child patterns whose parent directory is already ignored
+        const filteredPatterns = patterns.filter(p => {
+            const clean = p.trim().replace(/^\/+|\/+$/g, "");
+            if (!clean) return false;
+            const isChildOfOther = patterns.some(other => {
+                const otherClean = other.trim().replace(/^\/+|\/+$/g, "");
+                return otherClean && clean !== otherClean && clean.startsWith(otherClean + "/");
+            });
+            return !isChildOfOther;
+        });
+
+        return Promise.resolve(filteredPatterns.map(p => new IgnoreTreeItem(p)));
     }
 }

@@ -182,31 +182,77 @@ export async function scanRepository(): Promise<RepoFile[]> {
     const config = vscode.workspace.getConfiguration("thumbview");
     const gitignoreRules = config.get<string[]>("ignorePatterns") || [];
 
-    // Prioritize auto-ignoring 'lib' or 'vendor' subdirectories & dense folders (>threshold files)
+    // Prioritize auto-ignoring top-level dense folders & library subdirectories (>threshold files)
     const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
     const folderCounts = new Map<string, number>();
+    const topLevelFolderCounts = new Map<string, number>();
+
     for (const file of files) {
-        const relative = vscode.workspace.asRelativePath(file);
+        const relative = vscode.workspace.asRelativePath(file).replace(/\\/g, "/");
         const parts = relative.split("/");
         if (parts.length > 1) {
+            const topLevelDir = parts[0] + "/";
+            topLevelFolderCounts.set(topLevelDir, (topLevelFolderCounts.get(topLevelDir) || 0) + 1);
+
             const folderDir = parts.slice(0, parts.length - 1).join("/") + "/";
             folderCounts.set(folderDir, (folderCounts.get(folderDir) || 0) + 1);
         }
     }
 
     const denseFolders: string[] = [];
-    for (const [folderDir, count] of folderCounts.entries()) {
-        const isLibFolder = /(^|\/)(lib|vendor|libraries)(\/|$)/i.test(folderDir);
-        if ((isLibFolder || (threshold > 0 && count > threshold)) && !gitignoreRules.includes(folderDir)) {
-            denseFolders.push(folderDir);
+
+    // Helper: returns true if candidate pattern is already ignored by an existing rule or top-level parent rule
+    const isAlreadyCovered = (dir: string, rules: string[]): boolean => {
+        if (shouldIgnore(dir, rules)) return true;
+        for (const rule of rules) {
+            const clean = rule.trim().replace(/^\/+|\/+$/g, "");
+            if (clean && (dir.startsWith(clean + "/") || dir === clean + "/")) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // First check top-level root folders so massive virtualenvs/build dirs (like BOFS/) are ignored as a single top-level entry
+    for (const [topDir, count] of topLevelFolderCounts.entries()) {
+        const isLibFolder = /(^|\/)(lib|vendor|libraries|venv|\.venv|bofs)(\/|$)/i.test(topDir);
+        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(topDir, gitignoreRules)) {
+            denseFolders.push(topDir);
         }
     }
 
-    if (denseFolders.length > 0) {
-        const updatedIgnored = [...gitignoreRules, ...denseFolders];
+    // Next check nested subdirectories only if their parent isn't already covered by gitignoreRules or top-level denseFolders
+    const combinedRules = [...gitignoreRules, ...denseFolders];
+    for (const [folderDir, count] of folderCounts.entries()) {
+        const isLibFolder = /(^|\/)(lib|vendor|libraries|venv|\.venv)(\/|$)/i.test(folderDir);
+        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(folderDir, combinedRules)) {
+            denseFolders.push(folderDir);
+            combinedRules.push(folderDir);
+        }
+    }
+
+    // Prune pre-existing redundant child rules from gitignoreRules (e.g. if BOFS/ exists, remove BOFS/sub/ entries)
+    const cleanedRules: string[] = [];
+    for (const rule of gitignoreRules) {
+        const clean = rule.trim().replace(/^\/+|\/+$/g, "");
+        if (!clean) continue;
+        const isChildOfOther = gitignoreRules.some(other => {
+            const otherClean = other.trim().replace(/^\/+|\/+$/g, "");
+            return otherClean && clean !== otherClean && clean.startsWith(otherClean + "/");
+        });
+        if (!isChildOfOther && !cleanedRules.includes(rule)) {
+            cleanedRules.push(rule);
+        }
+    }
+
+    if (denseFolders.length > 0 || cleanedRules.length !== gitignoreRules.length) {
+        const updatedIgnored = Array.from(new Set([...cleanedRules, ...denseFolders]));
         await config.update("ignorePatterns", updatedIgnored, vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage(`Auto-ignored ${denseFolders.length} library/dense directory (e.g. ${denseFolders[0]}). You can un-ignore them anytime in the sidebar.`);
-        gitignoreRules.push(...denseFolders);
+        if (denseFolders.length > 0) {
+            vscode.window.showInformationMessage(`Auto-ignored ${denseFolders.length} top-level/dense directory (e.g. ${denseFolders[0]}). You can un-ignore them anytime in the sidebar.`);
+        }
+        gitignoreRules.length = 0;
+        gitignoreRules.push(...updatedIgnored);
     }
 
     const result: RepoFile[] = [];

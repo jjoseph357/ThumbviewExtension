@@ -658,7 +658,8 @@ export async function activate(context: vscode.ExtensionContext) {
         directoryProvider.refresh();
     });
     const ignoreTreeView = vscode.window.createTreeView("thumbview-ignores", {
-        treeDataProvider: ignoreProvider
+        treeDataProvider: ignoreProvider,
+        canSelectMany: true
     });
     context.subscriptions.push(ignoreTreeView);
 
@@ -705,17 +706,30 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(addIgnoreDisposable);
 
-    const removeIgnoreDisposable = vscode.commands.registerCommand("thumbview.removeIgnorePattern", async (item?: IgnoreTreeItem) => {
-        let pattern = item?.pattern;
+    const removeIgnoreDisposable = vscode.commands.registerCommand("thumbview.removeIgnorePattern", async (item?: IgnoreTreeItem, items?: IgnoreTreeItem[]) => {
         const config = vscode.workspace.getConfiguration("thumbview");
         const current = config.get<string[]>("ignorePatterns") || [];
-        if (!pattern && current.length > 0) {
-            pattern = await vscode.window.showQuickPick(current, { placeHolder: "Select pattern to remove" });
+
+        const targetItems = items && items.length > 0 ? items : (item ? [item] : []);
+        let patternsToRemove: string[] = targetItems.map(i => i.pattern);
+
+        if (patternsToRemove.length === 0 && current.length > 0) {
+            const selected = await vscode.window.showQuickPick(current, {
+                placeHolder: "Select pattern to remove",
+                canPickMany: true
+            });
+            if (selected) {
+                patternsToRemove = Array.isArray(selected) ? selected : [selected];
+            }
         }
-        if (pattern) {
-            const updated = current.filter(p => p !== pattern);
+
+        if (patternsToRemove.length > 0) {
+            const updated = current.filter(p => !patternsToRemove.includes(p));
             await config.update("ignorePatterns", updated, vscode.ConfigurationTarget.Global);
-            vscode.window.showInformationMessage(`Removed '${pattern}' from ignore list.`);
+            const msg = patternsToRemove.length === 1
+                ? `Removed '${patternsToRemove[0]}' from ignore list.`
+                : `Batch removed ${patternsToRemove.length} ignore patterns.`;
+            vscode.window.showInformationMessage(msg);
             refreshProviders();
             if (activePanel) {
                 refreshRepositoryMap(activePanel);
