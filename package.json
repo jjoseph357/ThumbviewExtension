@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.107.0"
@@ -37,6 +37,11 @@
           "type": "number",
           "default": 30,
           "description": "Automatically ignore subdirectories containing more than this number of files (set to 0 to disable)."
+        },
+        "thumbview.renderMediaThumbnails": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether image and PDF thumbnails are rendered inside Thumbview tiles."
         }
       }
     },

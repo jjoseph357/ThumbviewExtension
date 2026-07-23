@@ -19,6 +19,9 @@ export interface RepoFile {
     lines: MiniLine[];
     lineCount: number;
     fullLines?: string[];
+    isImage?: boolean;
+    isPdf?: boolean;
+    mediaUri?: string;
 }
 
 // Coarse per-line category guess from leading/contained keywords, not a real parser.
@@ -138,6 +141,36 @@ function shouldIgnore(relativePath: string, rules: string[]): boolean {
     return ignored;
 }
 
+// Fast PDF Page 1 text stream extractor (parses text brackets (text) and TJ arrays from PDF stream chunks)
+async function extractPdfPage1Lines(fileUri: vscode.Uri): Promise<MiniLine[]> {
+    try {
+        const fileData = await vscode.workspace.fs.readFile(fileUri);
+        // Sample first 64KB chunk for Page 1 content
+        const chunkLength = Math.min(fileData.length, 64 * 1024);
+        const textChunk = Buffer.from(fileData.subarray(0, chunkLength)).toString("utf8");
+
+        const lines: MiniLine[] = [];
+        // Match literal PDF text strings inside (text) or [(text)] within BT...ET blocks
+        const textMatches = textChunk.match(/\(([^()]+)\)/g);
+        if (textMatches && textMatches.length > 0) {
+            for (let idx = 0; idx < Math.min(textMatches.length, 40); idx++) {
+                const rawStr = textMatches[idx].slice(1, -1).trim();
+                if (rawStr.length >= 2) {
+                    lines.push({
+                        text: rawStr.substring(0, 150),
+                        indent: Math.min(rawStr.length % 10, 8),
+                        length: Math.min(rawStr.length, 150),
+                        category: "normal"
+                    });
+                }
+            }
+        }
+        return lines;
+    } catch {
+        return [];
+    }
+}
+
 export async function scanRepository(): Promise<RepoFile[]> {
     // Scan all files but exclude non-code, library, or build folders
     const files = await vscode.workspace.findFiles(
@@ -185,6 +218,39 @@ export async function scanRepository(): Promise<RepoFile[]> {
         }
 
         try {
+            const ext = path.extname(file.fsPath).toLowerCase().slice(1);
+            const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext);
+            const isPdf = ext === "pdf";
+
+            if (isImage) {
+                result.push({
+                    id: file.fsPath,
+                    path: vscode.workspace.asRelativePath(file),
+                    uri: file.toString(),
+                    lines: [],
+                    lineCount: 1,
+                    isImage: true,
+                    isPdf: false,
+                    mediaUri: file.toString()
+                });
+                continue;
+            }
+
+            if (isPdf) {
+                const pdfLines = await extractPdfPage1Lines(file);
+                result.push({
+                    id: file.fsPath,
+                    path: vscode.workspace.asRelativePath(file),
+                    uri: file.toString(),
+                    lines: pdfLines,
+                    lineCount: Math.max(pdfLines.length, 1),
+                    isImage: false,
+                    isPdf: true,
+                    mediaUri: file.toString()
+                });
+                continue;
+            }
+
             const stat = await vscode.workspace.fs.stat(file);
             // Skip massive files (>2MB) to prevent memory overload
             if (stat.size > 2 * 1024 * 1024) {

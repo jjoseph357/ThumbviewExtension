@@ -542,6 +542,8 @@ function colorForCategory(category, isKey) {
 // Draws one file's minimap into the given cell rect, one row per source line scaled to
 // fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
 // render real glyphs, so each token is drawn as a flat colored rect proportional to its
+let imageCache = {};
+
 // character length instead ("useText" branch below) — this is what makes small tiles
 // still readable as a rough shape/density map rather than unreadable tiny text.
 function drawMinimap(file, x, y, w, h) {
@@ -549,6 +551,102 @@ function drawMinimap(file, x, y, w, h) {
     ctx.beginPath();
     ctx.rect(x, y, w, h);
     ctx.clip();
+
+    if (file.isImage) {
+        const shouldRenderMedia = data && data.renderMediaThumbnails !== false;
+        if (shouldRenderMedia && file.mediaUri) {
+            if (!imageCache[file.mediaUri]) {
+                const img = new Image();
+                img.src = file.mediaUri;
+                img.onload = () => render();
+                imageCache[file.mediaUri] = img;
+            }
+            const img = imageCache[file.mediaUri];
+            if (img.complete && img.naturalWidth > 0) {
+                // Compressed/scaled image thumbnail tile
+                ctx.drawImage(img, x, y, w, h);
+                ctx.restore();
+                return;
+            }
+        }
+        ctx.fillStyle = "#252526";
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = "#858585";
+        ctx.font = "10px system-ui";
+        ctx.fillText("[Image]", x + 6, y + h / 2);
+        ctx.restore();
+        return;
+    }
+
+    if (file.isPdf) {
+        const shouldRenderMedia = data && data.renderMediaThumbnails !== false;
+        if (shouldRenderMedia && file.mediaUri) {
+            if (!imageCache[file.mediaUri]) {
+                if (typeof pdfjsLib !== "undefined") {
+                    imageCache[file.mediaUri] = "loading";
+                    if (window.PDF_WORKER_URI) {
+                        pdfjsLib.GlobalWorkerOptions.workerSrc = window.PDF_WORKER_URI;
+                    }
+                    const loadingTask = pdfjsLib.getDocument({
+                        url: file.mediaUri,
+                        withCredentials: false
+                    });
+                    loadingTask.promise.then(pdf => {
+                        return pdf.getPage(1);
+                    }).then(page => {
+                        const viewport = page.getViewport({ scale: 0.5 });
+                        const pdfCanvas = document.createElement("canvas");
+                        const pdfCtx = pdfCanvas.getContext("2d");
+                        pdfCanvas.width = viewport.width;
+                        pdfCanvas.height = viewport.height;
+                        const renderContext = {
+                            canvasContext: pdfCtx,
+                            viewport: viewport
+                        };
+                        return page.render(renderContext).promise.then(() => {
+                            const img = new Image();
+                            img.onload = () => {
+                                imageCache[file.mediaUri] = img;
+                                render();
+                            };
+                            img.onerror = () => {
+                                imageCache[file.mediaUri] = "error";
+                            };
+                            img.src = pdfCanvas.toDataURL("image/jpeg", 0.7);
+                        });
+                    }).catch(err => {
+                        console.error("PDF RENDER ERROR:", err);
+                        imageCache[file.mediaUri] = "error";
+                    });
+                }
+            }
+            const cachedPdfImg = imageCache[file.mediaUri];
+            if (cachedPdfImg && cachedPdfImg !== "error" && cachedPdfImg !== "loading" && cachedPdfImg.complete && cachedPdfImg.naturalWidth > 0) {
+                // Draw actual visual PDF Page 1 snapshot image
+                ctx.drawImage(cachedPdfImg, x, y, w, h);
+                ctx.restore();
+                return;
+            }
+        }
+        
+        ctx.fillStyle = "#1e1e24";
+        ctx.fillRect(x, y, w, h);
+
+        ctx.fillStyle = "#e11d48"; // Crimson PDF header bar
+        ctx.fillRect(x, y, w, 14);
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "9px system-ui, sans-serif";
+        ctx.fillText("PDF - Page 1", x + 6, y + 10);
+
+        ctx.fillStyle = "rgba(255, 255, 255, 0.25)";
+        for (let pLine = 0; pLine < Math.min(12, Math.floor((h - 20) / 4)); pLine++) {
+            const lineW = ((pLine * 37) % 60 + 35) / 100 * (w - 12);
+            ctx.fillRect(x + 6, y + 18 + pLine * 4, lineW, 2);
+        }
+
+        ctx.restore();
+        return;
+    }
 
     const lines = file.lines || [];
     const lineCount = Math.max(lines.length, 1);
@@ -929,6 +1027,15 @@ canvas.addEventListener("click", event => {
                 return;
             }
 
+            // Clicked inside media card body -> switch/open tab without line jump
+            if (file.isImage || file.isPdf) {
+                vscode.postMessage({
+                    command: "switchTab",
+                    uri: file.uri
+                });
+                return;
+            }
+
             // Clicked inside the minimap body -> jump to line in document
             const minimapTop = c.y + headerHeight;
             const minimapHeight = Math.max(1, c.h - 34);
@@ -1020,6 +1127,11 @@ function updateHoverTooltip(clientX, clientY) {
             hoveredLineIdx = Math.floor(relativeY * file.lineCount);
             break;
         }
+    }
+
+    if (hoveredFile && (hoveredFile.isImage || hoveredFile.isPdf)) {
+        tooltip.style.display = "none";
+        return;
     }
 
     if (hoveredFile && hoveredLineIdx >= 0 && hoveredLineIdx < hoveredFile.lineCount) {

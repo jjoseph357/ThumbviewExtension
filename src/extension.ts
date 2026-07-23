@@ -139,6 +139,18 @@ export async function activate(context: vscode.ExtensionContext) {
 
             const order = fileOrder.getOrder();
             const mode = getLayoutMode();
+            const renderMediaThumbnails = vscode.workspace.getConfiguration("thumbview").get<boolean>("renderMediaThumbnails") ?? true;
+            const filesWithWebviewUris = files.map(file => {
+                if ((file.isImage || file.isPdf) && file.mediaUri) {
+                    try {
+                        const webviewUri = panel.webview.asWebviewUri(vscode.Uri.parse(file.uri)).toString();
+                        return { ...file, mediaUri: webviewUri };
+                    } catch {
+                        return file;
+                    }
+                }
+                return file;
+            });
 
             if (mode === "spanning_grid") {
                 // Allocations/rows are persisted so a file's cell count and the grid's
@@ -147,7 +159,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("repomap.spanningAllocations") || {};
                 const savedRows = context.workspaceState.get<number | null>("repomap.spanningRows") || null;
 
-                const layout = buildSpanningGrid(files, order, savedAllocations, savedRows);
+                const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows);
 
                 await context.workspaceState.update("repomap.spanningAllocations", layout.allocations);
                 await context.workspaceState.update("repomap.spanningRows", layout.rows);
@@ -162,6 +174,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 panel.webview.postMessage({
                     command: "data",
                     mode: "spanning_grid",
+                    renderMediaThumbnails,
                     files: filesWithSlots,
                     layout: {
                         cols: layout.cols,
@@ -171,7 +184,7 @@ export async function activate(context: vscode.ExtensionContext) {
             } else {
                 const layout = buildStableGrid(order.length);
 
-                const filesWithSlots = files.map(file => ({
+                const filesWithSlots = filesWithWebviewUris.map(file => ({
                     ...file,
                     slot: layout.slots[order.indexOf(file.id)],
                     nCells: 1,
@@ -181,6 +194,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 panel.webview.postMessage({
                     command: "data",
                     mode: "uniform_grid",
+                    renderMediaThumbnails,
                     files: filesWithSlots,
                     layout: {
                         cols: layout.cols,
@@ -233,7 +247,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     enableScripts: true,
                     retainContextWhenHidden: true,
                     localResourceRoots: [
-                        vscode.Uri.joinPath(context.extensionUri, "media")
+                        vscode.Uri.joinPath(context.extensionUri, "media"),
+                        ...(vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders.map(f => f.uri) : [])
                     ]
                 }
             );
@@ -251,8 +266,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "switchTab") {
                     try {
-                        const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(msg.uri));
-                        await vscode.window.showTextDocument(doc, { preview: false });
+                        const uri = vscode.Uri.parse(msg.uri);
+                        try {
+                            const doc = await vscode.workspace.openTextDocument(uri);
+                            await vscode.window.showTextDocument(doc, { preview: false });
+                        } catch {
+                            await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                        }
                     } catch (err: any) {
                         console.error("THUMBVIEW SWITCH TAB ERROR:", err);
                     }
@@ -260,9 +280,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "jump") {
                     try {
-                        const doc = await vscode.workspace.openTextDocument(
-                            vscode.Uri.parse(msg.uri)
-                        );
+                        const uri = vscode.Uri.parse(msg.uri);
+                        let doc: vscode.TextDocument;
+                        try {
+                            doc = await vscode.workspace.openTextDocument(uri);
+                        } catch {
+                            // Binary/media file fallback
+                            await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                            return;
+                        }
 
                         const editor = await vscode.window.showTextDocument(doc, { preview: false });
 
@@ -714,7 +740,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Watch configuration changes
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
-        if (e.affectsConfiguration("thumbview.layoutMode") && activePanel) {
+        if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails")) && activePanel) {
             refreshRepositoryMap(activePanel);
         }
         if (e.affectsConfiguration("thumbview.ignorePatterns")) {
@@ -812,6 +838,12 @@ function getHtml(
     const jsUri = webview.asWebviewUri(
         vscode.Uri.joinPath(context.extensionUri, "media", "overview.js")
     );
+    const pdfJsUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(context.extensionUri, "media", "pdf.min.js")
+    );
+    const pdfWorkerUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(context.extensionUri, "media", "pdf.worker.min.js")
+    );
 
     const nonce = getNonce();
 
@@ -822,7 +854,7 @@ function getHtml(
 
     <meta
         http-equiv="Content-Security-Policy"
-        content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';"
+        content="default-src 'none'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'unsafe-eval' ${webview.cspSource}; worker-src blob: data: ${webview.cspSource}; connect-src ${webview.cspSource} blob: data:;"
     >
 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1029,6 +1061,10 @@ function getHtml(
             </div>
         </div>
     </div>
+    <script nonce="${nonce}">
+        window.PDF_WORKER_URI = "${pdfWorkerUri}";
+    </script>
+    <script nonce="${nonce}" src="${pdfJsUri}"></script>
     <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;
