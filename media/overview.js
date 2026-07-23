@@ -79,7 +79,20 @@ window.addEventListener("keydown", event => {
     }
 });
 
+let resizeRafId = null;
+
 function resize() {
+    if (window.innerWidth < 100 || window.innerHeight < 100) {
+        // Webview tab is hidden or backgrounded; ignore transient collapsed dimensions
+        if (!resizeRafId) {
+            resizeRafId = requestAnimationFrame(() => {
+                resizeRafId = null;
+                resize();
+            });
+        }
+        return;
+    }
+
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.floor(window.innerWidth * dpr);
     canvas.height = Math.floor(window.innerHeight * dpr);
@@ -628,7 +641,7 @@ function drawMinimap(file, x, y, w, h) {
                 return;
             }
         }
-        
+
         ctx.fillStyle = "#1e1e24";
         ctx.fillRect(x, y, w, h);
 
@@ -703,9 +716,11 @@ function drawMinimap(file, x, y, w, h) {
             const tokens = tokenizeLine(trimmedText, lang);
             const totalTextChars = Math.max(lineTextLength, 1);
 
-            const useText = stepY >= 2.5;
+            const useText = stepY >= 3;
             if (useText) {
-                const fontSize = Math.min(12, Math.max(4, Math.floor(stepY * 0.85)));
+                // For small files (few lines), keep font size small (5px) so much more line width is visible
+                const isSmallFile = lines.length <= 50 || stepY > 4;
+                const fontSize = isSmallFile ? 5 : Math.min(10, Math.max(4, Math.floor(stepY * 0.85)));
                 ctx.font = `${fontSize}px Consolas, monospace`;
             }
 
@@ -715,7 +730,7 @@ function drawMinimap(file, x, y, w, h) {
 
                 ctx.fillStyle = colorForCategory(tok.category, tok.isKey);
                 if (useText) {
-                    ctx.fillText(tok.text, currentX, y + i * stepY + stepY * 0.8);
+                    ctx.fillText(tok.text, currentX, y + i * stepY + Math.min(stepY * 0.8, 8));
                     currentX += ctx.measureText(tok.text).width;
                 } else {
                     const tokLen = tok.text.length;
@@ -812,14 +827,38 @@ function render() {
         return;
     }
 
+    const rectW = canvas.clientWidth || window.innerWidth;
+    const rectH = canvas.clientHeight || window.innerHeight;
+
+    if (rectW < 200 || rectH < 200) {
+        // Tab container is transitionally backgrounded or hidden
+        if (!resizeRafId) {
+            resizeRafId = requestAnimationFrame(() => {
+                resizeRafId = null;
+                render();
+            });
+        }
+        return;
+    }
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const targetW = Math.floor(rectW * dpr);
+    const targetH = Math.floor(rectH * dpr);
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
     if (!data) {
         drawStatus();
         return;
     }
 
-    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.clearRect(0, 0, rectW, rectH);
     ctx.fillStyle = getThemeColor("--vscode-editor-background", "#18181c");
-    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.fillRect(0, 0, rectW, rectH);
 
     const filteredFiles = getFilteredFiles();
     if (filteredFiles.length === 0) {
@@ -843,8 +882,8 @@ function render() {
     const bottomMargin = 40;
     const sideMargin = 16;
 
-    const availableW = window.innerWidth - (sideMargin * 2);
-    const availableH = window.innerHeight - topMargin - bottomMargin;
+    const availableW = rectW - (sideMargin * 2);
+    const availableH = rectH - topMargin - bottomMargin;
 
     const cellW = availableW / gridCols;
     const cellH = availableH / gridRows;

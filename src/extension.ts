@@ -891,10 +891,10 @@ function getHtml(
             left: 16px;
             right: 16px;
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-start;
             align-items: center;
             pointer-events: none;
-            gap: 16px;
+            gap: 12px;
         }
 
         .breadcrumb-container {
@@ -1052,12 +1052,12 @@ function getHtml(
         <div id="hover-tooltip"></div>
         <div id="context-menu"></div>
         <div class="controls-overlay">
-            <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
-                <span class="breadcrumb-item" id="breadcrumb-root">root</span>
-            </div>
             <div class="search-container">
                 <input type="text" id="search-input" class="search-input" placeholder="Search files (e.g. auth)...">
                 <button id="clear-search" class="clear-search-btn" style="display: none;">&times;</button>
+            </div>
+            <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
+                <span class="breadcrumb-item" id="breadcrumb-root">root</span>
             </div>
         </div>
     </div>
