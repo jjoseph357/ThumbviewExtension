@@ -248,7 +248,7 @@ export async function scanRepository(): Promise<RepoFile[]> {
     if (denseFolders.length > 0 || cleanedRules.length !== gitignoreRules.length) {
         const updatedIgnored = Array.from(new Set([...cleanedRules, ...denseFolders]));
         const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-            ? vscode.ConfigurationTarget.WorkspaceFolder
+            ? vscode.ConfigurationTarget.Workspace
             : vscode.ConfigurationTarget.Global;
         await config.update("ignorePatterns", updatedIgnored, target);
         if (denseFolders.length > 0) {

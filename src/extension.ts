@@ -38,7 +38,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (changed) {
                     const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                        ? vscode.ConfigurationTarget.WorkspaceFolder
+                        ? vscode.ConfigurationTarget.Workspace
                         : vscode.ConfigurationTarget.Global;
                     await config.update("ignorePatterns", updatedIgnored, target);
                 }
@@ -521,7 +521,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             const current = config.get<string[]>("ignorePatterns") || [];
                             if (!current.includes(relPath)) {
                                 const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                                    ? vscode.ConfigurationTarget.Workspace
                                     : vscode.ConfigurationTarget.Global;
                                 await config.update("ignorePatterns", [...current, relPath], target);
                                 vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
@@ -693,7 +693,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const current = config.get<string[]>("ignorePatterns") || [];
             if (!current.includes(folderPath)) {
                 const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                    ? vscode.ConfigurationTarget.Workspace
                     : vscode.ConfigurationTarget.Global;
                 await config.update("ignorePatterns", [...current, folderPath], target);
                 vscode.window.showInformationMessage(`Added '${folderPath}' to ignore list.`);
@@ -717,7 +717,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const pattern = input.trim();
             if (!current.includes(pattern)) {
                 const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                    ? vscode.ConfigurationTarget.Workspace
                     : vscode.ConfigurationTarget.Global;
                 await config.update("ignorePatterns", [...current, pattern], target);
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
@@ -750,7 +750,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (patternsToRemove.length > 0) {
             const updated = current.filter(p => !patternsToRemove.includes(p));
             const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                ? vscode.ConfigurationTarget.WorkspaceFolder
+                ? vscode.ConfigurationTarget.Workspace
                 : vscode.ConfigurationTarget.Global;
             await config.update("ignorePatterns", updated, target);
             const msg = patternsToRemove.length === 1
