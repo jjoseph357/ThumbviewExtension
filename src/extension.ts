@@ -37,7 +37,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (changed) {
-                    await config.update("ignorePatterns", updatedIgnored, vscode.ConfigurationTarget.Global);
+                    const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+                        ? vscode.ConfigurationTarget.WorkspaceFolder
+                        : vscode.ConfigurationTarget.Global;
+                    await config.update("ignorePatterns", updatedIgnored, target);
                 }
             } catch {
             }
@@ -128,6 +131,15 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    const getOpenKeybindingLabel = (): string => {
+        try {
+            // Check package.json default or fallback
+            return "F4";
+        } catch {
+            return "F4";
+        }
+    };
+
     const refreshRepositoryMap = async (panel: vscode.WebviewPanel) => {
         try {
             panel.webview.postMessage({
@@ -143,6 +155,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const order = fileOrder.getOrder();
             const mode = getLayoutMode();
             const renderMediaThumbnails = vscode.workspace.getConfiguration("thumbview").get<boolean>("renderMediaThumbnails") ?? true;
+            const openKeybinding = getOpenKeybindingLabel();
             const filesWithWebviewUris = files.map(file => {
                 if ((file.isImage || file.isPdf) && file.mediaUri) {
                     try {
@@ -178,6 +191,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: "data",
                     mode: "spanning_grid",
                     renderMediaThumbnails,
+                    openKeybinding,
                     files: filesWithSlots,
                     layout: {
                         cols: layout.cols,
@@ -198,6 +212,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: "data",
                     mode: "uniform_grid",
                     renderMediaThumbnails,
+                    openKeybinding,
                     files: filesWithSlots,
                     layout: {
                         cols: layout.cols,
@@ -258,7 +273,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
             activePanel = panel;
 
-            panel.webview.html = getHtml(panel.webview, context);
+            panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
 
             panel.webview.onDidReceiveMessage(async msg => {
                 console.log("REPOMAP WEBVIEW MESSAGE:", msg);
@@ -505,7 +520,10 @@ export async function activate(context: vscode.ExtensionContext) {
                             const config = vscode.workspace.getConfiguration("thumbview");
                             const current = config.get<string[]>("ignorePatterns") || [];
                             if (!current.includes(relPath)) {
-                                await config.update("ignorePatterns", [...current, relPath], vscode.ConfigurationTarget.Global);
+                                const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+                                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                                    : vscode.ConfigurationTarget.Global;
+                                await config.update("ignorePatterns", [...current, relPath], target);
                                 vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
                             }
                             if (activePanel) {
@@ -674,7 +692,10 @@ export async function activate(context: vscode.ExtensionContext) {
             const config = vscode.workspace.getConfiguration("thumbview");
             const current = config.get<string[]>("ignorePatterns") || [];
             if (!current.includes(folderPath)) {
-                await config.update("ignorePatterns", [...current, folderPath], vscode.ConfigurationTarget.Global);
+                const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                    : vscode.ConfigurationTarget.Global;
+                await config.update("ignorePatterns", [...current, folderPath], target);
                 vscode.window.showInformationMessage(`Added '${folderPath}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
@@ -695,7 +716,10 @@ export async function activate(context: vscode.ExtensionContext) {
             const current = config.get<string[]>("ignorePatterns") || [];
             const pattern = input.trim();
             if (!current.includes(pattern)) {
-                await config.update("ignorePatterns", [...current, pattern], vscode.ConfigurationTarget.Global);
+                const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                    : vscode.ConfigurationTarget.Global;
+                await config.update("ignorePatterns", [...current, pattern], target);
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
@@ -725,7 +749,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
         if (patternsToRemove.length > 0) {
             const updated = current.filter(p => !patternsToRemove.includes(p));
-            await config.update("ignorePatterns", updated, vscode.ConfigurationTarget.Global);
+            const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+                ? vscode.ConfigurationTarget.WorkspaceFolder
+                : vscode.ConfigurationTarget.Global;
+            await config.update("ignorePatterns", updated, target);
             const msg = patternsToRemove.length === 1
                 ? `Removed '${patternsToRemove[0]}' from ignore list.`
                 : `Batch removed ${patternsToRemove.length} ignore patterns.`;
@@ -858,7 +885,8 @@ export function deactivate() { }
 // can run in the panel — see getNonce() below.
 function getHtml(
     webview: vscode.Webview,
-    context: vscode.ExtensionContext
+    context: vscode.ExtensionContext,
+    openKeybindingLabel: string = "F4"
 ): string {
     const jsUri = webview.asWebviewUri(
         vscode.Uri.joinPath(context.extensionUri, "media", "overview.js")
@@ -1174,7 +1202,7 @@ function getHtml(
                 <div class="modal-section-title">Keyboard &amp; Mouse Shortcuts</div>
                 <div class="shortcut-row">
                     <span>Open / Focus Thumbview</span>
-                    <span>Press <span class="kbd">F4</span></span>
+                    <span>Press <span class="kbd" id="open-shortcut-label">${openKeybindingLabel}</span></span>
                 </div>
                 <div class="shortcut-row">
                     <span>Magnifying Code Preview</span>

@@ -162,6 +162,12 @@ window.addEventListener("message", event => {
                 f._combinedText = textArr.join("\n");
             }
         }
+        if (msg.openKeybinding) {
+            const kbdLabel = document.getElementById("open-shortcut-label");
+            if (kbdLabel) {
+                kbdLabel.textContent = msg.openKeybinding;
+            }
+        }
         render();
     }
 

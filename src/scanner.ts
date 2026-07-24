@@ -247,7 +247,10 @@ export async function scanRepository(): Promise<RepoFile[]> {
 
     if (denseFolders.length > 0 || cleanedRules.length !== gitignoreRules.length) {
         const updatedIgnored = Array.from(new Set([...cleanedRules, ...denseFolders]));
-        await config.update("ignorePatterns", updatedIgnored, vscode.ConfigurationTarget.Global);
+        const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+            ? vscode.ConfigurationTarget.WorkspaceFolder
+            : vscode.ConfigurationTarget.Global;
+        await config.update("ignorePatterns", updatedIgnored, target);
         if (denseFolders.length > 0) {
             vscode.window.showInformationMessage(`Auto-ignored ${denseFolders.length} top-level/dense directory (e.g. ${denseFolders[0]}). You can un-ignore them anytime in the sidebar.`);
         }
