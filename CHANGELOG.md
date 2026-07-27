@@ -5,6 +5,16 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-07-27
+
+### Fixed
+- **Auto-Ignore Re-Add Loop**: Un-ignoring a dense directory no longer causes it to reappear in the ignore list on the next scan. A persistent `thumbview.autoIgnoreExclusions` list tracks user un-ignore decisions so auto-ignore respects them.
+- **Cross-Project Ignore Pollution**: All `thumbview.ignorePatterns` reads and writes are now scoped to `ConfigurationTarget.WorkspaceFolder` with explicit workspace folder URI, ensuring ignore patterns from one project never leak into another VS Code window.
+
+### Added
+- **Recursive Subfolder Card Expansion**: When the root grid produces cells too small to read (below 60×40px), the view automatically groups files by immediate subfolder and renders clickable folder cards showing folder name, file count, and a density bar. Clicking a card drills into that folder. Recursion continues until tiles are large enough for individual minimap rendering.
+- **`thumbview.autoIgnoreExclusions` Setting**: New configuration array that persists directories the user has explicitly un-ignored, preventing auto-ignore from re-adding them.
+
 ## [0.2.5] - 2026-07-24
 
 ### Fixed

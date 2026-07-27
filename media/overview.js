@@ -303,6 +303,32 @@ function getFilteredFiles() {
     return data.files.filter(f => f.path.startsWith(focusedFolder));
 }
 
+// Groups files by their immediate child subfolder relative to basePath.
+// Returns { folders: [{name, path, fileCount, files}], rootFiles: [file...] }
+function getSubfolderGroups(files, basePath) {
+    const groups = {};
+    const rootFiles = [];
+
+    for (const f of files) {
+        const relPath = basePath ? f.path.substring(basePath.length) : f.path;
+        const slashIdx = relPath.indexOf("/");
+        if (slashIdx === -1) {
+            rootFiles.push(f);
+        } else {
+            const folderName = relPath.substring(0, slashIdx);
+            const folderPath = (basePath || "") + folderName + "/";
+            if (!groups[folderPath]) {
+                groups[folderPath] = { name: folderName, path: folderPath, fileCount: 0, files: [] };
+            }
+            groups[folderPath].fileCount++;
+            groups[folderPath].files.push(f);
+        }
+    }
+
+    const folders = Object.values(groups).sort((a, b) => b.fileCount - a.fileCount);
+    return { folders, rootFiles };
+}
+
 function drawStatus() {
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     ctx.fillStyle = "#18181c";
@@ -897,7 +923,6 @@ function render() {
     // grid geometry and cell slots remain 100% stable when files or subfolders are ignored.
     const gridCols = data.layout.cols;
     const gridRows = data.layout.rows;
-    const slots = filteredFiles.map(f => f.slot);
 
     const topMargin = 64;
     const bottomMargin = 40;
@@ -906,109 +931,271 @@ function render() {
     const availableW = rectW - (sideMargin * 2);
     const availableH = rectH - topMargin - bottomMargin;
 
-    const cellW = availableW / gridCols;
-    const cellH = availableH / gridRows;
+    const rootCellW = availableW / gridCols;
+    const rootCellH = availableH / gridRows;
+
+    // Minimum usable cell size — below this, tiles are too small to read/click,
+    // so we switch to subfolder card mode that groups files into clickable folder cards.
+    const MIN_CELL_W = 60;
+    const MIN_CELL_H = 40;
+    const cellsTooSmall = rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H;
 
     const queryActive = !!searchQuery;
 
-    // Clear stale cell bounding boxes across all files
+    // Clear stale cell bounding boxes and folder card refs across all files
     for (const f of data.files) {
         delete f._cell;
     }
+    // Clear previous folder card click targets
+    if (!data._folderCards) data._folderCards = [];
+    data._folderCards.length = 0;
 
-    for (let i = 0; i < filteredFiles.length; i++) {
-        const file = filteredFiles[i];
-        const slot = slots[i];
-        if (!slot) continue;
+    if (cellsTooSmall) {
+        // Subfolder card mode: group files into immediate child folders and render
+        // each as a clickable card. Root-level files get individual tiles. The local
+        // buildStableGrid duplicate computes a fresh grid for these items.
+        const { folders, rootFiles } = getSubfolderGroups(filteredFiles, focusedFolder);
+        const totalItems = folders.length + rootFiles.length;
+        if (totalItems === 0) return;
 
-        const col = slot[0];
-        const row = slot[1];
-        const nCells = file.nCells || 1;
+        const localGrid = buildStableGrid(totalItems);
+        const localCellW = availableW / localGrid.cols;
+        const localCellH = availableH / localGrid.rows;
 
-        const x = sideMargin + col * cellW;
-        const y = topMargin + row * cellH;
-        const fileH = cellH * nCells;
+        // If even the subfolder grid cells are too small, recurse: group the subfolders
+        // themselves into higher-level groups. This is handled naturally — clicking any
+        // folder card will set focusedFolder and re-render, which will re-evaluate
+        // cellsTooSmall with the new subset.
 
-        file._cell = {
-            x,
-            y,
-            w: cellW,
-            h: fileH
-        };
+        let slotIdx = 0;
 
-        // View Frustum Culling: skip rendering offscreen cards that are outside the visible window
-        if (y + fileH < -50 || y > rectH + 50) {
-            continue;
+        // Render folder cards
+        for (const group of folders) {
+            if (slotIdx >= localGrid.slots.length) break;
+            const slot = localGrid.slots[slotIdx++];
+            const x = sideMargin + slot[0] * localCellW;
+            const y = topMargin + slot[1] * localCellH;
+
+            if (y + localCellH < -50 || y > rectH + 50) continue;
+
+            ctx.save();
+
+            // Card background with folder accent
+            ctx.fillStyle = "#1e1e24";
+            ctx.fillRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
+
+            ctx.strokeStyle = "rgba(168, 85, 247, 0.4)";
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
+
+            // Folder icon accent bar
+            ctx.fillStyle = "rgba(168, 85, 247, 0.15)";
+            ctx.fillRect(x + 4, y + 4, localCellW - 8, Math.min(22, localCellH - 8));
+
+            // Folder name
+            ctx.fillStyle = "#c4b5fd";
+            const fontSize = Math.max(8, Math.min(11, localCellW / 12));
+            ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
+            const maxLabelW = localCellW - 24;
+            let label = group.name;
+            if (ctx.measureText(label).width > maxLabelW) {
+                while (label.length > 1 && ctx.measureText(label + "…").width > maxLabelW) {
+                    label = label.slice(0, -1);
+                }
+                label += "…";
+            }
+            ctx.fillText(label, x + 10, y + 18);
+
+            // File count
+            ctx.fillStyle = "#707075";
+            ctx.font = `${Math.max(7, fontSize - 2)}px system-ui, sans-serif`;
+            const countText = `${group.fileCount} file${group.fileCount !== 1 ? "s" : ""}`;
+            ctx.fillText(countText, x + 10, y + 18 + fontSize + 2);
+
+            // Density preview bar — color-coded horizontal bar proportional to file count
+            if (localCellH > 50) {
+                const barY = y + localCellH - 16;
+                const barW = Math.min(localCellW - 20, Math.max(10, (group.fileCount / 50) * (localCellW - 20)));
+                const hue = Math.max(0, 270 - group.fileCount * 3);
+                ctx.fillStyle = `hsla(${hue}, 60%, 55%, 0.5)`;
+                ctx.fillRect(x + 10, barY, barW, 6);
+            }
+
+            // Store click target for folder cards
+            data._folderCards.push({
+                x: x + 4,
+                y: y + 4,
+                w: localCellW - 8,
+                h: localCellH - 8,
+                folderPath: group.path
+            });
+
+            ctx.restore();
         }
 
-        const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
+        // Render root-level files as individual tiles in the same grid
+        for (const file of rootFiles) {
+            if (slotIdx >= localGrid.slots.length) break;
+            const slot = localGrid.slots[slotIdx++];
+            const col = slot[0];
+            const row = slot[1];
 
-        const isActive = file.uri === activeFileUri;
-        const isOpen = openFilesSet.has(file.uri);
+            const x = sideMargin + col * localCellW;
+            const y = topMargin + row * localCellH;
+            const fileH = localCellH;
 
-        ctx.save();
+            file._cell = { x, y, w: localCellW, h: fileH };
 
-        if (queryActive && !isSearchMatch) {
-            ctx.globalAlpha = 0.15;
+            if (y + fileH < -50 || y > rectH + 50) continue;
+
+            const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
+            const isActive = file.uri === activeFileUri;
+            const isOpen = openFilesSet.has(file.uri);
+
+            ctx.save();
+            if (queryActive && !isSearchMatch) ctx.globalAlpha = 0.15;
+
+            ctx.fillStyle = "#1e1e24";
+            ctx.fillRect(x + 4, y + 4, localCellW - 8, fileH - 8);
+
+            if (queryActive && isSearchMatch) {
+                ctx.strokeStyle = "#ec4899";
+                ctx.lineWidth = 2.5;
+            } else if (isActive) {
+                ctx.strokeStyle = "#a855f7";
+                ctx.lineWidth = 2.5;
+            } else if (isOpen) {
+                ctx.strokeStyle = "#f97316";
+                ctx.lineWidth = 1.8;
+            } else {
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+                ctx.lineWidth = 1;
+            }
+            ctx.strokeRect(x + 4, y + 4, localCellW - 8, fileH - 8);
+
+            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
+            ctx.font = "10px system-ui, sans-serif";
+
+            if (file._lastCellW !== localCellW || !file._fittedLabel) {
+                file._lastCellW = localCellW;
+                file._fittedLabel = fitPathText(file.path, localCellW - 36);
+            }
+            ctx.fillText(file._fittedLabel, x + 10, y + 18);
+
+            if (isOpen) {
+                const closeBtnX = x + localCellW - 20;
+                const closeBtnY = y + 10;
+                file._closeBtn = { x: closeBtnX, y: closeBtnY, w: 12, h: 12 };
+                ctx.fillStyle = "#707075";
+                ctx.font = "12px system-ui, sans-serif";
+                ctx.fillText("×", closeBtnX, closeBtnY + 8);
+            } else {
+                delete file._closeBtn;
+            }
+
+            drawMinimap(file, x + 10, y + 24, Math.max(1, localCellW - 20), Math.max(1, fileH - 34));
+            ctx.restore();
         }
+    } else {
+        // Normal file tile mode — cells are large enough to render individual minimaps
+        const slots = filteredFiles.map(f => f.slot);
+        const cellW = rootCellW;
+        const cellH = rootCellH;
 
-        // Draw card background
-        ctx.fillStyle = "#1e1e24";
-        ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
+        for (let i = 0; i < filteredFiles.length; i++) {
+            const file = filteredFiles[i];
+            const slot = slots[i];
+            if (!slot) continue;
 
-        // Border rendering prioritisation
-        if (queryActive && isSearchMatch) {
-            ctx.strokeStyle = "#ec4899"; // Pink search match border
-            ctx.lineWidth = 2.5;
-        } else if (isActive) {
-            ctx.strokeStyle = "#a855f7"; // Purple active border
-            ctx.lineWidth = 2.5;
-        } else if (isOpen) {
-            ctx.strokeStyle = "#f97316"; // Orange open tab border
-            ctx.lineWidth = 1.8;
-        } else {
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-            ctx.lineWidth = 1;
-        }
-        ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
+            const col = slot[0];
+            const row = slot[1];
+            const nCells = file.nCells || 1;
 
-        ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
-        ctx.font = "10px system-ui, sans-serif";
+            const x = sideMargin + col * cellW;
+            const y = topMargin + row * cellH;
+            const fileH = cellH * nCells;
 
-        if (file._lastCellW !== cellW || !file._fittedLabel) {
-            file._lastCellW = cellW;
-            file._fittedLabel = fitPathText(file.path, cellW - 36);
-        }
-
-        ctx.fillText(file._fittedLabel, x + 10, y + 18);
-
-        // Draw close '×' button if tab is open
-        if (isOpen) {
-            const closeBtnX = x + cellW - 20;
-            const closeBtnY = y + 10;
-            file._closeBtn = {
-                x: closeBtnX,
-                y: closeBtnY,
-                w: 12,
-                h: 12
+            file._cell = {
+                x,
+                y,
+                w: cellW,
+                h: fileH
             };
 
-            ctx.fillStyle = "#707075";
-            ctx.font = "12px system-ui, sans-serif";
-            ctx.fillText("×", closeBtnX, closeBtnY + 8);
-        } else {
-            delete file._closeBtn;
+            // View Frustum Culling: skip rendering offscreen cards that are outside the visible window
+            if (y + fileH < -50 || y > rectH + 50) {
+                continue;
+            }
+
+            const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
+
+            const isActive = file.uri === activeFileUri;
+            const isOpen = openFilesSet.has(file.uri);
+
+            ctx.save();
+
+            if (queryActive && !isSearchMatch) {
+                ctx.globalAlpha = 0.15;
+            }
+
+            // Draw card background
+            ctx.fillStyle = "#1e1e24";
+            ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
+
+            // Border rendering prioritisation
+            if (queryActive && isSearchMatch) {
+                ctx.strokeStyle = "#ec4899"; // Pink search match border
+                ctx.lineWidth = 2.5;
+            } else if (isActive) {
+                ctx.strokeStyle = "#a855f7"; // Purple active border
+                ctx.lineWidth = 2.5;
+            } else if (isOpen) {
+                ctx.strokeStyle = "#f97316"; // Orange open tab border
+                ctx.lineWidth = 1.8;
+            } else {
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+                ctx.lineWidth = 1;
+            }
+            ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
+
+            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
+            ctx.font = "10px system-ui, sans-serif";
+
+            if (file._lastCellW !== cellW || !file._fittedLabel) {
+                file._lastCellW = cellW;
+                file._fittedLabel = fitPathText(file.path, cellW - 36);
+            }
+
+            ctx.fillText(file._fittedLabel, x + 10, y + 18);
+
+            // Draw close '×' button if tab is open
+            if (isOpen) {
+                const closeBtnX = x + cellW - 20;
+                const closeBtnY = y + 10;
+                file._closeBtn = {
+                    x: closeBtnX,
+                    y: closeBtnY,
+                    w: 12,
+                    h: 12
+                };
+
+                ctx.fillStyle = "#707075";
+                ctx.font = "12px system-ui, sans-serif";
+                ctx.fillText("×", closeBtnX, closeBtnY + 8);
+            } else {
+                delete file._closeBtn;
+            }
+
+            drawMinimap(
+                file,
+                x + 10,
+                y + 24,
+                Math.max(1, cellW - 20),
+                Math.max(1, fileH - 34)
+            );
+
+            ctx.restore();
         }
-
-        drawMinimap(
-            file,
-            x + 10,
-            y + 24,
-            Math.max(1, cellW - 20),
-            Math.max(1, fileH - 34)
-        );
-
-        ctx.restore();
     }
 }
 
@@ -1024,6 +1211,18 @@ canvas.addEventListener("click", event => {
     const rect = canvas.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
+
+    // Check folder card clicks first (subfolder card mode)
+    if (data._folderCards) {
+        for (const card of data._folderCards) {
+            if (px >= card.x && px <= card.x + card.w && py >= card.y && py <= card.y + card.h) {
+                focusedFolder = card.folderPath;
+                updateBreadcrumbs();
+                render();
+                return;
+            }
+        }
+    }
 
     const filteredFiles = getFilteredFiles();
     for (const file of filteredFiles) {

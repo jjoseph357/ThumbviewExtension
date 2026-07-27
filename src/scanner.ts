@@ -178,9 +178,15 @@ export async function scanRepository(): Promise<RepoFile[]> {
         "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv,env,.env,lib,vendor}/**"
     );
 
-    // Apply ignore patterns configured in thumbview.ignorePatterns setting
-    const config = vscode.workspace.getConfiguration("thumbview");
-    const gitignoreRules = config.get<string[]>("ignorePatterns") || [];
+    // Scope configuration to the active workspace folder for proper per-project isolation.
+    // inspect() separates per-level values; only use folder/workspace level, never global,
+    // so stale patterns from other projects don't leak into this workspace.
+    const wsFolder = vscode.workspace.workspaceFolders?.[0];
+    const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
+    const inspectedIgnore = config.inspect<string[]>("ignorePatterns");
+    const gitignoreRules = inspectedIgnore?.workspaceFolderValue ?? inspectedIgnore?.workspaceValue ?? [];
+    const inspectedExcl = config.inspect<string[]>("autoIgnoreExclusions");
+    const autoIgnoreExclusions = inspectedExcl?.workspaceFolderValue ?? inspectedExcl?.workspaceValue ?? [];
 
     // Prioritize auto-ignoring top-level dense folders & library subdirectories (>threshold files)
     const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
@@ -213,10 +219,17 @@ export async function scanRepository(): Promise<RepoFile[]> {
         return false;
     };
 
+    // User-excluded folders that auto-ignore must never re-add
+    const exclusionSet = new Set(autoIgnoreExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
+    const isUserExcluded = (dir: string): boolean => {
+        const clean = dir.trim().replace(/^\/+|\/+$/g, "");
+        return exclusionSet.has(clean);
+    };
+
     // First check top-level root folders so massive virtualenvs/build dirs (like BOFS/) are ignored as a single top-level entry
     for (const [topDir, count] of topLevelFolderCounts.entries()) {
-        const isLibFolder = /(^|\/)(lib|vendor|libraries|venv|\.venv|bofs)(\/|$)/i.test(topDir);
-        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(topDir, gitignoreRules)) {
+        const isLibFolder = /(^|\/)(lib|vendor|libraries|venv|\.venv)(\/|$)/i.test(topDir);
+        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(topDir, gitignoreRules) && !isUserExcluded(topDir)) {
             denseFolders.push(topDir);
         }
     }
@@ -225,7 +238,7 @@ export async function scanRepository(): Promise<RepoFile[]> {
     const combinedRules = [...gitignoreRules, ...denseFolders];
     for (const [folderDir, count] of folderCounts.entries()) {
         const isLibFolder = /(^|\/)(lib|vendor|libraries|venv|\.venv)(\/|$)/i.test(folderDir);
-        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(folderDir, combinedRules)) {
+        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(folderDir, combinedRules) && !isUserExcluded(folderDir)) {
             denseFolders.push(folderDir);
             combinedRules.push(folderDir);
         }
@@ -247,8 +260,8 @@ export async function scanRepository(): Promise<RepoFile[]> {
 
     if (denseFolders.length > 0 || cleanedRules.length !== gitignoreRules.length) {
         const updatedIgnored = Array.from(new Set([...cleanedRules, ...denseFolders]));
-        const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-            ? vscode.ConfigurationTarget.Workspace
+        const target = wsFolder
+            ? vscode.ConfigurationTarget.WorkspaceFolder
             : vscode.ConfigurationTarget.Global;
         await config.update("ignorePatterns", updatedIgnored, target);
         if (denseFolders.length > 0) {

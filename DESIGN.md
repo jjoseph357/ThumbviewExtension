@@ -36,6 +36,14 @@ Searching open tab arrays linearly (`openFiles.includes(file.uri)`) for every ca
 
 When a parent directory (e.g., virtual environment `BOFS/` or `.venv/`) contained 1,000 subdirectories, naive auto-ignore generated 1,000 redundant tree items in the sidebar. Aggregating ignore rules to top-level root folders (`BOFS/`) and pruning nested child paths keeps the ignore list clean, prevents memory degradation, and allows users to un-ignore top-level folders with a single click.
 
+## Auto-Ignore Exclusion List (`autoIgnoreExclusions`)
+
+Auto-ignore runs on every `scanRepository()` call, re-detecting dense folders from scratch. Without memory of prior user decisions, un-ignoring a folder only removed it from `ignorePatterns` — the very next scan would re-detect the same folder as dense and re-add it. The `autoIgnoreExclusions` persistent list solves this: when a user removes a directory pattern (ending with `/`) from ignores via the sidebar, it's added to `autoIgnoreExclusions`. The auto-ignore heuristic checks this list before adding any folder. This preserves auto-ignore's value for first-time discovery while respecting explicit user intent.
+
+## Recursive Subfolder Card Expansion (60×40px Threshold)
+
+Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. Rather than forcing the user to know which subfolder to navigate to (the old focused-folder behavior filtered to a subset but still used the root grid positions), the webview now detects when cells fall below 60px wide or 40px tall and automatically switches to a "subfolder card mode". Files are grouped by their immediate child folder relative to the current `focusedFolder`, and each group renders as a clickable card showing folder name, file count, and a color-coded density bar. Clicking a card sets `focusedFolder` to that subfolder and re-renders — if the new subset is still too large, the same grouping recurs at the next folder level. This continues until cells are large enough for individual minimap tiles, naturally handling arbitrarily deep hierarchies without any explicit recursion limit.
+
 ## Multi-Select Batch Deletion (`canSelectMany: true`)
 
 Managing ignored patterns one by one from the sidebar tree view was tedious. Enabling `canSelectMany: true` on `thumbview-ignores` allows users to select multiple patterns via `Shift + Click` or `Ctrl + Click` and remove them in a single atomic VS Code configuration update.

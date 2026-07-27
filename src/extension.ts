@@ -24,23 +24,30 @@ export async function activate(context: vscode.ExtensionContext) {
                     .map(line => line.trim())
                     .filter(line => line && !line.startsWith("#"));
 
-                const config = vscode.workspace.getConfiguration("thumbview");
-                const currentIgnored = config.get<string[]>("ignorePatterns") || [];
+                const config = vscode.workspace.getConfiguration("thumbview", workspaceFolders[0].uri);
+                const inspected = config.inspect<string[]>("ignorePatterns");
+                const currentIgnored = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
+                const inspectedExcl = config.inspect<string[]>("autoIgnoreExclusions");
+                const currentExclusions = inspectedExcl?.workspaceFolderValue ?? inspectedExcl?.workspaceValue ?? [];
+
+                const exclusionSet = new Set(currentExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
+                const isExcluded = (pat: string) => {
+                    const clean = pat.trim().replace(/^\/+|\/+$/g, "");
+                    return exclusionSet.has(clean) || currentExclusions.includes(pat);
+                };
+
                 const updatedIgnored = [...currentIgnored];
                 let changed = false;
 
                 for (const rule of gitignoreRules) {
-                    if (!updatedIgnored.includes(rule)) {
+                    if (!updatedIgnored.includes(rule) && !isExcluded(rule)) {
                         updatedIgnored.push(rule);
                         changed = true;
                     }
                 }
 
                 if (changed) {
-                    const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                        ? vscode.ConfigurationTarget.Workspace
-                        : vscode.ConfigurationTarget.Global;
-                    await config.update("ignorePatterns", updatedIgnored, target);
+                    await config.update("ignorePatterns", updatedIgnored, vscode.ConfigurationTarget.WorkspaceFolder);
                 }
             } catch {
             }
@@ -517,11 +524,13 @@ export async function activate(context: vscode.ExtensionContext) {
                     try {
                         const relPath = msg.path;
                         if (relPath) {
-                            const config = vscode.workspace.getConfiguration("thumbview");
-                            const current = config.get<string[]>("ignorePatterns") || [];
+                            const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                            const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
+                            const inspected = config.inspect<string[]>("ignorePatterns");
+                            const current = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
                             if (!current.includes(relPath)) {
-                                const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                                    ? vscode.ConfigurationTarget.Workspace
+                                const target = wsFolder
+                                    ? vscode.ConfigurationTarget.WorkspaceFolder
                                     : vscode.ConfigurationTarget.Global;
                                 await config.update("ignorePatterns", [...current, relPath], target);
                                 vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
@@ -689,11 +698,13 @@ export async function activate(context: vscode.ExtensionContext) {
     const ignoreDirectoryDisposable = vscode.commands.registerCommand("thumbview.ignoreDirectory", async (item?: DirectoryTreeItem) => {
         const folderPath = item?.folderPath;
         if (folderPath) {
-            const config = vscode.workspace.getConfiguration("thumbview");
-            const current = config.get<string[]>("ignorePatterns") || [];
+            const wsFolder = vscode.workspace.workspaceFolders?.[0];
+            const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
+            const inspected = config.inspect<string[]>("ignorePatterns");
+            const current = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
             if (!current.includes(folderPath)) {
-                const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                    ? vscode.ConfigurationTarget.Workspace
+                const target = wsFolder
+                    ? vscode.ConfigurationTarget.WorkspaceFolder
                     : vscode.ConfigurationTarget.Global;
                 await config.update("ignorePatterns", [...current, folderPath], target);
                 vscode.window.showInformationMessage(`Added '${folderPath}' to ignore list.`);
@@ -712,12 +723,14 @@ export async function activate(context: vscode.ExtensionContext) {
             placeHolder: "e.g. src/legacy/ or *.test.js"
         });
         if (input && input.trim()) {
-            const config = vscode.workspace.getConfiguration("thumbview");
-            const current = config.get<string[]>("ignorePatterns") || [];
+            const wsFolder = vscode.workspace.workspaceFolders?.[0];
+            const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
+            const inspected = config.inspect<string[]>("ignorePatterns");
+            const current = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
             const pattern = input.trim();
             if (!current.includes(pattern)) {
-                const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                    ? vscode.ConfigurationTarget.Workspace
+                const target = wsFolder
+                    ? vscode.ConfigurationTarget.WorkspaceFolder
                     : vscode.ConfigurationTarget.Global;
                 await config.update("ignorePatterns", [...current, pattern], target);
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
@@ -731,8 +744,10 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(addIgnoreDisposable);
 
     const removeIgnoreDisposable = vscode.commands.registerCommand("thumbview.removeIgnorePattern", async (item?: IgnoreTreeItem, items?: IgnoreTreeItem[]) => {
-        const config = vscode.workspace.getConfiguration("thumbview");
-        const current = config.get<string[]>("ignorePatterns") || [];
+        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+        const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
+        const inspectedCurrent = config.inspect<string[]>("ignorePatterns");
+        const current = inspectedCurrent?.workspaceFolderValue ?? inspectedCurrent?.workspaceValue ?? [];
 
         const targetItems = items && items.length > 0 ? items : (item ? [item] : []);
         let patternsToRemove: string[] = targetItems.map(i => i.pattern);
@@ -749,10 +764,27 @@ export async function activate(context: vscode.ExtensionContext) {
 
         if (patternsToRemove.length > 0) {
             const updated = current.filter(p => !patternsToRemove.includes(p));
-            const target = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                ? vscode.ConfigurationTarget.Workspace
+            const target = wsFolder
+                ? vscode.ConfigurationTarget.WorkspaceFolder
                 : vscode.ConfigurationTarget.Global;
+
+            // Write exclusions BEFORE removing from ignorePatterns — the config change
+            // listener fires on ignorePatterns update and triggers scanRepository(),
+            // which must already see the exclusion to avoid re-adding the file or folder.
+            if (patternsToRemove.length > 0) {
+                const inspectedExcl = config.inspect<string[]>("autoIgnoreExclusions");
+                const exclusions = inspectedExcl?.workspaceFolderValue ?? inspectedExcl?.workspaceValue ?? [];
+                const updatedExclusions = [...exclusions];
+                for (const p of patternsToRemove) {
+                    if (!updatedExclusions.includes(p)) {
+                        updatedExclusions.push(p);
+                    }
+                }
+                await config.update("autoIgnoreExclusions", updatedExclusions, target);
+            }
+
             await config.update("ignorePatterns", updated, target);
+
             const msg = patternsToRemove.length === 1
                 ? `Removed '${patternsToRemove[0]}' from ignore list.`
                 : `Batch removed ${patternsToRemove.length} ignore patterns.`;
