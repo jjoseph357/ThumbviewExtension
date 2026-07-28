@@ -13,7 +13,7 @@ export class IgnoreTreeDataProvider implements vscode.TreeDataProvider<IgnoreTre
     private _onDidChangeTreeData: vscode.EventEmitter<IgnoreTreeItem | undefined | void> = new vscode.EventEmitter<IgnoreTreeItem | undefined | void>();
     readonly onDidChangeTreeData: vscode.Event<IgnoreTreeItem | undefined | void> = this._onDidChangeTreeData.event;
 
-    constructor(private onPatternAdded?: () => void) {}
+    constructor(private context: vscode.ExtensionContext, private onPatternAdded?: () => void) {}
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
@@ -27,11 +27,7 @@ export class IgnoreTreeDataProvider implements vscode.TreeDataProvider<IgnoreTre
         if (element) {
             return Promise.resolve([]);
         }
-        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-        const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
-        // inspect() separates per-level values; only use folder/workspace level, never global
-        const inspected = config.inspect<string[]>("ignorePatterns");
-        const patterns = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
+        const patterns: string[] = this.context.workspaceState.get("thumbview.ignorePatterns") ?? [];
         
         // Filter out redundant child patterns whose parent directory is already ignored
         const filteredPatterns = patterns.filter(p => {

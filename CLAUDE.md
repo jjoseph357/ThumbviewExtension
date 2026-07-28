@@ -47,8 +47,8 @@ Thumbview is a VS Code extension that renders every workspace source file as a s
 
 ```
 extension.ts (host)
-  ├─ scanRepository()        [scanner.ts]         walks workspace in parallel batches of 50 (Promise.all), applies custom ignorePatterns setting,
-  │                                                consolidates top-level root ignores (e.g. BOFS/), enforces safety caps
+  ├─ scanRepository()        [scanner.ts]         walks workspace in parallel batches of 50 (Promise.all), receives ignorePatterns/autoIgnoreExclusions
+  │                                                as parameters from workspaceState, consolidates top-level root ignores (e.g. BOFS/), enforces safety caps
   │                                                (max 2MB per file, max 2000 lines sampled evenly spaced, max 300 chars per line),
   │                                                and respects autoIgnoreExclusions (directories the user un-ignored).
   ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9 grid slots.
@@ -82,7 +82,8 @@ The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`,
 - **Parallel Chunked Repository Scanning**: `scanner.ts` scans workspace files in parallel batches of 50 using `Promise.all()` to keep initial load times under 500ms.
 - **View Frustum Culling**: Cards outside the viewport are skipped during canvas render loops.
 - **Pre-Computed Indexing & Tokenization**: Text search uses `file._combinedText.includes(searchQuery)`, and line HTML is cached in `line._htmlCache`.
-- **Top-Level Ignore Consolidation**: Auto-ignore consolidates dense folders to top-level root paths (e.g. `BOFS/`) and prunes child subdirectories to prevent tree bloat. Folders listed in `thumbview.autoIgnoreExclusions` are never auto-ignored.
+- **Top-Level Ignore Consolidation**: Auto-ignore consolidates dense folders to top-level root paths (e.g. `BOFS/`) and prunes child subdirectories to prevent tree bloat. Folders listed in `autoIgnoreExclusions` (workspaceState) are never auto-ignored.
+- **Ignore State in workspaceState**: `ignorePatterns` and `autoIgnoreExclusions` are stored in `ExtensionContext.workspaceState` (VS Code's internal per-workspace storage), not in `.vscode/settings.json`. Old settings.json values are migrated on first activation.
 - **Multi-Select TreeView**: `thumbview-ignores` enables `canSelectMany: true` for `Shift/Ctrl` batch deletions.
 - **Left CTRL Hover & rAF Throttling**: Magnifying overlay requires `Left CTRL` hold and throttles position updates via `requestAnimationFrame`.
 - **Automatic Panel Focus**: Webview posts `focusWindow` on mouseover to invoke `activePanel.reveal(undefined, true)`.

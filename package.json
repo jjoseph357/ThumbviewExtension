@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.2.6",
+  "version": "0.2.8",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.107.0"
@@ -25,28 +25,10 @@
           "default": "uniform_grid",
           "description": "Select the layout algorithm mode for displaying codebase minimaps."
         },
-        "thumbview.ignorePatterns": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "scope": "resource",
-          "description": "List of file paths or glob patterns to ignore in Thumbview minimap."
-        },
         "thumbview.autoIgnoreThreshold": {
           "type": "number",
           "default": 30,
           "description": "Automatically ignore subdirectories containing more than this number of files (set to 0 to disable)."
-        },
-        "thumbview.autoIgnoreExclusions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "scope": "resource",
-          "description": "Directories that should never be auto-ignored. Populated automatically when you un-ignore an auto-ignored folder."
         },
         "thumbview.renderMediaThumbnails": {
           "type": "boolean",
@@ -97,6 +79,11 @@
         "command": "thumbview.ignoreDirectory",
         "title": "Ignore Directory in Thumbview",
         "icon": "$(eye-closed)"
+      },
+      {
+        "command": "thumbview.deleteDirectory",
+        "title": "Delete Directory",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -122,6 +109,11 @@
           "command": "thumbview.ignoreDirectory",
           "when": "view == thumbview-directories && viewItem == directoryItem",
           "group": "inline@1"
+        },
+        {
+          "command": "thumbview.deleteDirectory",
+          "when": "view == thumbview-directories && viewItem == directoryItem",
+          "group": "7_modification@1"
         }
       ]
     },

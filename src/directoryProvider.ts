@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { scanRepository } from "./scanner";
+import { scanRepository, ScanIgnoreState } from "./scanner";
 
 export class DirectoryTreeItem extends vscode.TreeItem {
     constructor(
@@ -35,6 +35,8 @@ export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<Direct
     private _onDidChangeTreeData: vscode.EventEmitter<DirectoryTreeItem | undefined | void> = new vscode.EventEmitter<DirectoryTreeItem | undefined | void>();
     readonly onDidChangeTreeData: vscode.Event<DirectoryTreeItem | undefined | void> = this._onDidChangeTreeData.event;
 
+    constructor(private context: vscode.ExtensionContext) {}
+
     refresh(): void {
         this._onDidChangeTreeData.fire();
     }
@@ -45,7 +47,15 @@ export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<Direct
 
     async getChildren(element?: DirectoryTreeItem): Promise<DirectoryTreeItem[]> {
         try {
-            const files = await scanRepository();
+            const ignoreState: ScanIgnoreState = {
+                ignorePatterns: this.context.workspaceState.get<string[]>("thumbview.ignorePatterns") ?? [],
+                autoIgnoreExclusions: this.context.workspaceState.get<string[]>("thumbview.autoIgnoreExclusions") ?? []
+            };
+            const persistIgnore = async (updated: ScanIgnoreState) => {
+                await this.context.workspaceState.update("thumbview.ignorePatterns", updated.ignorePatterns);
+                await this.context.workspaceState.update("thumbview.autoIgnoreExclusions", updated.autoIgnoreExclusions);
+            };
+            const files = await scanRepository(ignoreState, persistIgnore);
 
             if (!element) {
                 // Root level items

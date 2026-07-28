@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { scanRepository } from "./scanner";
+import { scanRepository, ScanIgnoreState } from "./scanner";
 import { buildStableGrid } from "./layout";
 import { buildSpanningGrid } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
@@ -12,8 +12,47 @@ import * as path from "path";
 export async function activate(context: vscode.ExtensionContext) {
     console.log("REPOMAP EXTENSION ACTIVATED");
 
-    // Auto-populate ignorePatterns setting with workspace .gitignore rules once initialized
+    // --- Helpers: read/write ignore state from workspaceState (never touches .vscode/settings.json) ---
+    const getIgnoreState = (): ScanIgnoreState => ({
+        ignorePatterns: context.workspaceState.get<string[]>("thumbview.ignorePatterns") ?? [],
+        autoIgnoreExclusions: context.workspaceState.get<string[]>("thumbview.autoIgnoreExclusions") ?? []
+    });
+    const persistIgnoreState = async (state: ScanIgnoreState): Promise<void> => {
+        await context.workspaceState.update("thumbview.ignorePatterns", state.ignorePatterns);
+        await context.workspaceState.update("thumbview.autoIgnoreExclusions", state.autoIgnoreExclusions);
+    };
+
+    // --- One-time migration: move old settings.json values into workspaceState, then delete them ---
     const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders && workspaceFolders.length > 0) {
+        const config = vscode.workspace.getConfiguration("thumbview", workspaceFolders[0].uri);
+        const inspected = config.inspect<string[]>("ignorePatterns");
+        const oldPatterns = inspected?.workspaceFolderValue ?? inspected?.workspaceValue;
+        const inspectedExcl = config.inspect<string[]>("autoIgnoreExclusions");
+        const oldExclusions = inspectedExcl?.workspaceFolderValue ?? inspectedExcl?.workspaceValue;
+
+        if (oldPatterns || oldExclusions) {
+            const current = getIgnoreState();
+            const mergedPatterns = Array.from(new Set([...current.ignorePatterns, ...(oldPatterns ?? [])]));
+            const mergedExclusions = Array.from(new Set([...current.autoIgnoreExclusions, ...(oldExclusions ?? [])]));
+            await persistIgnoreState({ ignorePatterns: mergedPatterns, autoIgnoreExclusions: mergedExclusions });
+            // Remove from settings.json so .vscode/ can be deleted
+            if (oldPatterns) {
+                const target = inspected?.workspaceFolderValue
+                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                    : vscode.ConfigurationTarget.Workspace;
+                await config.update("ignorePatterns", undefined, target);
+            }
+            if (oldExclusions) {
+                const target = inspectedExcl?.workspaceFolderValue
+                    ? vscode.ConfigurationTarget.WorkspaceFolder
+                    : vscode.ConfigurationTarget.Workspace;
+                await config.update("autoIgnoreExclusions", undefined, target);
+            }
+        }
+    }
+
+    // Auto-populate ignorePatterns with workspace .gitignore rules once initialized
     if (workspaceFolders && workspaceFolders.length > 0) {
         const gitignorePath = path.join(workspaceFolders[0].uri.fsPath, ".gitignore");
         if (fs.existsSync(gitignorePath)) {
@@ -24,19 +63,14 @@ export async function activate(context: vscode.ExtensionContext) {
                     .map(line => line.trim())
                     .filter(line => line && !line.startsWith("#"));
 
-                const config = vscode.workspace.getConfiguration("thumbview", workspaceFolders[0].uri);
-                const inspected = config.inspect<string[]>("ignorePatterns");
-                const currentIgnored = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
-                const inspectedExcl = config.inspect<string[]>("autoIgnoreExclusions");
-                const currentExclusions = inspectedExcl?.workspaceFolderValue ?? inspectedExcl?.workspaceValue ?? [];
-
-                const exclusionSet = new Set(currentExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
+                const { ignorePatterns, autoIgnoreExclusions } = getIgnoreState();
+                const exclusionSet = new Set(autoIgnoreExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
                 const isExcluded = (pat: string) => {
                     const clean = pat.trim().replace(/^\/+|\/+$/g, "");
-                    return exclusionSet.has(clean) || currentExclusions.includes(pat);
+                    return exclusionSet.has(clean) || autoIgnoreExclusions.includes(pat);
                 };
 
-                const updatedIgnored = [...currentIgnored];
+                const updatedIgnored = [...ignorePatterns];
                 let changed = false;
 
                 for (const rule of gitignoreRules) {
@@ -47,7 +81,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (changed) {
-                    await config.update("ignorePatterns", updatedIgnored, vscode.ConfigurationTarget.WorkspaceFolder);
+                    await persistIgnoreState({ ignorePatterns: updatedIgnored, autoIgnoreExclusions });
                 }
             } catch {
             }
@@ -154,7 +188,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 text: "Refreshing repository map..."
             });
 
-            const files = await scanRepository();
+            const files = await scanRepository(getIgnoreState(), persistIgnoreState);
 
             fileOrder.update(files.map(f => f.id));
             await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
@@ -194,6 +228,16 @@ export async function activate(context: vscode.ExtensionContext) {
                     slots: p.slots
                 }));
 
+                // Compute tight bounding box of occupied cells so the webview
+                // doesn't waste space on empty edge rows/columns from stale order
+                let spMaxCol = 0, spMaxRow = 0;
+                for (const p of layout.placements) {
+                    spMaxCol = Math.max(spMaxCol, p.col);
+                    for (const s of p.slots) {
+                        spMaxRow = Math.max(spMaxRow, s[1]);
+                    }
+                }
+
                 panel.webview.postMessage({
                     command: "data",
                     mode: "spanning_grid",
@@ -201,8 +245,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     openKeybinding,
                     files: filesWithSlots,
                     layout: {
-                        cols: layout.cols,
-                        rows: layout.rows
+                        cols: Math.max(1, spMaxCol + 1),
+                        rows: Math.max(1, spMaxRow + 1)
                     }
                 });
             } else {
@@ -215,6 +259,16 @@ export async function activate(context: vscode.ExtensionContext) {
                     slots: [layout.slots[order.indexOf(file.id)]]
                 }));
 
+                // Compute tight bounding box of occupied cells so the webview
+                // doesn't waste space on empty edge rows/columns from stale order
+                let ugMaxCol = 0, ugMaxRow = 0;
+                for (const f of filesWithSlots) {
+                    if (f.slot) {
+                        ugMaxCol = Math.max(ugMaxCol, f.slot[0]);
+                        ugMaxRow = Math.max(ugMaxRow, f.slot[1]);
+                    }
+                }
+
                 panel.webview.postMessage({
                     command: "data",
                     mode: "uniform_grid",
@@ -222,8 +276,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     openKeybinding,
                     files: filesWithSlots,
                     layout: {
-                        cols: layout.cols,
-                        rows: layout.rows
+                        cols: Math.max(1, ugMaxCol + 1),
+                        rows: Math.max(1, ugMaxRow + 1)
                     }
                 });
             }
@@ -298,11 +352,17 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "switchTab") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
-                        try {
-                            const doc = await vscode.workspace.openTextDocument(uri);
-                            await vscode.window.showTextDocument(doc, { preview: false });
-                        } catch {
+                        // PDFs: skip openTextDocument (which shows raw binary metadata)
+                        // and go straight to vscode.open so the user's PDF viewer extension handles it
+                        if (msg.uri.toLowerCase().endsWith(".pdf")) {
                             await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                        } else {
+                            try {
+                                const doc = await vscode.workspace.openTextDocument(uri);
+                                await vscode.window.showTextDocument(doc, { preview: false });
+                            } catch {
+                                await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                            }
                         }
                     } catch (err: any) {
                         console.error("THUMBVIEW SWITCH TAB ERROR:", err);
@@ -524,17 +584,12 @@ export async function activate(context: vscode.ExtensionContext) {
                     try {
                         const relPath = msg.path;
                         if (relPath) {
-                            const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                            const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
-                            const inspected = config.inspect<string[]>("ignorePatterns");
-                            const current = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
-                            if (!current.includes(relPath)) {
-                                const target = wsFolder
-                                    ? vscode.ConfigurationTarget.WorkspaceFolder
-                                    : vscode.ConfigurationTarget.Global;
-                                await config.update("ignorePatterns", [...current, relPath], target);
+                            const state = getIgnoreState();
+                            if (!state.ignorePatterns.includes(relPath)) {
+                                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, relPath] });
                                 vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
                             }
+                            refreshProviders();
                             if (activePanel) {
                                 refreshRepositoryMap(activePanel);
                             }
@@ -637,7 +692,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposable);
 
     const reflowDisposable = vscode.commands.registerCommand("thumbview.reflow", async () => {
-        const files = await scanRepository();
+        const files = await scanRepository(getIgnoreState(), persistIgnoreState);
         fileOrder.reflow(files.map(f => f.id));
         await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
         await context.workspaceState.update("repomap.spanningAllocations", undefined);
@@ -672,13 +727,13 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(setSpanningGridDisposable);
 
-    const directoryProvider = new DirectoryTreeDataProvider();
+    const directoryProvider = new DirectoryTreeDataProvider(context);
     const directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
         treeDataProvider: directoryProvider
     });
     context.subscriptions.push(directoryTreeView);
 
-    const ignoreProvider = new IgnoreTreeDataProvider(() => {
+    const ignoreProvider = new IgnoreTreeDataProvider(context, () => {
         if (activePanel) {
             refreshRepositoryMap(activePanel);
         }
@@ -698,15 +753,9 @@ export async function activate(context: vscode.ExtensionContext) {
     const ignoreDirectoryDisposable = vscode.commands.registerCommand("thumbview.ignoreDirectory", async (item?: DirectoryTreeItem) => {
         const folderPath = item?.folderPath;
         if (folderPath) {
-            const wsFolder = vscode.workspace.workspaceFolders?.[0];
-            const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
-            const inspected = config.inspect<string[]>("ignorePatterns");
-            const current = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
-            if (!current.includes(folderPath)) {
-                const target = wsFolder
-                    ? vscode.ConfigurationTarget.WorkspaceFolder
-                    : vscode.ConfigurationTarget.Global;
-                await config.update("ignorePatterns", [...current, folderPath], target);
+            const state = getIgnoreState();
+            if (!state.ignorePatterns.includes(folderPath)) {
+                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, folderPath] });
                 vscode.window.showInformationMessage(`Added '${folderPath}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
@@ -723,16 +772,10 @@ export async function activate(context: vscode.ExtensionContext) {
             placeHolder: "e.g. src/legacy/ or *.test.js"
         });
         if (input && input.trim()) {
-            const wsFolder = vscode.workspace.workspaceFolders?.[0];
-            const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
-            const inspected = config.inspect<string[]>("ignorePatterns");
-            const current = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? [];
+            const state = getIgnoreState();
             const pattern = input.trim();
-            if (!current.includes(pattern)) {
-                const target = wsFolder
-                    ? vscode.ConfigurationTarget.WorkspaceFolder
-                    : vscode.ConfigurationTarget.Global;
-                await config.update("ignorePatterns", [...current, pattern], target);
+            if (!state.ignorePatterns.includes(pattern)) {
+                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, pattern] });
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
@@ -744,16 +787,13 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(addIgnoreDisposable);
 
     const removeIgnoreDisposable = vscode.commands.registerCommand("thumbview.removeIgnorePattern", async (item?: IgnoreTreeItem, items?: IgnoreTreeItem[]) => {
-        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-        const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
-        const inspectedCurrent = config.inspect<string[]>("ignorePatterns");
-        const current = inspectedCurrent?.workspaceFolderValue ?? inspectedCurrent?.workspaceValue ?? [];
+        const state = getIgnoreState();
 
         const targetItems = items && items.length > 0 ? items : (item ? [item] : []);
         let patternsToRemove: string[] = targetItems.map(i => i.pattern);
 
-        if (patternsToRemove.length === 0 && current.length > 0) {
-            const selected = await vscode.window.showQuickPick(current, {
+        if (patternsToRemove.length === 0 && state.ignorePatterns.length > 0) {
+            const selected = await vscode.window.showQuickPick(state.ignorePatterns, {
                 placeHolder: "Select pattern to remove",
                 canPickMany: true
             });
@@ -763,27 +803,15 @@ export async function activate(context: vscode.ExtensionContext) {
         }
 
         if (patternsToRemove.length > 0) {
-            const updated = current.filter(p => !patternsToRemove.includes(p));
-            const target = wsFolder
-                ? vscode.ConfigurationTarget.WorkspaceFolder
-                : vscode.ConfigurationTarget.Global;
-
-            // Write exclusions BEFORE removing from ignorePatterns — the config change
-            // listener fires on ignorePatterns update and triggers scanRepository(),
-            // which must already see the exclusion to avoid re-adding the file or folder.
-            if (patternsToRemove.length > 0) {
-                const inspectedExcl = config.inspect<string[]>("autoIgnoreExclusions");
-                const exclusions = inspectedExcl?.workspaceFolderValue ?? inspectedExcl?.workspaceValue ?? [];
-                const updatedExclusions = [...exclusions];
-                for (const p of patternsToRemove) {
-                    if (!updatedExclusions.includes(p)) {
-                        updatedExclusions.push(p);
-                    }
+            const updatedPatterns = state.ignorePatterns.filter(p => !patternsToRemove.includes(p));
+            const updatedExclusions = [...state.autoIgnoreExclusions];
+            for (const p of patternsToRemove) {
+                if (!updatedExclusions.includes(p)) {
+                    updatedExclusions.push(p);
                 }
-                await config.update("autoIgnoreExclusions", updatedExclusions, target);
             }
-
-            await config.update("ignorePatterns", updated, target);
+            // Write exclusions and updated patterns atomically
+            await persistIgnoreState({ ignorePatterns: updatedPatterns, autoIgnoreExclusions: updatedExclusions });
 
             const msg = patternsToRemove.length === 1
                 ? `Removed '${patternsToRemove[0]}' from ignore list.`
@@ -817,21 +845,39 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(focusFolderDisposable);
 
+    const deleteDirectoryDisposable = vscode.commands.registerCommand("thumbview.deleteDirectory", async (item?: DirectoryTreeItem) => {
+        if (!item || item.isRoot || !item.folderPath) { return; }
+        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!wsFolder) { return; }
+        const folderUri = vscode.Uri.joinPath(wsFolder.uri, item.folderPath);
+        const confirm = await vscode.window.showWarningMessage(
+            `Are you sure you want to delete '${item.folderPath}'?`,
+            { modal: true },
+            "Move to Trash",
+            "Delete Permanently"
+        );
+        if (confirm === "Move to Trash") {
+            await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: true });
+            refreshProviders();
+            if (activePanel) { refreshRepositoryMap(activePanel); }
+        } else if (confirm === "Delete Permanently") {
+            await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: false });
+            refreshProviders();
+            if (activePanel) { refreshRepositoryMap(activePanel); }
+        }
+    });
+    context.subscriptions.push(deleteDirectoryDisposable);
+
     const showAllFoldersDisposable = vscode.commands.registerCommand("thumbview.showAllFolders", async () => {
         vscode.commands.executeCommand("thumbview.focusFolder", "");
     });
     context.subscriptions.push(showAllFoldersDisposable);
 
-    // Watch configuration changes
+    // Watch configuration changes (ignorePatterns no longer lives in config — only
+    // layoutMode, renderMediaThumbnails, and autoIgnoreThreshold are real settings)
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
         if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails")) && activePanel) {
             refreshRepositoryMap(activePanel);
-        }
-        if (e.affectsConfiguration("thumbview.ignorePatterns")) {
-            refreshProviders();
-            if (activePanel) {
-                refreshRepositoryMap(activePanel);
-            }
         }
     });
     context.subscriptions.push(configDisposable);
@@ -897,6 +943,7 @@ export async function activate(context: vscode.ExtensionContext) {
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(async () => {
+            refreshProviders();
             if (activePanel) {
                 refreshRepositoryMap(activePanel);
             }

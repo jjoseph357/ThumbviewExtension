@@ -5,6 +5,21 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-07-28
+
+### Fixed
+- **PDF Click Opens Viewer Instead of Metadata**: Clicking a PDF tile in the thumbview now opens the file with `vscode.open` (delegating to the user's installed PDF viewer extension) instead of `openTextDocument` which showed raw binary metadata.
+- **Single-File Layout Filling Viewport**: When most workspace files are gitignored, remaining files now fill the viewport instead of appearing tiny in the top-left corner. The grid dimensions are now computed from the bounding box of actually-occupied cells rather than the full persistent file order (which retained slots for removed/ignored files across sessions).
+
+## [0.2.7] - 2026-07-28
+
+### Added
+- **Directory Navigation Delete Command**: Right-click any folder in the sidebar Directory Navigation tree to delete it (Move to Trash or Delete Permanently), with a confirmation dialog. Root item is excluded from deletion.
+- **Directory Navigation Sync on File System Changes**: The sidebar Directory Navigation tree now refreshes automatically when folders or files are created, deleted, or changed in the file explorer, keeping the tree in sync with the workspace.
+
+### Fixed
+- **Eliminated `.vscode/settings.json` Repository Pollution**: Moved `ignorePatterns` and `autoIgnoreExclusions` storage from VS Code workspace-folder configuration (`ConfigurationTarget.WorkspaceFolder`, which creates `.vscode/settings.json` in the user's project) to `ExtensionContext.workspaceState` (VS Code's internal per-workspace key-value store). Users will no longer see Thumbview-created files appear in `git status`. Existing `settings.json` values are automatically migrated and cleaned up on first activation.
+
 ## [0.2.6] - 2026-07-27
 
 ### Fixed

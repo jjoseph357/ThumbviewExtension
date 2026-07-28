@@ -38,7 +38,13 @@ When a parent directory (e.g., virtual environment `BOFS/` or `.venv/`) containe
 
 ## Auto-Ignore Exclusion List (`autoIgnoreExclusions`)
 
-Auto-ignore runs on every `scanRepository()` call, re-detecting dense folders from scratch. Without memory of prior user decisions, un-ignoring a folder only removed it from `ignorePatterns` — the very next scan would re-detect the same folder as dense and re-add it. The `autoIgnoreExclusions` persistent list solves this: when a user removes a directory pattern (ending with `/`) from ignores via the sidebar, it's added to `autoIgnoreExclusions`. The auto-ignore heuristic checks this list before adding any folder. This preserves auto-ignore's value for first-time discovery while respecting explicit user intent.
+Auto-ignore runs on every `scanRepository()` call, re-detecting dense folders from scratch. Without memory of prior user decisions, un-ignoring a folder only removed it from `ignorePatterns` — the very next scan would re-detect the same folder as dense and re-add it. The `autoIgnoreExclusions` persistent list solves this: when a user removes a directory pattern (ending with `/`) from ignores via the sidebar, it's added to `autoIgnoreExclusions`. The auto-ignore heuristic checks this list before adding any folder. This preserves auto-ignore's value for first-time discovery while respecting explicit user intent. Both lists are stored in `workspaceState` (see below).
+
+## Ignore State in `workspaceState`, Not `.vscode/settings.json`
+
+Prior to 0.2.7, `ignorePatterns` and `autoIgnoreExclusions` were stored using `ConfigurationTarget.WorkspaceFolder`, which writes to `.vscode/settings.json` inside the user's project. This caused the extension to silently create a `.vscode/` directory and `settings.json` file in repositories where none existed, polluting `git status` and risking accidental commits of extension-internal state.
+
+Both values are now stored in `ExtensionContext.workspaceState` — VS Code's built-in per-workspace key-value store that lives in VS Code's internal data directory (`~/.config/Code/` or equivalent), never in the user's project. This is the same mechanism the extension already uses for `repomap.seenFiles` and spanning layout allocations. On first activation after the migration, any old `settings.json` values are read, merged into `workspaceState`, and deleted from configuration so the `.vscode/settings.json` file can be safely removed.
 
 ## Recursive Subfolder Card Expansion (60×40px Threshold)
 
@@ -72,7 +78,7 @@ Why a deleted file leaves a gap that's backfilled by a new file, rather than imm
 
 ## Hand-rolled `.gitignore` emulation & custom ignore patterns
 
-`scanner.ts`'s `shouldIgnore` translates glob patterns to regular expressions without external dependencies. Rules are evaluated sequentially in order, supporting negation patterns (`!pattern`) where subsequent rules override preceding ones. In addition to workspace `.gitignore` files, custom ignore patterns defined in `thumbview.ignorePatterns` are combined into the ignore filter and managed visually in the sidebar tree view.
+`scanner.ts`'s `shouldIgnore` translates glob patterns to regular expressions without external dependencies. Rules are evaluated sequentially in order, supporting negation patterns (`!pattern`) where subsequent rules override preceding ones. In addition to workspace `.gitignore` files, custom ignore patterns from `workspaceState` are combined into the ignore filter and managed visually in the sidebar tree view.
 
 ## Sidebar Tree Views & Navigation
 

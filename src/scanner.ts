@@ -171,22 +171,26 @@ async function extractPdfPage1Lines(fileUri: vscode.Uri): Promise<MiniLine[]> {
     }
 }
 
-export async function scanRepository(): Promise<RepoFile[]> {
+export interface ScanIgnoreState {
+    ignorePatterns: string[];
+    autoIgnoreExclusions: string[];
+}
+
+export async function scanRepository(
+    ignoreState: ScanIgnoreState,
+    persistIgnore: (updated: ScanIgnoreState) => Promise<void>
+): Promise<RepoFile[]> {
     // Scan all files but exclude non-code, library, or build folders
     const files = await vscode.workspace.findFiles(
         "**/*",
         "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv,env,.env,lib,vendor}/**"
     );
 
-    // Scope configuration to the active workspace folder for proper per-project isolation.
-    // inspect() separates per-level values; only use folder/workspace level, never global,
-    // so stale patterns from other projects don't leak into this workspace.
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
     const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
-    const inspectedIgnore = config.inspect<string[]>("ignorePatterns");
-    const gitignoreRules = inspectedIgnore?.workspaceFolderValue ?? inspectedIgnore?.workspaceValue ?? [];
-    const inspectedExcl = config.inspect<string[]>("autoIgnoreExclusions");
-    const autoIgnoreExclusions = inspectedExcl?.workspaceFolderValue ?? inspectedExcl?.workspaceValue ?? [];
+
+    const gitignoreRules = [...ignoreState.ignorePatterns];
+    const autoIgnoreExclusions = ignoreState.autoIgnoreExclusions;
 
     // Prioritize auto-ignoring top-level dense folders & library subdirectories (>threshold files)
     const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
@@ -260,10 +264,10 @@ export async function scanRepository(): Promise<RepoFile[]> {
 
     if (denseFolders.length > 0 || cleanedRules.length !== gitignoreRules.length) {
         const updatedIgnored = Array.from(new Set([...cleanedRules, ...denseFolders]));
-        const target = wsFolder
-            ? vscode.ConfigurationTarget.WorkspaceFolder
-            : vscode.ConfigurationTarget.Global;
-        await config.update("ignorePatterns", updatedIgnored, target);
+        await persistIgnore({
+            ignorePatterns: updatedIgnored,
+            autoIgnoreExclusions
+        });
         if (denseFolders.length > 0) {
             vscode.window.showInformationMessage(`Auto-ignored ${denseFolders.length} top-level/dense directory (e.g. ${denseFolders[0]}). You can un-ignore them anytime in the sidebar.`);
         }
