@@ -350,58 +350,119 @@ function detectLang(path) {
         return 'plaintext';
     }
     const ext = filename.includes('.') ? filename.split('.').pop() : '';
-    if (ext === 'md' || ext === 'markdown') return 'markdown';
+    if (ext === 'md' || ext === 'markdown' || ext === 'mdx') return 'markdown';
     if (!ext || ext === 'txt' || ext === 'log' || ext === 'conf' || ext === 'ini' || ext === 'env') {
         return 'plaintext';
     }
     if (ext === 'css' || ext === 'scss' || ext === 'less') return 'css';
     if (ext === 'html' || ext === 'htm' || ext === 'xml' || ext === 'svg' || ext === 'vue') return 'html';
-    if (ext === 'json') return 'json';
+    if (ext === 'json' || ext === 'jsonc' || ext === 'json5' || filename.endsWith('rc') || filename.includes('json')) return 'json';
     if (ext === 'py') return 'python';
     return 'js';
 }
 
-// Dispatches to one of three small regex-based tokenizers by detected language.
-// This is a real (if approximate) syntax highlighter, independent of scanner.ts's
-// coarse per-line categorizer — see this file's header comment.
+// Dispatches to one of five small regex-based tokenizers by detected language.
 function tokenizeLine(text, lang) {
     if (!text) return [];
     if (lang === 'plaintext') return [{ text, category: 'normal', isKey: false }];
     if (lang === 'markdown') return tokenizeMarkdown(text);
     if (lang === 'css') return tokenizeCSS(text);
     if (lang === 'html') return tokenizeHTML(text);
+    if (lang === 'json') return tokenizeJSON(text);
     return tokenizeJS(text, lang);
 }
 
-function tokenizeMarkdown(text) {
+function tokenizeJSON(text) {
     const tokens = [];
-    // Split markdown line into granular syntax elements (headers, hash symbols, code spans, bold, italic, links, lists, blockquotes)
-    const regex = /(^#{1,6}\s+.*|`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|[*_][^*_]+[*_]|\[[^\]]+\]|\([^)]+\)|^\s*[-*+]\s+|^\s*\d+\.\s+|>.*|\s+|.)/g;
+    const regex = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}()\[\]:,]|\s+|.)/g;
     let match;
     while ((match = regex.exec(text)) !== null) {
         const val = match[0];
         let cat = "normal";
-        if (val.startsWith('#')) {
-            cat = "tag"; // In VS Code, Markdown headers (e.g. # Title) use dark blue markup.heading (#569cd6)
-        } else if (val.startsWith('`') && val.endsWith('`') && val.length > 1) {
-            cat = "string"; // Inline code (`code`) uses string orange (#ce9178)
+        if (val.startsWith("//") || val.startsWith("/*")) {
+            cat = "comment";
+        } else if (val.startsWith('"') && val.endsWith('"') && val.length > 1) {
+            cat = "string";
+        } else if (/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(val)) {
+            cat = "number";
+        } else if (/^(true|false|null)$/.test(val)) {
+            cat = "keyword";
+        } else if (/^[{}()\[\]:,]$/.test(val)) {
+            cat = "normal";
+        }
+        tokens.push({ text: val, category: cat, isKey: false });
+    }
+
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].category === "string") {
+            let n = i + 1;
+            while (n < tokens.length && /^\s+$/.test(tokens[n].text)) n++;
+            if (n < tokens.length && tokens[n].text === ":") {
+                tokens[i].isKey = true;
+            }
+        }
+    }
+    return tokens;
+}
+
+function tokenizeMarkdown(text) {
+    const tokens = [];
+
+    if (/^\s*(```|~~~)/.test(text)) {
+        return [{ text, category: "keyword", isKey: false }];
+    }
+
+    if (/^\s*(---|\*\*\*|___)\s*$/.test(text)) {
+        return [{ text, category: "keyword", isKey: false }];
+    }
+
+    let remaining = text;
+
+    const headerMatch = remaining.match(/^(#{1,6}\s*)/);
+    if (headerMatch) {
+        tokens.push({ text: headerMatch[1], category: "heading", isKey: false });
+        remaining = remaining.slice(headerMatch[1].length);
+    } else {
+        const bqMatch = remaining.match(/^(\s*>\s*)/);
+        if (bqMatch) {
+            tokens.push({ text: bqMatch[1], category: "comment", isKey: false });
+            remaining = remaining.slice(bqMatch[1].length);
+        } else {
+            const listMatch = remaining.match(/^(\s*(?:[-*+]|\d+\.)\s+)/);
+            if (listMatch) {
+                tokens.push({ text: listMatch[1], category: "keyword", isKey: false });
+                remaining = remaining.slice(listMatch[1].length);
+            }
+        }
+    }
+
+    const regex = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|(?<!\w)[*_][^*_]+[*_](?!\w)|\[[^\]]+\]\([^)]+\)|<\/?[a-zA-Z][^>]*>|\s+|[^\s`*_\[<]+)/g;
+    let match;
+    while ((match = regex.exec(remaining)) !== null) {
+        const val = match[0];
+        let cat = headerMatch ? "heading" : "normal";
+
+        if (val.startsWith('`') && val.endsWith('`') && val.length > 1) {
+            cat = "string";
         } else if (val.startsWith('**') || val.startsWith('__')) {
-            cat = "keyword"; // Bold text uses markup.bold keyword purple/blue (#569cd6 / #c586c0)
-        } else if ((val.startsWith('*') || val.startsWith('_')) && val.length > 1) {
-            cat = "variable"; // Italic text uses cyan/variable (#9cdcfe)
-        } else if (val.startsWith('[')) {
-            cat = "type"; // Link text [text] uses teal/class (#4ec9b0)
-        } else if (val.startsWith('(') && val.endsWith(')')) {
-            cat = "string"; // Link URL (url) uses string orange (#ce9178)
-        } else if (/^\s*[-*+]\s+/.test(val) || /^\s*\d+\.\s+/.test(val)) {
-            cat = "keyword"; // List markers (-, *, 1.) use keyword blue (#569cd6)
-        } else if (val.startsWith('>')) {
-            cat = "comment"; // Blockquotes (> quote) use comment green (#6a9955)
+            cat = "keyword";
+        } else if ((val.startsWith('*') || val.startsWith('_')) && val.length > 1 && (val.endsWith('*') || val.endsWith('_'))) {
+            cat = "variable";
+        } else if (val.startsWith('[') && val.includes('](')) {
+            const splitIdx = val.indexOf('](');
+            const label = val.slice(0, splitIdx + 1);
+            const url = val.slice(splitIdx + 1);
+            tokens.push({ text: label, category: "type", isKey: false });
+            tokens.push({ text: url, category: "string", isKey: false });
+            continue;
+        } else if (val.startsWith('<') && val.endsWith('>')) {
+            cat = "tag";
         }
 
         tokens.push({ text: val, category: cat, isKey: false });
     }
-    return tokens;
+
+    return tokens.length > 0 ? tokens : [{ text, category: "normal", isKey: false }];
 }
 
 // Single regex splits the line into candidate tokens (comments/strings/@rules/colors/
@@ -563,38 +624,40 @@ function getThemeColor(varName, fallbackHex) {
 }
 
 function colorForCategory(category, isKey) {
-    if (isKey) return getThemeColor("--vscode-symbolIcon-propertyForeground", getThemeColor("--vscode-editorLineNumber-activeForeground", "#9cdcfe"));
+    if (isKey) return "#9cdcfe";
 
     switch (category) {
         case "comment":
             return getThemeColor("--vscode-editorComment-foreground", "#6a9955");
         case "string":
-            return getThemeColor("--vscode-symbolIcon-stringForeground", getThemeColor("--vscode-charts-orange", "#ce9178"));
+            return "#ce9178";
         case "number":
-            return getThemeColor("--vscode-symbolIcon-numberForeground", getThemeColor("--vscode-charts-green", "#b5cea8"));
+            return "#b5cea8";
         case "control-flow":
-            return getThemeColor("--vscode-symbolIcon-keywordForeground", getThemeColor("--vscode-charts-purple", "#c586c0"));
+            return "#c586c0";
         case "keyword":
-            return getThemeColor("--vscode-symbolIcon-keywordForeground", getThemeColor("--vscode-charts-blue", "#569cd6"));
+            return "#569cd6";
         case "operator":
         case "normal":
             return getThemeColor("--vscode-editor-foreground", "#cccccc");
         case "function":
-            return getThemeColor("--vscode-symbolIcon-functionForeground", getThemeColor("--vscode-charts-yellow", "#dcdcaa"));
+            return "#dcdcaa";
         case "type":
-            return getThemeColor("--vscode-symbolIcon-classForeground", getThemeColor("--vscode-charts-teal", "#4ec9b0"));
+            return "#4ec9b0";
+        case "heading":
+            return "#9cdcfe";
         case "variable":
         case "property":
         case "css-property":
         case "attribute":
-            return getThemeColor("--vscode-symbolIcon-variableForeground", getThemeColor("--vscode-symbolIcon-propertyForeground", "#9cdcfe"));
+            return "#9cdcfe";
         case "selector":
         case "css-value":
-            return getThemeColor("--vscode-symbolIcon-stringForeground", "#ce9178");
+            return "#ce9178";
         case "tag":
-            return getThemeColor("--vscode-symbolIcon-elementForeground", getThemeColor("--vscode-symbolIcon-keywordForeground", "#569cd6"));
+            return "#569cd6";
         case "tag-bracket":
-            return getThemeColor("--vscode-editor-foreground", "#808080");
+            return "#808080";
         default:
             return getThemeColor("--vscode-editor-foreground", "#d4d4d4");
     }
@@ -1340,11 +1403,14 @@ let isCtrlDown = false;
 let hoverRafId = null;
 
 window.addEventListener("keydown", event => {
-    if (event.key === "Control" || event.ctrlKey) {
+    if (event.key === "Control") {
         isCtrlDown = true;
         if (lastMousePos) {
             updateHoverTooltip(lastMousePos.x, lastMousePos.y);
         }
+    } else if (event.ctrlKey) {
+        isCtrlDown = false;
+        tooltip.style.display = "none";
     }
 });
 
@@ -1353,6 +1419,11 @@ window.addEventListener("keyup", event => {
         isCtrlDown = false;
         tooltip.style.display = "none";
     }
+});
+
+window.addEventListener("blur", () => {
+    isCtrlDown = false;
+    tooltip.style.display = "none";
 });
 
 function updateHoverTooltip(clientX, clientY) {
@@ -1541,6 +1612,11 @@ window.addEventListener("mouseenter", checkWindowFocus);
 canvas.addEventListener("mousemove", event => {
     checkWindowFocus();
     lastMousePos = { x: event.clientX, y: event.clientY };
+    if (!event.ctrlKey) {
+        isCtrlDown = false;
+        tooltip.style.display = "none";
+        return;
+    }
     if (!hoverRafId) {
         hoverRafId = requestAnimationFrame(() => {
             hoverRafId = null;
@@ -1550,6 +1626,12 @@ canvas.addEventListener("mousemove", event => {
 });
 
 canvas.addEventListener("mouseleave", () => {
+    isCtrlDown = false;
+    tooltip.style.display = "none";
+});
+
+document.addEventListener("mouseleave", () => {
+    isCtrlDown = false;
     tooltip.style.display = "none";
 });
 

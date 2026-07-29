@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.107.0"
@@ -84,6 +84,11 @@
         "command": "thumbview.deleteDirectory",
         "title": "Delete Directory",
         "icon": "$(trash)"
+      },
+      {
+        "command": "thumbview.revealInExplorer",
+        "title": "Reveal in Explorer",
+        "icon": "$(folder-opened)"
       }
     ],
     "menus": {
@@ -111,8 +116,23 @@
           "group": "inline@1"
         },
         {
+          "command": "thumbview.revealInExplorer",
+          "when": "view == thumbview-directories && viewItem == directoryItem",
+          "group": "0_navigation@1"
+        },
+        {
           "command": "thumbview.deleteDirectory",
           "when": "view == thumbview-directories && viewItem == directoryItem",
+          "group": "7_modification@1"
+        },
+        {
+          "command": "thumbview.revealInExplorer",
+          "when": "view == thumbview-ignores && viewItem == ignoreItem",
+          "group": "0_navigation@1"
+        },
+        {
+          "command": "thumbview.deleteDirectory",
+          "when": "view == thumbview-ignores && viewItem == ignoreItem",
           "group": "7_modification@1"
         }
       ]

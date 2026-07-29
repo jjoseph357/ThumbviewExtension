@@ -54,8 +54,8 @@ extension.ts (host)
   ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9 grid slots.
   ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
   ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
-  ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view; supports multi-selection (canSelectMany) & batch delete.
-  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical, with cumulative file counts).
+  ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view; supports multi-selection (canSelectMany), batch delete, disk deletion, and Reveal in Explorer.
+  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical, with cumulative file counts, delete folder, and Reveal in Explorer).
 
 Webview panel ("thumbview")
  └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines") ──┐

@@ -5,6 +5,17 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2026-07-29
+
+### Added
+- **VS Code Theme Highlighting for Markdown and JSON**: Improved syntax tokenization for `.md` and `.json` files in Thumbview, correctly applying VS Code theme colors (light blue headers and JSON keys, orange strings, green numbers, and dark blue booleans) to minimap canvas tiles and hover tooltips.
+- **Reveal in Explorer Option**: Added "Reveal in Explorer" to the right-click context menu for items in both Directory Navigation and Ignored Files & Directories sidebar tree views, allowing quick location of folders or files in VS Code's File Explorer.
+- **Delete Option for Ignored Files & Directories**: Added file/folder deletion to the Ignored Files & Directories tree view right-click context menu, supporting single and batch multi-selection deletions from disk (via Trash or Permanent Delete).
+
+### Fixed
+- **Sticky Hover Magnifying Overlay on Keyboard Shortcuts**: Fixed an issue where triggering keyboard shortcuts like `Ctrl+J` or losing window focus left the code magnifying hover overlay stuck on screen. Hover overlay now strictly disables whenever `Ctrl` is not actively held down.
+- **Instant Minimap Refresh on Document Save**: Added a direct `onDidSaveTextDocument` event listener and reduced the refresh debounce delay from 500ms to 200ms, ensuring minimap cards update instantly upon saving a file in VS Code.
+
 ## [0.2.8] - 2026-07-28
 
 ### Fixed

@@ -83,8 +83,8 @@ Why a deleted file leaves a gap that's backfilled by a new file, rather than imm
 ## Sidebar Tree Views & Navigation
 
 To improve navigation in large repositories where canvas headers are small:
-1. **Directory Navigation Tree**: Built hierarchically in `directoryProvider.ts`. Focuses the Thumbview canvas to specific folders with accurate cumulative file counts (including subdirectories).
-2. **Ignored Files & Directories Tree**: Built in `ignoreProvider.ts`. Allows adding, removing, and multi-selecting (`canSelectMany`) ignore patterns directly from the sidebar.
+1. **Directory Navigation Tree**: Built hierarchically in `directoryProvider.ts`. Focuses the Thumbview canvas to specific folders with accurate cumulative file counts (including subdirectories). Right-clicking a folder enables deleting it from disk (via confirmation modal) or revealing it in VS Code's File Explorer.
+2. **Ignored Files & Directories Tree**: Built in `ignoreProvider.ts`. Allows adding, removing, multi-selecting (`canSelectMany`), deleting files/folders from disk (with trash or permanent options), and revealing items in VS Code's File Explorer.
 
 ## Webview Context Menu & Pinned Editors
 

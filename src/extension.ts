@@ -845,23 +845,82 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(focusFolderDisposable);
 
-    const deleteDirectoryDisposable = vscode.commands.registerCommand("thumbview.deleteDirectory", async (item?: DirectoryTreeItem) => {
-        if (!item || item.isRoot || !item.folderPath) { return; }
+    const revealInExplorerDisposable = vscode.commands.registerCommand("thumbview.revealInExplorer", async (item?: DirectoryTreeItem | IgnoreTreeItem) => {
+        if (!item) { return; }
         const wsFolder = vscode.workspace.workspaceFolders?.[0];
         if (!wsFolder) { return; }
-        const folderUri = vscode.Uri.joinPath(wsFolder.uri, item.folderPath);
+
+        let itemRelativePath = "";
+        if (item instanceof DirectoryTreeItem) {
+            if (!item.isRoot) {
+                itemRelativePath = item.folderPath;
+            }
+        } else if (item instanceof IgnoreTreeItem) {
+            itemRelativePath = item.pattern.trim().replace(/^\/+|\/+$/g, "");
+        } else if (typeof (item as any).folderPath === "string") {
+            itemRelativePath = (item as any).folderPath;
+        } else if (typeof (item as any).pattern === "string") {
+            itemRelativePath = (item as any).pattern.trim().replace(/^\/+|\/+$/g, "");
+        }
+
+        const targetUri = itemRelativePath ? vscode.Uri.joinPath(wsFolder.uri, itemRelativePath) : wsFolder.uri;
+        await vscode.commands.executeCommand("revealInExplorer", targetUri);
+    });
+    context.subscriptions.push(revealInExplorerDisposable);
+
+    const deleteDirectoryDisposable = vscode.commands.registerCommand("thumbview.deleteDirectory", async (item?: DirectoryTreeItem | IgnoreTreeItem, items?: (DirectoryTreeItem | IgnoreTreeItem)[]) => {
+        const targetItems = items && items.length > 0 ? items : (item ? [item] : []);
+        if (targetItems.length === 0) { return; }
+
+        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!wsFolder) { return; }
+
+        const validItems = targetItems.filter(i => {
+            if (i instanceof DirectoryTreeItem && (i.isRoot || !i.folderPath)) return false;
+            if (i instanceof IgnoreTreeItem && !i.pattern) return false;
+            return true;
+        });
+        if (validItems.length === 0) { return; }
+
+        const itemPaths: { path: string; isIgnoreItem: boolean; rawPattern?: string }[] = validItems.map(i => {
+            if (i instanceof DirectoryTreeItem || typeof (i as any).folderPath === "string") {
+                return { path: (i as any).folderPath, isIgnoreItem: false };
+            } else {
+                const pat = (i as IgnoreTreeItem).pattern;
+                return { path: pat.trim().replace(/^\/+|\/+$/g, ""), isIgnoreItem: true, rawPattern: pat };
+            }
+        });
+
+        const labelStr = itemPaths.length === 1 ? `'${itemPaths[0].path}'` : `${itemPaths.length} items`;
         const confirm = await vscode.window.showWarningMessage(
-            `Are you sure you want to delete '${item.folderPath}'?`,
+            `Are you sure you want to delete ${labelStr}?`,
             { modal: true },
             "Move to Trash",
             "Delete Permanently"
         );
-        if (confirm === "Move to Trash") {
-            await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: true });
-            refreshProviders();
-            if (activePanel) { refreshRepositoryMap(activePanel); }
-        } else if (confirm === "Delete Permanently") {
-            await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: false });
+
+        if (confirm === "Move to Trash" || confirm === "Delete Permanently") {
+            const useTrash = confirm === "Move to Trash";
+            const ignoreState = getIgnoreState();
+            const patternsToRemove: string[] = [];
+
+            for (const itemInfo of itemPaths) {
+                try {
+                    const targetUri = vscode.Uri.joinPath(wsFolder.uri, itemInfo.path);
+                    await vscode.workspace.fs.delete(targetUri, { recursive: true, useTrash });
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Failed to delete '${itemInfo.path}': ${err?.message ?? String(err)}`);
+                }
+                if (itemInfo.isIgnoreItem && itemInfo.rawPattern) {
+                    patternsToRemove.push(itemInfo.rawPattern);
+                }
+            }
+
+            if (patternsToRemove.length > 0) {
+                const updatedPatterns = ignoreState.ignorePatterns.filter(p => !patternsToRemove.includes(p));
+                await persistIgnoreState({ ...ignoreState, ignorePatterns: updatedPatterns });
+            }
+
             refreshProviders();
             if (activePanel) { refreshRepositoryMap(activePanel); }
         }
@@ -933,7 +992,7 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(tabDisposable);
 
-    // Watch workspace changes. Debounced 800ms so a batch of file operations (e.g. a
+    // Watch workspace changes. Debounced 200ms so a batch of file operations (e.g. a
     // git branch switch, or a build writing many files) triggers one rescan/postMessage
     // instead of flooding the webview with a message per file event.
     const watcher = vscode.workspace.createFileSystemWatcher("**/*");
@@ -947,12 +1006,13 @@ export async function activate(context: vscode.ExtensionContext) {
             if (activePanel) {
                 refreshRepositoryMap(activePanel);
             }
-        }, 500);
+        }, 200);
     };
 
     watcher.onDidCreate(() => triggerUpdate());
     watcher.onDidDelete(() => triggerUpdate());
     watcher.onDidChange(() => triggerUpdate());
+    context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(() => triggerUpdate()));
 
     context.subscriptions.push(watcher);
 }
