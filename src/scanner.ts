@@ -269,7 +269,10 @@ export async function scanRepository(
             autoIgnoreExclusions
         });
         if (denseFolders.length > 0) {
-            vscode.window.showInformationMessage(`Auto-ignored ${denseFolders.length} top-level/dense directory (e.g. ${denseFolders[0]}). You can un-ignore them anytime in the sidebar.`);
+            const msg = denseFolders.length === 1
+                ? `Auto-ignored folder '${denseFolders[0]}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`
+                : `Auto-ignored ${denseFolders.length} folders (e.g. '${denseFolders[0]}'). Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore them if you want.`;
+            vscode.window.showInformationMessage(msg);
         }
         gitignoreRules.length = 0;
         gitignoreRules.push(...updatedIgnored);
@@ -277,6 +280,13 @@ export async function scanRepository(
 
     const result: RepoFile[] = [];
     const validFiles = files.filter(file => !shouldIgnore(vscode.workspace.asRelativePath(file), gitignoreRules));
+
+    // Sort files by relative workspace path so files in the same directory/level sit adjacent to each other
+    validFiles.sort((a, b) => {
+        const relA = vscode.workspace.asRelativePath(a).replace(/\\/g, "/");
+        const relB = vscode.workspace.asRelativePath(b).replace(/\\/g, "/");
+        return relA.localeCompare(relB, undefined, { numeric: true, sensitivity: "base" });
+    });
 
     // Parallel chunked processing (batch size 50) to prevent thread block while speeding up scan by ~5x
     const CHUNK_SIZE = 50;

@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.107.0"
@@ -22,7 +22,7 @@
             "Standard uniform grid (1 cell per file)",
             "Spanning Grid (tall files span multiple vertical cells)"
           ],
-          "default": "uniform_grid",
+          "default": "spanning_grid",
           "description": "Select the layout algorithm mode for displaying codebase minimaps."
         },
         "thumbview.autoIgnoreThreshold": {
@@ -62,8 +62,8 @@
       },
       {
         "command": "thumbview.removeIgnorePattern",
-        "title": "Remove Ignore Pattern",
-        "icon": "$(trash)"
+        "title": "Unignore Directory",
+        "icon": "$(eye)"
       },
       {
         "command": "thumbview.focusFolder",
@@ -77,12 +77,17 @@
       },
       {
         "command": "thumbview.ignoreDirectory",
-        "title": "Ignore Directory in Thumbview",
+        "title": "Ignore Directory",
         "icon": "$(eye-closed)"
       },
       {
         "command": "thumbview.deleteDirectory",
         "title": "Delete Directory",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "thumbview.deleteIgnoredItem",
+        "title": "Delete",
         "icon": "$(trash)"
       },
       {
@@ -107,8 +112,13 @@
       "view/item/context": [
         {
           "command": "thumbview.removeIgnorePattern",
-          "when": "view == thumbview-ignores",
-          "group": "inline"
+          "when": "view == thumbview-ignores && viewItem == ignoreItem",
+          "group": "inline@1"
+        },
+        {
+          "command": "thumbview.removeIgnorePattern",
+          "when": "view == thumbview-ignores && viewItem == ignoreItem",
+          "group": "1_modification@1"
         },
         {
           "command": "thumbview.ignoreDirectory",
@@ -116,13 +126,28 @@
           "group": "inline@1"
         },
         {
-          "command": "thumbview.revealInExplorer",
+          "command": "thumbview.ignoreDirectory",
           "when": "view == thumbview-directories && viewItem == directoryItem",
+          "group": "1_modification@1"
+        },
+        {
+          "command": "thumbview.removeIgnorePattern",
+          "when": "view == thumbview-directories && viewItem == ignoredDirectoryItem",
+          "group": "inline@1"
+        },
+        {
+          "command": "thumbview.removeIgnorePattern",
+          "when": "view == thumbview-directories && viewItem == ignoredDirectoryItem",
+          "group": "1_modification@1"
+        },
+        {
+          "command": "thumbview.revealInExplorer",
+          "when": "view == thumbview-directories && (viewItem == directoryItem || viewItem == ignoredDirectoryItem)",
           "group": "0_navigation@1"
         },
         {
           "command": "thumbview.deleteDirectory",
-          "when": "view == thumbview-directories && viewItem == directoryItem",
+          "when": "view == thumbview-directories && (viewItem == directoryItem || viewItem == ignoredDirectoryItem)",
           "group": "7_modification@1"
         },
         {
@@ -131,7 +156,7 @@
           "group": "0_navigation@1"
         },
         {
-          "command": "thumbview.deleteDirectory",
+          "command": "thumbview.deleteIgnoredItem",
           "when": "view == thumbview-ignores && viewItem == ignoreItem",
           "group": "7_modification@1"
         }

@@ -132,6 +132,10 @@ window.addEventListener("message", event => {
         }
     }
 
+    if (msg.command === "focusWebview") {
+        window.focus();
+    }
+
     if (msg.command === "data") {
         data = msg;
         statusText = "";
@@ -169,6 +173,7 @@ window.addEventListener("message", event => {
             }
         }
         render();
+        window.focus();
     }
 
     if (msg.command === "activeFile") {
@@ -186,6 +191,7 @@ window.addEventListener("message", event => {
         }
         viewLocations = msg.viewLocations || {};
         render();
+        window.focus();
     }
 
     if (msg.command === "setFocusedFolder") {
@@ -299,8 +305,7 @@ function updateBreadcrumbs() {
 
 function getFilteredFiles() {
     if (!data) return [];
-    if (!focusedFolder) return data.files;
-    return data.files.filter(f => f.path.startsWith(focusedFolder));
+    return data.files;
 }
 
 // Groups files by their immediate child subfolder relative to basePath.
@@ -670,6 +675,35 @@ let imageCache = {};
 
 // character length instead ("useText" branch below) — this is what makes small tiles
 // still readable as a rough shape/density map rather than unreadable tiny text.
+function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
+    const imgWidth = img.naturalWidth || img.width;
+    const imgHeight = img.naturalHeight || img.height;
+
+    if (!imgWidth || !imgHeight) {
+        ctx.drawImage(img, x, y, w, h);
+        return;
+    }
+
+    const imgAspect = imgWidth / imgHeight;
+    const containerAspect = w / h;
+
+    let drawW, drawH;
+    if (imgAspect > containerAspect) {
+        drawW = w;
+        drawH = w / imgAspect;
+    } else {
+        drawH = h;
+        drawW = h * imgAspect;
+    }
+
+    const drawX = x + (w - drawW) / 2;
+    const drawY = y + (h - drawH) / 2;
+
+    ctx.fillStyle = bgStyle;
+    ctx.fillRect(x, y, w, h);
+    ctx.drawImage(img, drawX, drawY, drawW, drawH);
+}
+
 function drawMinimap(file, x, y, w, h) {
     ctx.save();
     ctx.beginPath();
@@ -687,8 +721,8 @@ function drawMinimap(file, x, y, w, h) {
             }
             const img = imageCache[file.mediaUri];
             if (img.complete && img.naturalWidth > 0) {
-                // Compressed/scaled image thumbnail tile
-                ctx.drawImage(img, x, y, w, h);
+                // Compressed/scaled image thumbnail tile maintaining aspect ratio
+                drawAspectFit(ctx, img, x, y, w, h);
                 ctx.restore();
                 return;
             }
@@ -746,8 +780,8 @@ function drawMinimap(file, x, y, w, h) {
             }
             const cachedPdfImg = imageCache[file.mediaUri];
             if (cachedPdfImg && cachedPdfImg !== "error" && cachedPdfImg !== "loading" && cachedPdfImg.complete && cachedPdfImg.naturalWidth > 0) {
-                // Draw actual visual PDF Page 1 snapshot image
-                ctx.drawImage(cachedPdfImg, x, y, w, h);
+                // Draw actual visual PDF Page 1 snapshot image maintaining aspect ratio
+                drawAspectFit(ctx, cachedPdfImg, x, y, w, h);
                 ctx.restore();
                 return;
             }
@@ -774,7 +808,7 @@ function drawMinimap(file, x, y, w, h) {
 
     const lines = file.lines || [];
     const lineCount = Math.max(lines.length, 1);
-    const stepY = h / lineCount;
+    const stepY = Math.min(h / lineCount, 6);
     const maxLineChars = 120;
 
     for (let i = 0; i < lines.length; i++) {
@@ -1041,7 +1075,10 @@ function render() {
 
             if (y + localCellH < -50 || y > rectH + 50) continue;
 
+            const isFolderMatch = !focusedFolder || group.path.startsWith(focusedFolder) || focusedFolder.startsWith(group.path);
+
             ctx.save();
+            if (!isFolderMatch) ctx.globalAlpha = 0.15;
 
             // Card background with folder accent
             ctx.fillStyle = "#1e1e24";
@@ -1111,12 +1148,13 @@ function render() {
 
             if (y + fileH < -50 || y > rectH + 50) continue;
 
+            const isFolderMatch = !focusedFolder || file.path.startsWith(focusedFolder);
             const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
             const isActive = file.uri === activeFileUri;
             const isOpen = openFilesSet.has(file.uri);
 
             ctx.save();
-            if (queryActive && !isSearchMatch) ctx.globalAlpha = 0.15;
+            if (!isFolderMatch || (queryActive && !isSearchMatch)) ctx.globalAlpha = 0.15;
 
             ctx.fillStyle = "#1e1e24";
             ctx.fillRect(x + 4, y + 4, localCellW - 8, fileH - 8);
@@ -1190,6 +1228,7 @@ function render() {
                 continue;
             }
 
+            const isFolderMatch = !focusedFolder || file.path.startsWith(focusedFolder);
             const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
 
             const isActive = file.uri === activeFileUri;
@@ -1197,7 +1236,7 @@ function render() {
 
             ctx.save();
 
-            if (queryActive && !isSearchMatch) {
+            if (!isFolderMatch || (queryActive && !isSearchMatch)) {
                 ctx.globalAlpha = 0.15;
             }
 
@@ -1821,6 +1860,7 @@ document.addEventListener("click", event => {
 });
 
 resize();
+window.focus();
 
 vscode.postMessage({
     command: "ready"

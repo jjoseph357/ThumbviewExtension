@@ -5,6 +5,24 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-30
+
+### Added
+- **Subdirectory Selection Lowlighting**: When selecting a subdirectory in Directory Navigation, remaining workspace files stay positioned in their grid slots and are rendered low-lit (dimmed), preserving full codebase layout context while emphasizing the selected folder.
+- **Directory Navigation Context Action "Ignore Directory" & Hidden Folder Indicators**: Added "Ignore Directory" to the right-click context menu in Directory Navigation. Ignored/hidden folders remain visible in the hierarchy, formatted with gray deemphasized text, darker deemphasized icons (`eye-closed`), `(hidden)` label, inline hover eye icon to unignore, and right-click "Unignore Directory".
+- **Ignored Files & Directories Context Action "Unignore Directory" & "Delete"**: Added "Unignore Directory" to the right-click context menu in Ignored Files & Directories tree view and renamed the disk deletion option to "Delete" for ignored items.
+- **Instant 0ms Editor Group Expansion**: Replaced tab snapshot loops with VS Code's instant 0ms `maximizeEditor` / `toggleEditorWidths` command so Thumbview expands to full width without slowing down or disrupting open tab groups.
+- **Automatic Webview DOM Focus on Hotkey Open**: Webview automatically receives browser DOM focus (`window.focus()`) as soon as Thumbview opens via hotkey `F4`, allowing holding `Left CTRL` for magnifying overlay or typing to search immediately without clicking the panel first.
+- **Toggle & Focus Hotkey (`F4`)**: Pressing the hotkey when Thumbview is focused toggles the panel closed. Pressing the hotkey when Thumbview is open but unfocused (e.g. side panel selected) brings focus to Thumbview.
+- **Aspect Ratio Preservation for Images and PDFs**: Applied `drawAspectFit` rendering to image and PDF thumbnails, ensuring media files maintain their native aspect ratio (`object-fit: contain`) with dark letterbox/pillarbox background centering instead of stretching.
+- **Auto-Ignore Guidance Toast Notification**: Updated auto-ignore toast notifications to explicitly inform users to check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore folders if desired.
+
+### Changed
+- **Default Layout Mode Set to Spanning Grid**: Changed default configuration setting `thumbview.layoutMode` to `"spanning_grid"`, allowing larger/taller code files to span multiple vertical grid cells by default.
+- **Directory-Grouped Relative Path Sorting & Reflow Layout Reset**: Sorted workspace files alphabetically by relative path during scanning so files in the same directory/level sit adjacent to each other in the minimap grid. Running "Reflow Layout" resets the grid order strictly to this directory-grouped relative path sequence while closing all layout gaps.
+- **Fixed Maximum Line Gap for Short Files**: Capped line spacing step (`stepY`) to a fixed maximum height (6px) so files with few lines retain standard code line height instead of expanding vertical gaps to fill the thumbnail container height.
+- **Ignored Tree Item Eye Icon Updates**: Changed the remove action icon in Ignored Files & Directories to an eye (`$(eye)`) and removed the crossed-out eye icon to the left of ignored tree items, replacing it with standard folder/file icons.
+
 ## [0.2.9] - 2026-07-29
 
 ### Added

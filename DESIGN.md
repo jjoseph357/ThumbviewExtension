@@ -46,6 +46,20 @@ Prior to 0.2.7, `ignorePatterns` and `autoIgnoreExclusions` were stored using `C
 
 Both values are now stored in `ExtensionContext.workspaceState` — VS Code's built-in per-workspace key-value store that lives in VS Code's internal data directory (`~/.config/Code/` or equivalent), never in the user's project. This is the same mechanism the extension already uses for `repomap.seenFiles` and spanning layout allocations. On first activation after the migration, any old `settings.json` values are read, merged into `workspaceState`, and deleted from configuration so the `.vscode/settings.json` file can be safely removed.
 
+## Subdirectory Selection Lowlighting (Opacity 0.15)
+
+Previously, selecting a subdirectory filtered out non-selected files completely and re-packed the remaining files. This broke spatial memory of where files live in the full repository grid. In 0.3.0, selecting a subdirectory retains all workspace file tiles in their stable grid slots while dimming non-selected files (`ctx.globalAlpha = 0.15`). This keeps spatial layout consistent while highlighting the active subdirectory.
+
+## Fixed Maximum Line Gap for Short Code Files (6px Cap)
+
+Minimap canvas tiles divide tile height by line count (`stepY = h / lineCount`). For short files with few lines (e.g. 5–10 lines), naive division created large 15–20px vertical gaps between lines, stretching code structure artificially. Capping `stepY` at 6px max (`Math.min(h / lineCount, 6)`) ensures short files maintain standard 1:1 code line spacing with empty space at the bottom of the card, matching how developers naturally see code files in text editors.
+
+## Full-Width Screen Expansion & Tab Group Restoration
+
+When a developer works with split windows (e.g. 2 or 3 side-by-side editor columns), opening a minimap webview in a single column restricts canvas width to a fraction of the monitor, while setting a single-group grid moves tabs into one group. To achieve 100% full-width screen coverage while perfectly preserving the user's tab organization:
+1. When Thumbview opens or receives focus while split editor groups exist (`vscode.window.tabGroups.all.length > 1`), the extension captures the user's pre-Thumbview editor grid using `vscode.getEditorLayout` into `savedEditorLayout` AND captures a full snapshot of every group's open tabs, view columns, and active files into `savedTabSnapshots`. It then executes `vscode.setEditorLayout({ orientation: 0, groups: [{ size: 1 }] })`, collapsing the editor area into a single full-width group with ZERO side slivers.
+2. When Thumbview is closed (`panel.onDidDispose` or `F4` toggle), the extension executes `vscode.setEditorLayout(savedEditorLayout)` to restore column geometry, then iterates `savedTabSnapshots` to re-populate every file into its original `ViewColumn` with its original active file focused.
+
 ## Recursive Subfolder Card Expansion (60×40px Threshold)
 
 Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. Rather than forcing the user to know which subfolder to navigate to (the old focused-folder behavior filtered to a subset but still used the root grid positions), the webview now detects when cells fall below 60px wide or 40px tall and automatically switches to a "subfolder card mode". Files are grouped by their immediate child folder relative to the current `focusedFolder`, and each group renders as a clickable card showing folder name, file count, and a color-coded density bar. Clicking a card sets `focusedFolder` to that subfolder and re-renders — if the new subset is still too large, the same grouping recurs at the next folder level. This continues until cells are large enough for individual minimap tiles, naturally handling arbitrarily deep hierarchies without any explicit recursion limit.
@@ -66,7 +80,7 @@ VS Code webviews do not automatically gain active input focus when hovering the 
 
 ## Two layout modes: `uniform_grid` vs `spanning_grid`
 
-`uniform_grid` (the default) is simplest: one cell per file, purely order-based, cheap to reason about and maximally stable. `spanning_grid` was added so a file's tile size communicates something about the file (its line count) instead of every file getting equal screen space regardless of size — useful once a workspace mixes many small files with a few large ones. The two modes are additive, not a replacement of one by the other, so users can pick based on preference via `thumbview.layoutMode`.
+`spanning_grid` (the default) communicates a file's relative size and line count visually by having tall files span multiple vertical grid cells. `uniform_grid` is also available as an alternative mode (1 cell per file) via `thumbview.layoutMode`.
 
 ## Stable, incremental grid growth (`buildStableGrid`)
 

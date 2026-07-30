@@ -103,7 +103,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const getLayoutMode = (): "uniform_grid" | "spanning_grid" => {
         const config = vscode.workspace.getConfiguration("thumbview");
         const mode = config.get<string>("layoutMode");
-        return mode === "spanning_grid" ? "spanning_grid" : "uniform_grid";
+        return mode === "uniform_grid" ? "uniform_grid" : "spanning_grid";
     };
 
     // Four progressively-fainter pink decoration types used to fade a "jump" search
@@ -305,15 +305,54 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    let isThumbviewMaximized = false;
+
+    const maximizeThumbview = async () => {
+        if (vscode.window.tabGroups.all.length > 1 && !isThumbviewMaximized) {
+            try {
+                await vscode.commands.executeCommand("workbench.action.maximizeEditor");
+                isThumbviewMaximized = true;
+            } catch {
+                try {
+                    await vscode.commands.executeCommand("workbench.action.toggleEditorWidths");
+                    isThumbviewMaximized = true;
+                } catch {
+                }
+            }
+        }
+    };
+
+    const restoreSplitLayout = async () => {
+        if (isThumbviewMaximized) {
+            isThumbviewMaximized = false;
+            try {
+                await vscode.commands.executeCommand("workbench.action.maximizeEditor");
+            } catch {
+                try {
+                    await vscode.commands.executeCommand("workbench.action.toggleEditorWidths");
+                } catch {
+                }
+            }
+        }
+    };
+
     const disposable = vscode.commands.registerCommand(
         "thumbview.open",
         async () => {
             console.log("THUMBVIEW COMMAND EXECUTED");
 
             if (activePanel) {
-                activePanel.reveal(vscode.ViewColumn.Active);
-                sendOpenState();
-                return;
+                if (activePanel.active) {
+                    activePanel.dispose();
+                    activePanel = undefined;
+                    return;
+                } else {
+                    activePanel.reveal(vscode.ViewColumn.Active, false);
+                    sendOpenState();
+                    activePanel.webview.postMessage({ command: "focusWebview" });
+                    await maximizeThumbview();
+                    return;
+                }
             }
 
             vscode.window.showInformationMessage("Thumbview opening...");
@@ -333,6 +372,7 @@ export async function activate(context: vscode.ExtensionContext) {
             );
 
             activePanel = panel;
+            await maximizeThumbview();
 
             panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
 
@@ -681,10 +721,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             });
 
-            panel.onDidDispose(() => {
+            panel.onDidDispose(async () => {
                 if (activePanel === panel) {
                     activePanel = undefined;
                 }
+                await restoreSplitLayout();
             });
         }
     );
@@ -752,11 +793,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const ignoreDirectoryDisposable = vscode.commands.registerCommand("thumbview.ignoreDirectory", async (item?: DirectoryTreeItem) => {
         const folderPath = item?.folderPath;
-        if (folderPath) {
+        if (folderPath && !item?.isRoot) {
             const state = getIgnoreState();
             if (!state.ignorePatterns.includes(folderPath)) {
                 await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, folderPath] });
-                vscode.window.showInformationMessage(`Added '${folderPath}' to ignore list.`);
+                vscode.window.showInformationMessage(`Ignored directory '${folderPath}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`);
                 refreshProviders();
                 if (activePanel) {
                     refreshRepositoryMap(activePanel);
@@ -786,15 +827,19 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(addIgnoreDisposable);
 
-    const removeIgnoreDisposable = vscode.commands.registerCommand("thumbview.removeIgnorePattern", async (item?: IgnoreTreeItem, items?: IgnoreTreeItem[]) => {
+    const removeIgnoreDisposable = vscode.commands.registerCommand("thumbview.removeIgnorePattern", async (item?: IgnoreTreeItem | DirectoryTreeItem, items?: (IgnoreTreeItem | DirectoryTreeItem)[]) => {
         const state = getIgnoreState();
 
         const targetItems = items && items.length > 0 ? items : (item ? [item] : []);
-        let patternsToRemove: string[] = targetItems.map(i => i.pattern);
+        let patternsToRemove: string[] = targetItems.map(i => {
+            if (i instanceof IgnoreTreeItem) return i.pattern;
+            if (i instanceof DirectoryTreeItem) return i.folderPath;
+            return (i as any)?.pattern || (i as any)?.folderPath || "";
+        }).filter(Boolean);
 
         if (patternsToRemove.length === 0 && state.ignorePatterns.length > 0) {
             const selected = await vscode.window.showQuickPick(state.ignorePatterns, {
-                placeHolder: "Select pattern to remove",
+                placeHolder: "Select pattern to unignore",
                 canPickMany: true
             });
             if (selected) {
@@ -814,8 +859,8 @@ export async function activate(context: vscode.ExtensionContext) {
             await persistIgnoreState({ ignorePatterns: updatedPatterns, autoIgnoreExclusions: updatedExclusions });
 
             const msg = patternsToRemove.length === 1
-                ? `Removed '${patternsToRemove[0]}' from ignore list.`
-                : `Batch removed ${patternsToRemove.length} ignore patterns.`;
+                ? `Unignored '${patternsToRemove[0]}'.`
+                : `Batch unignored ${patternsToRemove.length} items.`;
             vscode.window.showInformationMessage(msg);
             refreshProviders();
             if (activePanel) {
@@ -926,6 +971,11 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     });
     context.subscriptions.push(deleteDirectoryDisposable);
+
+    const deleteIgnoredDisposable = vscode.commands.registerCommand("thumbview.deleteIgnoredItem", async (item?: IgnoreTreeItem, items?: IgnoreTreeItem[]) => {
+        return vscode.commands.executeCommand("thumbview.deleteDirectory", item, items);
+    });
+    context.subscriptions.push(deleteIgnoredDisposable);
 
     const showAllFoldersDisposable = vscode.commands.registerCommand("thumbview.showAllFolders", async () => {
         vscode.commands.executeCommand("thumbview.focusFolder", "");

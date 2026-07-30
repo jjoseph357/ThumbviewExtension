@@ -36,18 +36,10 @@ export class PersistentFileOrder {
         }
     }
 
-    // Unlike update(), this drops holes entirely by compacting the array — used by
-    // the explicit "Reflow Layout" command when the user wants the grid to close its
-    // gaps rather than preserve them for future backfilling.
+    // Unlike update(), this resets the layout order strictly to currentIds (which are
+    // sorted by directory-grouped relative path) and eliminates all empty holes.
     reflow(currentIds: string[]) {
-        const current = new Set(currentIds);
-        this.seenFiles = this.seenFiles.filter(id => current.has(id));
-
-        for (const id of currentIds) {
-            if (!this.seenFiles.includes(id)) {
-                this.seenFiles.push(id);
-            }
-        }
+        this.seenFiles = [...currentIds];
     }
 
     getOrder() {
