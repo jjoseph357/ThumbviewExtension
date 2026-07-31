@@ -199,8 +199,8 @@ export async function activate(context: vscode.ExtensionContext) {
             const mode = getLayoutMode();
             const config = vscode.workspace.getConfiguration("thumbview");
             const renderMediaThumbnails = config.get<boolean>("renderMediaThumbnails") ?? true;
-            const minCellWidth = config.get<number>("minCellWidth") ?? 48;
-            const minCellHeight = config.get<number>("minCellHeight") ?? 30;
+            const minCellWidth = config.get<number>("minCellWidth") ?? 32;
+            const minCellHeight = config.get<number>("minCellHeight") ?? 28;
             const openKeybinding = getOpenKeybindingLabel();
             const filesWithWebviewUris = files.map(file => {
                 if ((file.isImage || file.isPdf) && file.mediaUri) {
@@ -350,12 +350,12 @@ export async function activate(context: vscode.ExtensionContext) {
                         } catch {
                             try {
                                 await vscode.commands.executeCommand("workbench.action.previousEditor");
-                            } catch {}
+                            } catch { }
                         }
                     } else {
                         try {
                             await vscode.commands.executeCommand("workbench.action.previousEditor");
-                        } catch {}
+                        } catch { }
                     }
                     return;
                 } else {

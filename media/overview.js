@@ -1037,8 +1037,8 @@ function render() {
 
     // Minimum usable cell size — below this, tiles are too small to read/click,
     // so we switch to subfolder card mode that groups files into clickable folder cards.
-    const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 48;
-    const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 30;
+    const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 32;
+    const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 28;
 
     const rootCellsTooSmall = rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H;
 

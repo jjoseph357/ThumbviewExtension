@@ -68,7 +68,7 @@ In 0.3.1, pressing `F4` while Thumbview is active restores split layout (if maxi
 
 ## Configurable Subfolder Card Threshold (`thumbview.minCellWidth` & `thumbview.minCellHeight`)
 
-Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. The webview evaluates tile dimensions against `thumbview.minCellWidth` (default `48px`) and `thumbview.minCellHeight` (default `30px`).
+Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. The webview evaluates tile dimensions against `thumbview.minCellWidth` (default `32px`) and `thumbview.minCellHeight` (default `28px`).
 1. **Root File Tiles Visible**: When root file cells fit on screen above the minimum dimensions, selecting a directory (via sidebar Directory Navigation or path click) lowlights non-selected files (opacity 0.15), preserving full codebase grid layout.
 2. **Directories Shrunk to Folder Cards**: When root cells drop below the minimum dimensions, directories shrink into clickable folder cards. Selecting a directory opens/drills down into that folder, constructing a complete Thumbview grid containing only that directory's files.
 

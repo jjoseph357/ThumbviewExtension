@@ -37,12 +37,12 @@
         },
         "thumbview.minCellWidth": {
           "type": "number",
-          "default": 48,
+          "default": 32,
           "description": "Minimum tile width in pixels before grouping workspace files into subfolder cards."
         },
         "thumbview.minCellHeight": {
           "type": "number",
-          "default": 30,
+          "default": 28,
           "description": "Minimum tile height in pixels before grouping workspace files into subfolder cards."
         }
       }

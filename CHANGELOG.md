@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.1] - 2026-07-31
 
 ### Added
-- **Configurable Minimum Cell Dimensions**: Added `thumbview.minCellWidth` (default `48`) and `thumbview.minCellHeight` (default `30`) configuration settings to customize the minimum tile size threshold before files are grouped into subfolder cards.
+- **Configurable Minimum Cell Dimensions**: Added `thumbview.minCellWidth` (default `32`) and `thumbview.minCellHeight` (default `28`) configuration settings to customize the minimum tile size threshold before files are grouped into subfolder cards.
 
 ### Changed
 - **Instant Hotkey Toggle & Tab Switch**: Replaced WebviewPanel destruction (`dispose()`) and window reflow animations on toggle hotkey (`F4`) with direct active text document switching (`showTextDocument`). Preserved background webview context enables 0ms instant toggling identical to tab clicks.
