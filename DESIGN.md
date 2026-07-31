@@ -56,13 +56,21 @@ Minimap canvas tiles divide tile height by line count (`stepY = h / lineCount`).
 
 ## Full-Width Screen Expansion & Tab Group Restoration
 
-When a developer works with split windows (e.g. 2 or 3 side-by-side editor columns), opening a minimap webview in a single column restricts canvas width to a fraction of the monitor, while setting a single-group grid moves tabs into one group. To achieve 100% full-width screen coverage while perfectly preserving the user's tab organization:
-1. When Thumbview opens or receives focus while split editor groups exist (`vscode.window.tabGroups.all.length > 1`), the extension captures the user's pre-Thumbview editor grid using `vscode.getEditorLayout` into `savedEditorLayout` AND captures a full snapshot of every group's open tabs, view columns, and active files into `savedTabSnapshots`. It then executes `vscode.setEditorLayout({ orientation: 0, groups: [{ size: 1 }] })`, collapsing the editor area into a single full-width group with ZERO side slivers.
-2. When Thumbview is closed (`panel.onDidDispose` or `F4` toggle), the extension executes `vscode.setEditorLayout(savedEditorLayout)` to restore column geometry, then iterates `savedTabSnapshots` to re-populate every file into its original `ViewColumn` with its original active file focused.
+When a developer works with split windows (e.g. 2 or 3 side-by-side editor columns), opening a minimap webview in a single column restricts canvas width to a fraction of the monitor. To achieve full-width screen coverage without state desynchronization:
+1. When Thumbview opens or receives focus while split editor groups exist (`vscode.window.tabGroups.all.length > 1`), the extension executes `workbench.action.minimizeOtherEditors`, expanding the active Thumbview panel to full screen width.
+2. When Thumbview is closed or hidden, the extension executes `workbench.action.evenEditorWidths` to restore split editor groups back to equal proportions. Because both commands are idempotent state declarations rather than boolean toggles, window expansion works consistently 100% of the time.
 
-## Recursive Subfolder Card Expansion (60×40px Threshold)
+## Instant Hotkey Toggle & Retained Webview Context (`F4`)
 
-Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. Rather than forcing the user to know which subfolder to navigate to (the old focused-folder behavior filtered to a subset but still used the root grid positions), the webview now detects when cells fall below 60px wide or 40px tall and automatically switches to a "subfolder card mode". Files are grouped by their immediate child folder relative to the current `focusedFolder`, and each group renders as a clickable card showing folder name, file count, and a color-coded density bar. Clicking a card sets `focusedFolder` to that subfolder and re-renders — if the new subset is still too large, the same grouping recurs at the next folder level. This continues until cells are large enough for individual minimap tiles, naturally handling arbitrarily deep hierarchies without any explicit recursion limit.
+In earlier versions, pressing the toggle hotkey (`F4`) to close Thumbview called `activePanel.dispose()`. This completely destroyed the webview panel, forcing a full repository rescan (`scanRepository()`) and line tokenization phase when reopening in large codebases.
+
+In 0.3.1, pressing `F4` while Thumbview is active restores split layout (if maximized) and switches focus to the most recent editor tab (`workbench.action.openPreviousRecentlyUsedEditorInGroup`). Because the panel was created with `retainContextWhenHidden: true`, keeping the WebviewPanel alive in the background preserves its DOM canvas, line cache, and search index in memory. Pressing `F4` again instantly reveals the background panel with 0ms delay and zero scanning overhead. Closing the tab manually (`×` or `Ctrl+W`) disposes the panel as normal.
+
+## Configurable Subfolder Card Threshold (`thumbview.minCellWidth` & `thumbview.minCellHeight`)
+
+Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. The webview evaluates tile dimensions against `thumbview.minCellWidth` (default `48px`) and `thumbview.minCellHeight` (default `30px`).
+1. **Root File Tiles Visible**: When root file cells fit on screen above the minimum dimensions, selecting a directory (via sidebar Directory Navigation or path click) lowlights non-selected files (opacity 0.15), preserving full codebase grid layout.
+2. **Directories Shrunk to Folder Cards**: When root cells drop below the minimum dimensions, directories shrink into clickable folder cards. Selecting a directory opens/drills down into that folder, constructing a complete Thumbview grid containing only that directory's files.
 
 ## Multi-Select Batch Deletion (`canSelectMany: true`)
 

@@ -5,6 +5,19 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-31
+
+### Added
+- **Configurable Minimum Cell Dimensions**: Added `thumbview.minCellWidth` (default `48`) and `thumbview.minCellHeight` (default `30`) configuration settings to customize the minimum tile size threshold before files are grouped into subfolder cards.
+
+### Changed
+- **Instant Hotkey Toggle & Tab Switch**: Replaced WebviewPanel destruction (`dispose()`) and window reflow animations on toggle hotkey (`F4`) with direct active text document switching (`showTextDocument`). Preserved background webview context enables 0ms instant toggling identical to tab clicks.
+- **Smart Directory Selection (Lowlight vs. Folder Opening)**: When root file tiles are visible on screen, selecting a directory (from Directory Navigation sidebar or clicking a path) dims non-selected files (opacity 0.15) to preserve full codebase layout context. If tiles have shrunk below minimum cell size thresholds into folder cards, selecting a directory opens and drills down into that folder.
+
+### Fixed
+- **Stale Repository Data Flash Prevention**: Added `clearData: true` flag on repository rescan start, preventing webviews from briefly displaying stale minimap tiles from a previous repository or session while a refresh is in progress.
+- **Reliable Window Maximization via Idempotent Commands**: Replaced boolean toggle commands with idempotent VS Code layout commands (`workbench.action.minimizeOtherEditors` and `workbench.action.evenEditorWidths`), eliminating state desynchronization and ensuring window expansion works 100% of the time.
+
 ## [0.3.0] - 2026-07-30
 
 ### Added

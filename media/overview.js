@@ -127,6 +127,10 @@ window.addEventListener("message", event => {
 
     if (msg.command === "status") {
         statusText = msg.text;
+        if (msg.clearData) {
+            data = null;
+            hoverLineCache = {};
+        }
         if (!data) {
             drawStatus();
         }
@@ -1033,9 +1037,34 @@ function render() {
 
     // Minimum usable cell size — below this, tiles are too small to read/click,
     // so we switch to subfolder card mode that groups files into clickable folder cards.
-    const MIN_CELL_W = 60;
-    const MIN_CELL_H = 40;
-    const cellsTooSmall = rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H;
+    const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 48;
+    const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 30;
+
+    const rootCellsTooSmall = rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H;
+
+    // If root tiles are NOT too small (rootCellsTooSmall === false), individual file tiles
+    // are visible in their stable root grid slots — selecting a directory lowlights non-selected files.
+    // If root tiles ARE too small (rootCellsTooSmall === true), directories have shrunk into
+    // folder thumbnail cards — selecting a directory opens/drills down into that folder.
+    const shouldOpenFolder = !!(focusedFolder && rootCellsTooSmall);
+
+    const scopedFiles = shouldOpenFolder
+        ? data.files.filter(f => f.path && f.path.startsWith(focusedFolder))
+        : data.files;
+
+    let cellsTooSmall = false;
+    let localFolderGrid = null;
+    let folderCellW = rootCellW;
+    let folderCellH = rootCellH;
+
+    if (shouldOpenFolder) {
+        localFolderGrid = buildStableGrid(scopedFiles.length);
+        folderCellW = availableW / Math.max(1, localFolderGrid.cols);
+        folderCellH = availableH / Math.max(1, localFolderGrid.rows);
+        cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
+    } else {
+        cellsTooSmall = rootCellsTooSmall;
+    }
 
     const queryActive = !!searchQuery;
 
@@ -1051,18 +1080,13 @@ function render() {
         // Subfolder card mode: group files into immediate child folders and render
         // each as a clickable card. Root-level files get individual tiles. The local
         // buildStableGrid duplicate computes a fresh grid for these items.
-        const { folders, rootFiles } = getSubfolderGroups(filteredFiles, focusedFolder);
+        const { folders, rootFiles } = getSubfolderGroups(scopedFiles, focusedFolder);
         const totalItems = folders.length + rootFiles.length;
         if (totalItems === 0) return;
 
         const localGrid = buildStableGrid(totalItems);
         const localCellW = availableW / localGrid.cols;
         const localCellH = availableH / localGrid.rows;
-
-        // If even the subfolder grid cells are too small, recurse: group the subfolders
-        // themselves into higher-level groups. This is handled naturally — clicking any
-        // folder card will set focusedFolder and re-render, which will re-evaluate
-        // cellsTooSmall with the new subset.
 
         let slotIdx = 0;
 
@@ -1195,6 +1219,77 @@ function render() {
             }
 
             drawMinimap(file, x + 10, y + 24, Math.max(1, localCellW - 20), Math.max(1, fileH - 34));
+            ctx.restore();
+        }
+    } else if (shouldOpenFolder) {
+        // Directory drill-down mode — render all files in focusedFolder as a Thumbview grid
+        const slots = localFolderGrid ? localFolderGrid.slots : [];
+        const cellW = folderCellW;
+        const cellH = folderCellH;
+
+        for (let i = 0; i < scopedFiles.length; i++) {
+            const file = scopedFiles[i];
+            const slot = slots[i];
+            if (!slot) continue;
+
+            const col = slot[0];
+            const row = slot[1];
+            const nCells = file.nCells || 1;
+
+            const x = sideMargin + col * cellW;
+            const y = topMargin + row * cellH;
+            const fileH = cellH * nCells;
+
+            file._cell = { x, y, w: cellW, h: fileH };
+
+            if (y + fileH < -50 || y > rectH + 50) continue;
+
+            const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
+            const isActive = file.uri === activeFileUri;
+            const isOpen = openFilesSet.has(file.uri);
+
+            ctx.save();
+            if (queryActive && !isSearchMatch) ctx.globalAlpha = 0.15;
+
+            ctx.fillStyle = "#1e1e24";
+            ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
+
+            if (queryActive && isSearchMatch) {
+                ctx.strokeStyle = "#ec4899";
+                ctx.lineWidth = 2.5;
+            } else if (isActive) {
+                ctx.strokeStyle = "#a855f7";
+                ctx.lineWidth = 2.5;
+            } else if (isOpen) {
+                ctx.strokeStyle = "#f97316";
+                ctx.lineWidth = 1.8;
+            } else {
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+                ctx.lineWidth = 1;
+            }
+            ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
+
+            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
+            ctx.font = "10px system-ui, sans-serif";
+
+            if (file._lastCellW !== cellW || !file._fittedLabel) {
+                file._lastCellW = cellW;
+                file._fittedLabel = fitPathText(file.path, cellW - 36);
+            }
+            ctx.fillText(file._fittedLabel, x + 10, y + 18);
+
+            if (isOpen) {
+                const closeBtnX = x + cellW - 20;
+                const closeBtnY = y + 10;
+                file._closeBtn = { x: closeBtnX, y: closeBtnY, w: 12, h: 12 };
+                ctx.fillStyle = "#707075";
+                ctx.font = "12px system-ui, sans-serif";
+                ctx.fillText("×", closeBtnX, closeBtnY + 8);
+            } else {
+                delete file._closeBtn;
+            }
+
+            drawMinimap(file, x + 10, y + 24, Math.max(1, cellW - 20), Math.max(1, fileH - 34));
             ctx.restore();
         }
     } else {

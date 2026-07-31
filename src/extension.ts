@@ -96,6 +96,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const cursorLocations: { [uri: string]: number } = {};
 
+    let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
 
     // Reads the user setting fresh each call (rather than caching) so a config change
@@ -185,7 +186,8 @@ export async function activate(context: vscode.ExtensionContext) {
         try {
             panel.webview.postMessage({
                 command: "status",
-                text: "Refreshing repository map..."
+                text: "Refreshing repository map...",
+                clearData: true
             });
 
             const files = await scanRepository(getIgnoreState(), persistIgnoreState);
@@ -195,7 +197,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
             const order = fileOrder.getOrder();
             const mode = getLayoutMode();
-            const renderMediaThumbnails = vscode.workspace.getConfiguration("thumbview").get<boolean>("renderMediaThumbnails") ?? true;
+            const config = vscode.workspace.getConfiguration("thumbview");
+            const renderMediaThumbnails = config.get<boolean>("renderMediaThumbnails") ?? true;
+            const minCellWidth = config.get<number>("minCellWidth") ?? 48;
+            const minCellHeight = config.get<number>("minCellHeight") ?? 30;
             const openKeybinding = getOpenKeybindingLabel();
             const filesWithWebviewUris = files.map(file => {
                 if ((file.isImage || file.isPdf) && file.mediaUri) {
@@ -242,6 +247,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: "data",
                     mode: "spanning_grid",
                     renderMediaThumbnails,
+                    minCellWidth,
+                    minCellHeight,
                     openKeybinding,
                     files: filesWithSlots,
                     layout: {
@@ -273,6 +280,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: "data",
                     mode: "uniform_grid",
                     renderMediaThumbnails,
+                    minCellWidth,
+                    minCellHeight,
                     openKeybinding,
                     files: filesWithSlots,
                     layout: {
@@ -308,16 +317,11 @@ export async function activate(context: vscode.ExtensionContext) {
     let isThumbviewMaximized = false;
 
     const maximizeThumbview = async () => {
-        if (vscode.window.tabGroups.all.length > 1 && !isThumbviewMaximized) {
+        if (vscode.window.tabGroups.all.length > 1) {
             try {
-                await vscode.commands.executeCommand("workbench.action.maximizeEditor");
+                await vscode.commands.executeCommand("workbench.action.minimizeOtherEditors");
                 isThumbviewMaximized = true;
             } catch {
-                try {
-                    await vscode.commands.executeCommand("workbench.action.toggleEditorWidths");
-                    isThumbviewMaximized = true;
-                } catch {
-                }
             }
         }
     };
@@ -326,12 +330,8 @@ export async function activate(context: vscode.ExtensionContext) {
         if (isThumbviewMaximized) {
             isThumbviewMaximized = false;
             try {
-                await vscode.commands.executeCommand("workbench.action.maximizeEditor");
+                await vscode.commands.executeCommand("workbench.action.evenEditorWidths");
             } catch {
-                try {
-                    await vscode.commands.executeCommand("workbench.action.toggleEditorWidths");
-                } catch {
-                }
             }
         }
     };
@@ -343,14 +343,26 @@ export async function activate(context: vscode.ExtensionContext) {
 
             if (activePanel) {
                 if (activePanel.active) {
-                    activePanel.dispose();
-                    activePanel = undefined;
+                    restoreSplitLayout();
+                    if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
+                        try {
+                            await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
+                        } catch {
+                            try {
+                                await vscode.commands.executeCommand("workbench.action.previousEditor");
+                            } catch {}
+                        }
+                    } else {
+                        try {
+                            await vscode.commands.executeCommand("workbench.action.previousEditor");
+                        } catch {}
+                    }
                     return;
                 } else {
                     activePanel.reveal(vscode.ViewColumn.Active, false);
                     sendOpenState();
                     activePanel.webview.postMessage({ command: "focusWebview" });
-                    await maximizeThumbview();
+                    maximizeThumbview();
                     return;
                 }
             }
@@ -711,13 +723,16 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             panel.onDidChangeViewState(e => {
-                if (e.webviewPanel.visible) {
+                if (e.webviewPanel.visible && e.webviewPanel.active) {
                     const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
                     panel.webview.postMessage({
                         command: "activeFile",
                         uri: activeUri
                     });
                     sendOpenState();
+                    maximizeThumbview();
+                } else if (!e.webviewPanel.active) {
+                    restoreSplitLayout();
                 }
             });
 
@@ -985,7 +1000,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Watch configuration changes (ignorePatterns no longer lives in config — only
     // layoutMode, renderMediaThumbnails, and autoIgnoreThreshold are real settings)
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
-        if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails")) && activePanel) {
+        if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails") || e.affectsConfiguration("thumbview.minCellWidth") || e.affectsConfiguration("thumbview.minCellHeight")) && activePanel) {
             refreshRepositoryMap(activePanel);
         }
     });
@@ -1024,6 +1039,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Watch active editor changes
     const editorDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
+        if (editor && editor.document.uri.scheme !== "vscode-webview") {
+            lastActiveTextEditor = editor;
+        }
         updateVisibleRanges(editor);
         scheduleSendOpenState(0);
     });

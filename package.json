@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.107.0"
@@ -34,6 +34,16 @@
           "type": "boolean",
           "default": true,
           "description": "Whether image and PDF thumbnails are rendered inside Thumbview tiles."
+        },
+        "thumbview.minCellWidth": {
+          "type": "number",
+          "default": 48,
+          "description": "Minimum tile width in pixels before grouping workspace files into subfolder cards."
+        },
+        "thumbview.minCellHeight": {
+          "type": "number",
+          "default": 30,
+          "description": "Minimum tile height in pixels before grouping workspace files into subfolder cards."
         }
       }
     },
