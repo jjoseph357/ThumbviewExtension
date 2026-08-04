@@ -118,6 +118,7 @@ To prevent extension crashes or main thread freezes when scanning repositories w
 1. **File Size Cap**: Files over **2 MB** in size are skipped from initial workspace scanning.
 2. **Line Length Truncation**: Lines are truncated at **300 characters** for minimap rendering.
 3. **Evenly Spaced Line Sampling & Dynamic IPC Fetching**: For files over 2,000 lines, initial scanning samples up to **2,000 lines evenly spaced across the entire file** using uniform striding (`step = doc.lineCount / 2000`). This preserves the visual shape and structure of long files from top to bottom on the minimap card without overloading memory. `doc.lineCount` remains untruncated so tile heights and scrolling positions remain accurate. Any missing lines requested during hover overlay browsing are dynamically fetched on demand via `getHoverLines` IPC.
+4. **Fixed Per-File Overlay Width**: Hover overlay tooltip width is fixed per file based on `min(maxWidthAllowed, widestLine)` across all available lines in that file. This prevents layout jitter/flashing as the cursor moves across lines of varying lengths in the same file.
 
 ## Known limitations / accepted tradeoffs
 

@@ -1328,14 +1328,16 @@ function getHtml(
             left: 50%;
             transform: translate(-50%, -50%);
             display: none;
-            width: 480px;
+            width: 560px;
             max-width: 90vw;
-            background: rgba(20, 20, 26, 0.95);
+            max-height: 82vh;
+            overflow-y: auto;
+            background: rgba(20, 20, 26, 0.96);
             backdrop-filter: blur(16px);
             border: 1px solid rgba(168, 85, 247, 0.4);
             border-radius: 12px;
             padding: 20px 24px;
-            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.8);
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85);
             z-index: 3000;
             font-size: 13px;
             color: #d4d4d8;
@@ -1351,6 +1353,10 @@ function getHtml(
             border-bottom: 1px solid rgba(255, 255, 255, 0.12);
             padding-bottom: 10px;
             margin-bottom: 16px;
+            position: sticky;
+            top: 0;
+            background: rgba(20, 20, 26, 0.98);
+            z-index: 10;
         }
 
         .modal-close {
@@ -1363,7 +1369,7 @@ function getHtml(
 
         .modal-close:hover { color: #ffffff; }
 
-        .modal-section { margin-bottom: 16px; }
+        .modal-section { margin-bottom: 20px; }
         .modal-section-title {
             font-size: 12px;
             text-transform: uppercase;
@@ -1371,6 +1377,8 @@ function getHtml(
             color: #a855f7;
             font-weight: 600;
             margin-bottom: 8px;
+            border-bottom: 1px solid rgba(168, 85, 247, 0.2);
+            padding-bottom: 4px;
         }
 
         .shortcut-row {
@@ -1390,6 +1398,14 @@ function getHtml(
             font-size: 11px;
             color: #f472b6;
         }
+
+        .modal-guide-list {
+            font-size: 12px;
+            line-height: 1.6;
+            color: #cccccc;
+            padding-left: 18px;
+            margin: 4px 0 8px 0;
+        }
     </style>
 </head>
 <body>
@@ -1399,35 +1415,62 @@ function getHtml(
         <div id="context-menu"></div>
         <div id="actions-modal">
             <div class="modal-header">
-                <span>⚙ Actions &amp; Shortcuts</span>
+                <span>⚙ Actions &amp; Setup</span>
                 <button class="modal-close" id="close-modal">&times;</button>
             </div>
             <div class="modal-section">
-                <div class="modal-section-title">Keyboard &amp; Mouse Shortcuts</div>
+                <div class="modal-section-title">Shortcuts</div>
                 <div class="shortcut-row">
-                    <span>Open / Focus Thumbview</span>
+                    <span>Open / Focus</span>
                     <span>Press <span class="kbd" id="open-shortcut-label">${openKeybindingLabel}</span></span>
                 </div>
                 <div class="shortcut-row">
-                    <span>Magnifying Code Preview</span>
+                    <span>Code Magnifier</span>
                     <span>Hold <span class="kbd">Left CTRL</span> + Hover</span>
                 </div>
                 <div class="shortcut-row">
-                    <span>Jump to Document Line</span>
-                    <span><span class="kbd">Left Click</span> Minimap Tile</span>
+                    <span>Jump to Line</span>
+                    <span><span class="kbd">Left Click</span> Tile Line</span>
                 </div>
                 <div class="shortcut-row">
                     <span>Close Tab</span>
-                    <span><span class="kbd">Middle Click</span> or <span class="kbd">×</span> Button</span>
+                    <span><span class="kbd">Middle Click</span> or <span class="kbd">×</span></span>
                 </div>
                 <div class="shortcut-row">
                     <span>Isolate Folder</span>
-                    <span><span class="kbd">Left Click</span> Header Path Strip</span>
+                    <span><span class="kbd">Left Click</span> Header / Tree Item</span>
                 </div>
                 <div class="shortcut-row">
-                    <span>Explorer Commands</span>
-                    <span><span class="kbd">Right Click</span> Card Tile</span>
+                    <span>Context Menu</span>
+                    <span><span class="kbd">Right Click</span> Tile</span>
                 </div>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-section-title">Setup &amp; Settings</div>
+                <ul class="modal-guide-list">
+                    <li><b>Layout</b>: <code>spanning_grid</code> (tall files span cells) or <code>uniform_grid</code>.</li>
+                    <li><b>Small tiles</b> group into folder cards (<code>minCellWidth/Height</code>); use breadcrumbs to go back.</li>
+                    <li><b>Auto-Ignore</b>: folders with &gt;30 files are hidden (<code>thumbview.autoIgnoreThreshold</code>).</li>
+                </ul>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-section-title">Ignoring &amp; Unignoring</div>
+                <ul class="modal-guide-list">
+                    <li><b>Ignore</b>: right-click folder → <b>Ignore Directory</b>, or tile → <b>Ignore in Thumbview</b>.</li>
+                    <li><b>Unignore</b>: click 👁 on <code>(hidden)</code> folders, or right-click in <b>Ignored Files</b> panel.</li>
+                    <li><b>Globs</b>: <code>+</code> in <b>Ignored Files</b> panel (e.g. <code>*.log</code>, <code>build/</code>). Saved per workspace.</li>
+                </ul>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-section-title">Features</div>
+                <ul class="modal-guide-list">
+                    <li><b>Isolate Folder</b>: click a folder or tile header to dim the rest; <b>All Workspace Files (Root)</b> resets.</li>
+                    <li><b>Root Files Only</b>: sidebar item to spotlight top-level files.</li>
+                    <li><b>Instant Search</b>: top search bar highlights tokens across all tiles.</li>
+                </ul>
             </div>
         </div>
         <div class="controls-overlay">

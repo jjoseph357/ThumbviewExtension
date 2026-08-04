@@ -5,6 +5,12 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-08-04
+
+### Added
+- **Fixed Magnifying Overlay Width Per File**: The code magnifying hover overlay (`#hover-tooltip`) width is now calculated once per file based on `min(max width allowed, widest line)`, preventing overlay window size jitter while moving across lines in the same file.
+- **Comprehensive Project Setup & Ignore Guides**: Rewrote `README.md` and updated the `⚙ Actions & Shortcuts` webview modal overlay with detailed instructions on environment setup, layout modes (`spanning_grid` vs `uniform_grid`), auto-ignore threshold behavior, step-by-step ignore/unignore workflows (including managing `thumbview.autoIgnoreExclusions`), power-user minimap navigation tips, and embedded screenshot figures.
+
 ## [0.3.3] - 2026-08-04
 
 ### Added

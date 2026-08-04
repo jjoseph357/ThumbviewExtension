@@ -1575,6 +1575,46 @@ window.addEventListener("blur", () => {
     tooltip.style.display = "none";
 });
 
+function getFileWidestLineWidth(file) {
+    if (!file) return 300;
+    let maxCharLen = 0;
+    if (file.lines && file.lines.length > 0) {
+        for (let i = 0; i < file.lines.length; i++) {
+            const l = file.lines[i];
+            if (l && l.text && l.text.length > maxCharLen) {
+                maxCharLen = l.text.length;
+            }
+        }
+    }
+    if (file.fullLines && file.fullLines.length > 0) {
+        for (let i = 0; i < file.fullLines.length; i++) {
+            const str = file.fullLines[i];
+            if (str && str.length > maxCharLen) {
+                maxCharLen = str.length;
+            }
+        }
+    }
+    const uriCache = hoverLineCache[file.uri];
+    if (uriCache) {
+        for (const idx in uriCache) {
+            const l = uriCache[idx];
+            if (l && l.text && l.text.length > maxCharLen) {
+                maxCharLen = l.text.length;
+            }
+        }
+    }
+
+    const charWidthPx = 7.9;
+    const textWidthPx = Math.ceil((maxCharLen + 4) * charWidthPx) + 32;
+    const headerTextLen = (file.path ? file.path.length : 10) + 40;
+    const headerWidthPx = Math.ceil(headerTextLen * 7.2) + 24;
+
+    const maxLineWidth = Math.max(textWidthPx, headerWidthPx);
+    const maxAllowedWidth = Math.min(750, Math.max(300, window.innerWidth - 32));
+
+    return Math.max(220, Math.min(maxAllowedWidth, maxLineWidth));
+}
+
 function updateHoverTooltip(clientX, clientY) {
     if (!data) return;
 
@@ -1710,6 +1750,8 @@ function updateHoverTooltip(clientX, clientY) {
         }
 
         tooltip.innerHTML = tooltipHtml;
+        const overlayWidth = getFileWidestLineWidth(hoveredFile);
+        tooltip.style.width = `${overlayWidth}px`;
         tooltip.style.display = "block";
 
         const c = hoveredFile._cell;
