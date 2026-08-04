@@ -85,7 +85,7 @@ The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`,
 - **View Frustum Culling**: Cards outside the viewport are skipped during canvas render loops.
 - **Subdirectory Focus Lowlighting**: Focusing a folder dims non-focused files to opacity 0.15 without hiding them, keeping grid positions stable.
 - **Fixed Maximum Code Line Spacing**: Line spacing (`stepY`) is capped at 6px max so small files do not stretch lines apart.
-- **Media Aspect Ratio Preservation**: `drawAspectFit` in `media/overview.js` scales images and PDF Page 1 snapshots using `object-fit: contain` logic, preserving natural aspect ratios inside grid tiles.
+- **Media Aspect Ratio Preservation & Instant Cache Refresh**: `drawAspectFit` in `media/overview.js` scales images and PDF Page 1 snapshots using `object-fit: contain` logic, preserving natural aspect ratios inside grid tiles. `imageCache` is cleared on repository data updates and image URIs append a timestamp query parameter (`?v=timestamp`) so updated images refresh instantly on disk changes.
 - **Pre-Computed Indexing & Tokenization**: Text search uses `file._combinedText.includes(searchQuery)`, and line HTML is cached in `line._htmlCache`.
 - **Top-Level Ignore Consolidation**: Auto-ignore consolidates dense folders to top-level root paths (e.g. `BOFS/`) and prunes child subdirectories to prevent tree bloat. Folders listed in `autoIgnoreExclusions` (workspaceState) are never auto-ignored.
 - **Ignore State in workspaceState**: `ignorePatterns` and `autoIgnoreExclusions` are stored in `ExtensionContext.workspaceState` (VS Code's internal per-workspace storage), not in `.vscode/settings.json`. Old settings.json values are migrated on first activation.

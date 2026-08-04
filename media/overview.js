@@ -144,6 +144,7 @@ window.addEventListener("message", event => {
         data = msg;
         statusText = "";
         hoverLineCache = {};
+        imageCache = {};
         if (data && data.files) {
             for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
                 const f = data.files[fIdx];
@@ -732,7 +733,8 @@ function drawMinimap(file, x, y, w, h) {
         if (shouldRenderMedia && file.mediaUri) {
             if (!imageCache[file.mediaUri]) {
                 const img = new Image();
-                img.src = file.mediaUri;
+                const cacheBuster = (file.mediaUri.includes("?") ? "&" : "?") + "v=" + Date.now();
+                img.src = file.mediaUri + cacheBuster;
                 img.onload = () => render();
                 imageCache[file.mediaUri] = img;
             }

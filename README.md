@@ -2,8 +2,6 @@
 
 A 2D, syntax-highlighted minimap grid of your entire VS Code workspace. See every file at once, search across all of them instantly, and jump to any line in one click.
 
-![Thumbview workspace overview — minimap grid, search bar, and sidebar panels](media/setup_overview.png)
-
 ## Setup
 
 1. Install the extension and open any workspace folder.
@@ -29,8 +27,6 @@ Tune behavior later via **File → Preferences → Settings → Thumbview** (see
 
 ## Ignoring & Unignoring Files
 
-![Ignore and unignore guide — right-click menus, hidden folders, and custom glob patterns](media/ignore_unignore_guide.png)
-
 Keep the grid fast and relevant by hiding noise (`dist/`, generated code, vendored assets):
 
 - **Ignore a directory**: right-click it in **Directory Navigation** → **Ignore Directory** (or click its inline eye-closed icon).
@@ -40,9 +36,7 @@ Keep the grid fast and relevant by hiding noise (`dist/`, generated code, vendor
 - **Auto-ignore**: any subfolder with more than `thumbview.autoIgnoreThreshold` files (default 30) is hidden automatically to keep rendering fast. Set it to `0` to disable, or unhide individual folders via 👁 — manual unhides are remembered as exclusions.
 - Ignores live in workspace state, so each project keeps its own view.
 
-## Features
-
-![Code magnifier — hold Left CTRL and hover to read full-size code](media/hover_preview_demo.png)
+## More Features
 
 - **Isolate a folder**: click a folder in **Directory Navigation** or a tile's header strip to dim everything else (opacity 0.15). Click **All Workspace Files (Root)** — or the clear-all icon at the top of the panel — to reset. This is the fastest way to scope search and scanning to one area of the codebase.
 - **Root files only**: select **Root Directory Files Only** in the sidebar to spotlight top-level files (`package.json`, `README.md`, configs) for orienting yourself in an unfamiliar repo.

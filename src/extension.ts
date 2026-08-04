@@ -1465,7 +1465,7 @@ function getHtml(
             </div>
 
             <div class="modal-section">
-                <div class="modal-section-title">Features</div>
+                <div class="modal-section-title">More Features</div>
                 <ul class="modal-guide-list">
                     <li><b>Isolate Folder</b>: click a folder or tile header to dim the rest; <b>All Workspace Files (Root)</b> resets.</li>
                     <li><b>Root Files Only</b>: sidebar item to spotlight top-level files.</li>
