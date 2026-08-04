@@ -178,7 +178,6 @@ window.addEventListener("message", event => {
             }
         }
         render();
-        window.focus();
     }
 
     if (msg.command === "activeFile") {
@@ -196,7 +195,6 @@ window.addEventListener("message", event => {
         }
         viewLocations = msg.viewLocations || {};
         render();
-        window.focus();
     }
 
     if (msg.command === "setFocusedFolder") {
