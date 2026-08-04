@@ -5,6 +5,19 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-08-04
+
+### Added
+- **Root Directory Files Only Highlight**: Added a "Root Directory Files Only" item to Directory Navigation sidebar. Selecting it highlights only files located directly in the root workspace folder while dimming subdirectories. Clicking a root file's header bar in the minimap webview also isolates root files.
+
+### Changed
+- **Directory-Grouped File Sorting**: Updated file layout sorting algorithm to group root directory files together contiguously at the start of the grid on initialization and reflow, keeping all root files adjacent to each other rather than scattered between subdirectories.
+
+## [0.3.2] - 2026-08-01
+
+### Changed
+- **Default Minimum Cell Dimensions**: Adjusted default minimum cell dimensions (`thumbview.minCellWidth` and `thumbview.minCellHeight`) to 32×28 px.
+
 ## [0.3.1] - 2026-07-31
 
 ### Added

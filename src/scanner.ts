@@ -281,10 +281,24 @@ export async function scanRepository(
     const result: RepoFile[] = [];
     const validFiles = files.filter(file => !shouldIgnore(vscode.workspace.asRelativePath(file), gitignoreRules));
 
-    // Sort files by relative workspace path so files in the same directory/level sit adjacent to each other
+    // Sort files by directory level so root-level files and subdirectories sit adjacent to their siblings
     validFiles.sort((a, b) => {
         const relA = vscode.workspace.asRelativePath(a).replace(/\\/g, "/");
         const relB = vscode.workspace.asRelativePath(b).replace(/\\/g, "/");
+
+        const lastSlashA = relA.lastIndexOf("/");
+        const lastSlashB = relB.lastIndexOf("/");
+
+        const dirA = lastSlashA !== -1 ? relA.substring(0, lastSlashA) : "";
+        const dirB = lastSlashB !== -1 ? relB.substring(0, lastSlashB) : "";
+
+        if (dirA !== dirB) {
+            // Group root directory files (dir === "") together first
+            if (dirA === "") return -1;
+            if (dirB === "") return 1;
+            return dirA.localeCompare(dirB, undefined, { numeric: true, sensitivity: "base" });
+        }
+
         return relA.localeCompare(relB, undefined, { numeric: true, sensitivity: "base" });
     });
 

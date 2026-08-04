@@ -887,9 +887,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const focusFolderDisposable = vscode.commands.registerCommand("thumbview.focusFolder", async (folderPath?: string | DirectoryTreeItem) => {
         let targetFolder = typeof folderPath === "string" ? folderPath : folderPath?.folderPath || "";
-        if (targetFolder === "(root files)/") {
-            targetFolder = "";
-        }
         let panel = activePanel;
         if (!panel) {
             await vscode.commands.executeCommand("thumbview.open");

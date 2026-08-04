@@ -284,6 +284,19 @@ function updateBreadcrumbs() {
     };
     container.appendChild(rootSpan);
 
+    if (focusedFolder === "(root files)/") {
+        const sep = document.createElement("span");
+        sep.className = "breadcrumb-separator";
+        sep.innerText = "/";
+        container.appendChild(sep);
+
+        const segmentSpan = document.createElement("span");
+        segmentSpan.className = "breadcrumb-item";
+        segmentSpan.innerText = "root files only";
+        container.appendChild(segmentSpan);
+        return;
+    }
+
     const segments = focusedFolder.split("/").filter(Boolean);
     let currentPath = "";
     for (let i = 0; i < segments.length; i++) {
@@ -1049,7 +1062,7 @@ function render() {
     const shouldOpenFolder = !!(focusedFolder && rootCellsTooSmall);
 
     const scopedFiles = shouldOpenFolder
-        ? data.files.filter(f => f.path && f.path.startsWith(focusedFolder))
+        ? data.files.filter(f => f.path && (focusedFolder === "(root files)/" ? !f.path.includes("/") : f.path.startsWith(focusedFolder)))
         : data.files;
 
     let cellsTooSmall = false;
@@ -1080,7 +1093,7 @@ function render() {
         // Subfolder card mode: group files into immediate child folders and render
         // each as a clickable card. Root-level files get individual tiles. The local
         // buildStableGrid duplicate computes a fresh grid for these items.
-        const { folders, rootFiles } = getSubfolderGroups(scopedFiles, focusedFolder);
+        const { folders, rootFiles } = getSubfolderGroups(scopedFiles, focusedFolder === "(root files)/" ? "" : focusedFolder);
         const totalItems = folders.length + rootFiles.length;
         if (totalItems === 0) return;
 
@@ -1099,7 +1112,7 @@ function render() {
 
             if (y + localCellH < -50 || y > rectH + 50) continue;
 
-            const isFolderMatch = !focusedFolder || group.path.startsWith(focusedFolder) || focusedFolder.startsWith(group.path);
+            const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? false : (group.path.startsWith(focusedFolder) || focusedFolder.startsWith(group.path)));
 
             ctx.save();
             if (!isFolderMatch) ctx.globalAlpha = 0.15;
@@ -1172,7 +1185,7 @@ function render() {
 
             if (y + fileH < -50 || y > rectH + 50) continue;
 
-            const isFolderMatch = !focusedFolder || file.path.startsWith(focusedFolder);
+            const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
             const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
             const isActive = file.uri === activeFileUri;
             const isOpen = openFilesSet.has(file.uri);
@@ -1323,7 +1336,7 @@ function render() {
                 continue;
             }
 
-            const isFolderMatch = !focusedFolder || file.path.startsWith(focusedFolder);
+            const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
             const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
 
             const isActive = file.uri === activeFileUri;
@@ -1448,14 +1461,16 @@ canvas.addEventListener("click", event => {
             const isHeaderClick = py < c.y + headerHeight;
 
             if (isHeaderClick) {
-                // Clicked the file path/folder header bar -> isolate parent folder
+                // Clicked the file path/folder header bar -> isolate parent folder (or root files if in root folder)
                 const lastSlash = file.path.lastIndexOf('/');
                 if (lastSlash !== -1) {
                     const folder = file.path.substring(0, lastSlash + 1);
                     focusedFolder = folder;
-                    updateBreadcrumbs();
-                    render();
+                } else {
+                    focusedFolder = "(root files)/";
                 }
+                updateBreadcrumbs();
+                render();
                 return;
             }
 

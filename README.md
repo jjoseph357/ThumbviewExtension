@@ -9,7 +9,7 @@ A VS Code extension that visualizes your workspace files as a stable, syntax-hig
 - **Immediate Search**: Type directly to search text, paths, and tokens globally across the project.
 - **Explorer Context Menu**: Right-click any minimap card to access standard VS Code Explorer commands (Open, Open to Side, Open Preview, Compare, Reveal in Explorer, Open Containing Folder, Cut/Copy/Paste, Rename, Delete, Ignore).
 - **Sidebar Tree Views**:
-  - **Directory Navigation**: Browse workspace folders with cumulative file counts, single-click folder isolation, right-click folder deletion, and Reveal in Explorer.
+  - **Directory Navigation**: Browse workspace folders with cumulative file counts, single-click folder isolation (including "Root Directory Files Only"), right-click folder deletion, and Reveal in Explorer.
   - **Ignored Files & Directories**: View, add (`+`), remove (`trash`), multi-select, delete from disk, and reveal ignored files/folders in Explorer.
 - **.gitignore & Negation Support**: Respects `.gitignore` rules including negation patterns (`!pattern`).
 - **Tab & Window Management**: Click `×` or middle-click open file cards to close tabs. Jump to lines in pinned tabs.
@@ -21,6 +21,6 @@ A VS Code extension that visualizes your workspace files as a stable, syntax-hig
 - **`Left CTRL` + Mouse Hover**: Hold `Left CTRL` while hovering over a file card to reveal the code magnifying preview tooltip.
 - **Left Click Tile**: Jump directly to that line in the document editor tab.
 - **Middle Click (or `×` button)**: Close open document or media tab.
-- **Left Click Header Bar**: Isolate and focus on that parent folder.
+- **Left Click Header Bar**: Isolate and focus on that parent folder (or root directory files).
 - **Right Click Card**: Open Explorer context menu.
 - **`⚙ Actions & Shortcuts` Button**: Toggle the interactive overlay panel in the top-right corner.

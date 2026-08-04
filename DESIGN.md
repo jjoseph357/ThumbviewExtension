@@ -46,9 +46,9 @@ Prior to 0.2.7, `ignorePatterns` and `autoIgnoreExclusions` were stored using `C
 
 Both values are now stored in `ExtensionContext.workspaceState` — VS Code's built-in per-workspace key-value store that lives in VS Code's internal data directory (`~/.config/Code/` or equivalent), never in the user's project. This is the same mechanism the extension already uses for `repomap.seenFiles` and spanning layout allocations. On first activation after the migration, any old `settings.json` values are read, merged into `workspaceState`, and deleted from configuration so the `.vscode/settings.json` file can be safely removed.
 
-## Subdirectory Selection Lowlighting (Opacity 0.15)
+## Subdirectory & Root Directory Selection Lowlighting (Opacity 0.15)
 
-Previously, selecting a subdirectory filtered out non-selected files completely and re-packed the remaining files. This broke spatial memory of where files live in the full repository grid. In 0.3.0, selecting a subdirectory retains all workspace file tiles in their stable grid slots while dimming non-selected files (`ctx.globalAlpha = 0.15`). This keeps spatial layout consistent while highlighting the active subdirectory.
+Previously, selecting a subdirectory filtered out non-selected files completely and re-packed the remaining files. This broke spatial memory of where files live in the full repository grid. In 0.3.0, selecting a subdirectory retains all workspace file tiles in their stable grid slots while dimming non-selected files (`ctx.globalAlpha = 0.15`). Selecting "Root Directory Files Only" in Directory Navigation (or clicking a root file's header bar) similarly highlights only files located directly in the root workspace folder (`!file.path.includes("/")`) while lowlighting subdirectories. This keeps spatial layout consistent while highlighting the active directory or root level.
 
 ## Fixed Maximum Line Gap for Short Code Files (6px Cap)
 

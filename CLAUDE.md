@@ -55,7 +55,7 @@ extension.ts (host)
   ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
   ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
   ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view; supports multi-selection (canSelectMany), batch delete, disk deletion, Unignore Directory context action, and Reveal in Explorer.
-  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical, showing all workspace folders including hidden ones with gray deemphasized text and darker eye-closed icons, with Ignore/Unignore context actions, delete folder, and Reveal in Explorer).
+  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical, showing all workspace folders including 'Root Directory Files Only', with Ignore/Unignore context actions, delete folder, and Reveal in Explorer).
 
 Webview panel ("thumbview")
  └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines") ──┐
@@ -64,7 +64,7 @@ media/overview.js (webview/browser side)                                        
  ├─ Receives data payloads, pre-indexes file text into _combinedText buffer for 1-pass fast search,     │
  ├─ Pre-tokenizes lines on payload receipt and caches tokenized HTML (_htmlCache),                      │
  ├─ Performs viewport frustum culling (y + fileH < -50 || y > rectH + 50) for 60 FPS locked rendering,  │
- ├─ Low-lights non-selected files (opacity 0.15) when a subdirectory is focused to preserve layout,     │
+ ├─ Low-lights non-selected files (opacity 0.15) when a directory or 'Root Directory Files Only' is focused to preserve layout,     │
  ├─ Enforces fixed maximum line gap (6px cap) for short code files,                                     │
  ├─ Maintains Set<string> openFilesSet for O(1) tab border lookups,                                     │
  ├─ Renders editor viewport bounds overlay and handles Left CTRL hold code line magnification,         │
