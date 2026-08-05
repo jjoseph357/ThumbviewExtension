@@ -97,7 +97,7 @@ The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`,
 
 ## Terminology
 
-The extension was renamed from **Repository Map** (`repomap`) to **Thumbview** partway through development. Every user-facing surface uses **Thumbview**. Internal state keys (`"repomap.seenFiles"`, `"repomap.spanningAllocations"`, `"repomap.spanningRows"`) retain their original names for backward compatibility (see DESIGN.md).
+The extension was renamed from **Repository Map** (`repomap`) to **Thumbview** partway through development. Every user-facing surface uses **Thumbview**. Internal state keys now use the `thumbview.*` prefix (`"thumbview.seenFiles"`, `"thumbview.spanningAllocations"`, `"thumbview.spanningRows"`); a one-time migration in `extension.ts` copies values from the old `repomap.*` keys on activation and deletes them (see DESIGN.md).
 
 ## Committing changes
 

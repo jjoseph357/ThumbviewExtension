@@ -10,7 +10,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 export async function activate(context: vscode.ExtensionContext) {
-    console.log("REPOMAP EXTENSION ACTIVATED");
+    console.log("THUMBVIEW EXTENSION ACTIVATED");
 
     // --- Helpers: read/write ignore state from workspaceState (never touches .vscode/settings.json) ---
     const getIgnoreState = (): ScanIgnoreState => ({
@@ -52,6 +52,26 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     }
 
+    // --- One-time migration: rename legacy repomap.* workspaceState keys to thumbview.* ---
+    // Added in 0.3.1 (2026-08-05). TODO: once we're confident most users have upgraded past
+    // this version, delete this block and switch the reads/writes below back to plain
+    // "thumbview.seenFiles" / "thumbview.spanningAllocations" / "thumbview.spanningRows"
+    // literals (no fallback needed) — the repomap.* keys can be assumed gone by then.
+    const legacyStateKeyMigrations: [string, string][] = [
+        ["repomap.seenFiles", "thumbview.seenFiles"],
+        ["repomap.spanningAllocations", "thumbview.spanningAllocations"],
+        ["repomap.spanningRows", "thumbview.spanningRows"]
+    ];
+    for (const [oldKey, newKey] of legacyStateKeyMigrations) {
+        const oldValue = context.workspaceState.get(oldKey);
+        if (oldValue !== undefined) {
+            if (context.workspaceState.get(newKey) === undefined) {
+                await context.workspaceState.update(newKey, oldValue);
+            }
+            await context.workspaceState.update(oldKey, undefined);
+        }
+    }
+
     // Auto-populate ignorePatterns with workspace .gitignore rules once initialized
     if (workspaceFolders && workspaceFolders.length > 0) {
         const gitignorePath = path.join(workspaceFolders[0].uri.fsPath, ".gitignore");
@@ -89,7 +109,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const fileOrder = new PersistentFileOrder();
-    const savedOrder = context.workspaceState.get<string[]>("repomap.seenFiles");
+    const savedOrder = context.workspaceState.get<string[]>("thumbview.seenFiles");
     if (savedOrder) {
         fileOrder.update(savedOrder);
     }
@@ -181,17 +201,17 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
-    const refreshRepositoryMap = async (panel: vscode.WebviewPanel) => {
+    const refreshThumbview = async (panel: vscode.WebviewPanel) => {
         try {
             panel.webview.postMessage({
                 command: "status",
-                text: "Refreshing repository map..."
+                text: "Refreshing Thumbview..."
             });
 
             const files = await scanRepository(getIgnoreState(), persistIgnoreState);
 
             fileOrder.update(files.map(f => f.id));
-            await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
+            await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
 
             const order = fileOrder.getOrder();
             const mode = getLayoutMode();
@@ -213,13 +233,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 // Allocations/rows are persisted so a file's cell count and the grid's
                 // row count don't get recomputed (and reshuffle everyone else's slot)
                 // on every rescan — see spanning_layout.ts's buildSpanningGrid doc.
-                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("repomap.spanningAllocations") || {};
-                const savedRows = context.workspaceState.get<number | null>("repomap.spanningRows") || null;
+                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
 
                 const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows);
 
-                await context.workspaceState.update("repomap.spanningAllocations", layout.allocations);
-                await context.workspaceState.update("repomap.spanningRows", layout.rows);
+                await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
+                await context.workspaceState.update("thumbview.spanningRows", layout.rows);
 
                 const filesWithSlots = layout.placements.map(p => ({
                     ...p.file,
@@ -297,7 +317,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 });
             }
         } catch (err: any) {
-            console.error("REPOMAP REFRESH ERROR:", err);
+            console.error("THUMBVIEW REFRESH ERROR:", err);
             panel.webview.postMessage({
                 command: "status",
                 text: `Error: ${err?.message ?? String(err)}`
@@ -377,10 +397,10 @@ export async function activate(context: vscode.ExtensionContext) {
             panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
 
             panel.webview.onDidReceiveMessage(async msg => {
-                console.log("REPOMAP WEBVIEW MESSAGE:", msg);
+                console.log("THUMBVIEW WEBVIEW MESSAGE:", msg);
 
                 if (msg.command === "ready") {
-                    refreshRepositoryMap(panel);
+                    refreshThumbview(panel);
                 }
 
                 if (msg.command === "focusWindow") {
@@ -585,7 +605,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                 edit.renameFile(uri, newUri, { overwrite: false });
                                 const success = await vscode.workspace.applyEdit(edit);
                                 if (success && activePanel) {
-                                    refreshRepositoryMap(activePanel);
+                                    refreshThumbview(activePanel);
                                 }
                             }
                         }
@@ -607,12 +627,12 @@ export async function activate(context: vscode.ExtensionContext) {
                         if (confirm === "Move to Trash") {
                             await vscode.workspace.fs.delete(uri, { useTrash: true });
                             if (activePanel) {
-                                refreshRepositoryMap(activePanel);
+                                refreshThumbview(activePanel);
                             }
                         } else if (confirm === "Delete Permanently") {
                             await vscode.workspace.fs.delete(uri, { useTrash: false });
                             if (activePanel) {
-                                refreshRepositoryMap(activePanel);
+                                refreshThumbview(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -631,7 +651,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
                             refreshProviders();
                             if (activePanel) {
-                                refreshRepositoryMap(activePanel);
+                                refreshThumbview(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -735,12 +755,12 @@ export async function activate(context: vscode.ExtensionContext) {
     const reflowDisposable = vscode.commands.registerCommand("thumbview.reflow", async () => {
         const files = await scanRepository(getIgnoreState(), persistIgnoreState);
         fileOrder.reflow(files.map(f => f.id));
-        await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
-        await context.workspaceState.update("repomap.spanningAllocations", undefined);
-        await context.workspaceState.update("repomap.spanningRows", undefined);
+        await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
+        await context.workspaceState.update("thumbview.spanningAllocations", undefined);
+        await context.workspaceState.update("thumbview.spanningRows", undefined);
 
         if (activePanel) {
-            refreshRepositoryMap(activePanel);
+            refreshThumbview(activePanel);
         } else {
             vscode.commands.executeCommand("thumbview.open");
         }
@@ -753,7 +773,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await config.update("layoutMode", "uniform_grid", vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage("Thumbview Layout set to Uniform Grid.");
         if (activePanel) {
-            refreshRepositoryMap(activePanel);
+            refreshThumbview(activePanel);
         }
     });
     context.subscriptions.push(setUniformGridDisposable);
@@ -763,7 +783,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await config.update("layoutMode", "spanning_grid", vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage("Thumbview Layout set to Spanning Grid.");
         if (activePanel) {
-            refreshRepositoryMap(activePanel);
+            refreshThumbview(activePanel);
         }
     });
     context.subscriptions.push(setSpanningGridDisposable);
@@ -776,7 +796,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const ignoreProvider = new IgnoreTreeDataProvider(context, () => {
         if (activePanel) {
-            refreshRepositoryMap(activePanel);
+            refreshThumbview(activePanel);
         }
         directoryProvider.refresh();
     });
@@ -800,7 +820,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Ignored directory '${folderPath}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`);
                 refreshProviders();
                 if (activePanel) {
-                    refreshRepositoryMap(activePanel);
+                    refreshThumbview(activePanel);
                 }
             }
         }
@@ -820,7 +840,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
-                    refreshRepositoryMap(activePanel);
+                    refreshThumbview(activePanel);
                 }
             }
         }
@@ -864,7 +884,7 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(msg);
             refreshProviders();
             if (activePanel) {
-                refreshRepositoryMap(activePanel);
+                refreshThumbview(activePanel);
             }
         }
     });
@@ -967,7 +987,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             refreshProviders();
-            if (activePanel) { refreshRepositoryMap(activePanel); }
+            if (activePanel) { refreshThumbview(activePanel); }
         }
     });
     context.subscriptions.push(deleteDirectoryDisposable);
@@ -986,7 +1006,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // layoutMode, renderMediaThumbnails, and autoIgnoreThreshold are real settings)
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
         if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails")) && activePanel) {
-            refreshRepositoryMap(activePanel);
+            refreshThumbview(activePanel);
         }
     });
     context.subscriptions.push(configDisposable);
@@ -1054,7 +1074,7 @@ export async function activate(context: vscode.ExtensionContext) {
         debounceTimer = setTimeout(async () => {
             refreshProviders();
             if (activePanel) {
-                refreshRepositoryMap(activePanel);
+                refreshThumbview(activePanel);
             }
         }, 200);
     };

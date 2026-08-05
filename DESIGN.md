@@ -44,7 +44,13 @@ Auto-ignore runs on every `scanRepository()` call, re-detecting dense folders fr
 
 Prior to 0.2.7, `ignorePatterns` and `autoIgnoreExclusions` were stored using `ConfigurationTarget.WorkspaceFolder`, which writes to `.vscode/settings.json` inside the user's project. This caused the extension to silently create a `.vscode/` directory and `settings.json` file in repositories where none existed, polluting `git status` and risking accidental commits of extension-internal state.
 
-Both values are now stored in `ExtensionContext.workspaceState` — VS Code's built-in per-workspace key-value store that lives in VS Code's internal data directory (`~/.config/Code/` or equivalent), never in the user's project. This is the same mechanism the extension already uses for `repomap.seenFiles` and spanning layout allocations. On first activation after the migration, any old `settings.json` values are read, merged into `workspaceState`, and deleted from configuration so the `.vscode/settings.json` file can be safely removed.
+Both values are now stored in `ExtensionContext.workspaceState` — VS Code's built-in per-workspace key-value store that lives in VS Code's internal data directory (`~/.config/Code/` or equivalent), never in the user's project. This is the same mechanism the extension already uses for `thumbview.seenFiles` and spanning layout allocations. On first activation after the migration, any old `settings.json` values are read, merged into `workspaceState`, and deleted from configuration so the `.vscode/settings.json` file can be safely removed.
+
+## `repomap.*` → `thumbview.*` workspaceState key rename (0.3.1)
+
+The file-order and spanning-layout persistence keys were originally named `repomap.seenFiles`, `repomap.spanningAllocations`, and `repomap.spanningRows`, left over from before the Repository Map → Thumbview rename (see CLAUDE.md's Terminology section). Renaming a `workspaceState` key isn't safe to do as a plain find-and-replace: existing users already have real data — file-to-grid-slot assignments and spanning allocations — sitting under the old key names. A bare rename would make the extension look up a key that's never existed for them, silently discarding that state and reshuffling their grid on next load.
+
+Instead, `activate()` runs a one-time migration on every activation: for each `repomap.*` key that still has a value, copy it to the corresponding `thumbview.*` key (only if the new key isn't already populated) and delete the old key. This mirrors the `settings.json` → `workspaceState` migration above. Once we're confident essentially all users have activated the extension at least once past 0.3.1, the migration block and the old key names can be deleted outright, and the reads/writes can go back to plain `thumbview.*` literals with no fallback.
 
 ## Subdirectory Selection Lowlighting (Opacity 0.15)
 
