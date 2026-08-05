@@ -133,7 +133,12 @@ function shouldIgnore(relativePath: string, rules: string[]): boolean {
         const pattern = isNegated ? rule.slice(1).trim() : rule.trim();
         if (!pattern) continue;
 
-        if (matchSingleRule(pathStr, pattern)) {
+        const cleanPattern = pattern.replace(/^\/+|\/+$/g, "");
+        if (cleanPattern === "(root files)") {
+            if (!pathStr.includes("/")) {
+                ignored = !isNegated;
+            }
+        } else if (matchSingleRule(pathStr, pattern)) {
             ignored = !isNegated;
         }
     }

@@ -97,14 +97,15 @@ export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<Direct
                     false
                 );
 
-                const rootFilesOnly = validFiles.filter(f => !f.path.includes("/"));
+                const rootFilesOnly = allFiles.filter(f => !f.path.includes("/"));
+                const isRootOnlyIgnored = isFolderIgnored("(root files)/", ignorePatterns);
                 const rootOnlyItem = new DirectoryTreeItem(
                     "Root Directory Files Only",
                     "(root files)/",
                     rootFilesOnly.length,
                     vscode.TreeItemCollapsibleState.None,
                     false,
-                    false
+                    isRootOnlyIgnored
                 );
 
                 const topLevelFolders = this.buildFolderTree(allFiles, validFiles, "", ignorePatterns);

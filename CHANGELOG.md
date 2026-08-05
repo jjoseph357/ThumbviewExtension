@@ -5,6 +5,11 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] - 2026-08-05
+
+### Fixed
+- **Root Directory Files Only Ignore Support**: Updated `scanner.ts` `shouldIgnore()` to handle the `(root files)/` ignore pattern, filtering out top-level workspace root files (files without slashes in their relative paths). Updated `directoryProvider.ts` to evaluate `isFolderIgnored("(root files)/", ignorePatterns)` and count total root files from `allFiles` for the "Root Directory Files Only" tree item so it preserves total file counts and displays `(hidden)` state formatting, closed-eye icon, and context actions when hidden.
+
 ## [0.3.6] - 2026-08-04
 
 ### Fixed
