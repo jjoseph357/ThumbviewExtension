@@ -1,6 +1,9 @@
 .vscode/**
 .vscode-test/**
+.agents/**
+demo-workspace/**
 src/**
+venv/**
 .gitignore
 .yarnrc
 vsc-extension-quickstart.md
@@ -9,6 +12,8 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
-venv/**
+*.vsix
 *.md
+!README.md
+!CHANGELOG.md
 

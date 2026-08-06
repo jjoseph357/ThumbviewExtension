@@ -5,6 +5,62 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-08-06
+
+### Changed
+- **In-Memory Cache Layout Updates**: Updated `src/extension.ts` to cache scanned files (`cachedScannedFiles`) upon repository scan and re-filter active files via `updateLayoutFromCache()` during ignore/unignore state changes or layout mode switches. This avoids redundant disk re-scans when toggling ignore rules.
+- **Preserved Webview Image & View State**: Prevented webview data resets (`clearData: false`) and preserved webview image caches during layout updates to avoid unnecessary UI flashes and image re-fetching.
+
+## [0.3.7] - 2026-08-05
+
+### Fixed
+- **Root Directory Files Only Ignore Support**: Updated `scanner.ts` `shouldIgnore()` to handle the `(root files)/` ignore pattern, filtering out top-level workspace root files (files without slashes in their relative paths). Updated `directoryProvider.ts` to evaluate `isFolderIgnored("(root files)/", ignorePatterns)` and count total root files from `allFiles` for the "Root Directory Files Only" tree item so it preserves total file counts and displays `(hidden)` state formatting, closed-eye icon, and context actions when hidden.
+
+## [0.3.6] - 2026-08-04
+
+### Fixed
+- **Prevent Text Editor Unfocusing & Focus Stealing**: Removed automated `window.focus()` invocations from `openState` and `data` webview message handlers in `media/overview.js`. This prevents Thumbview from shifting focus away from active text editors during document modifications, cursor/line movements, or background file updates.
+
+## [0.3.5] - 2026-08-04
+
+### Fixed
+- **Instant Image Thumbnail Refresh**: `media/overview.js` now clears `imageCache` on repository data updates and appends a cache-busting timestamp parameter (`?v=timestamp`) when instantiating `Image` elements, ensuring modified image and PDF files on disk refresh immediately in minimap tiles without requiring closing and reopening Thumbview.
+
+### Changed
+- **Documentation Cleanup**: Removed image tags from `README.md` for clean Marketplace rendering without broken image icons, updated section headings to "More Features" across `README.md` and `⚙ Actions & Shortcuts` webview modal.
+
+## [0.3.4] - 2026-08-04
+
+### Added
+- **Fixed Magnifying Overlay Width Per File**: The code magnifying hover overlay (`#hover-tooltip`) width is now calculated once per file based on `min(max width allowed, widest line)`, preventing overlay window size jitter while moving across lines in the same file.
+- **Comprehensive Project Setup & Ignore Guides**: Rewrote `README.md` and updated the `⚙ Actions & Shortcuts` webview modal overlay with detailed instructions on environment setup, layout modes (`spanning_grid` vs `uniform_grid`), auto-ignore threshold behavior, step-by-step ignore/unignore workflows (including managing `thumbview.autoIgnoreExclusions`), power-user minimap navigation tips, and embedded screenshot figures.
+
+## [0.3.3] - 2026-08-04
+
+### Added
+- **Root Directory Files Only Highlight**: Added a "Root Directory Files Only" item to Directory Navigation sidebar. Selecting it highlights only files located directly in the root workspace folder while dimming subdirectories. Clicking a root file's header bar in the minimap webview also isolates root files.
+
+### Changed
+- **Directory-Grouped File Sorting**: Updated file layout sorting algorithm to group root directory files together contiguously at the start of the grid on initialization and reflow, keeping all root files adjacent to each other rather than scattered between subdirectories.
+
+## [0.3.2] - 2026-08-01
+
+### Changed
+- **Default Minimum Cell Dimensions**: Adjusted default minimum cell dimensions (`thumbview.minCellWidth` and `thumbview.minCellHeight`) to 32×28 px.
+
+## [0.3.1] - 2026-07-31
+
+### Added
+- **Configurable Minimum Cell Dimensions**: Added `thumbview.minCellWidth` (default `32`) and `thumbview.minCellHeight` (default `28`) configuration settings to customize the minimum tile size threshold before files are grouped into subfolder cards.
+
+### Changed
+- **Instant Hotkey Toggle & Tab Switch**: Replaced WebviewPanel destruction (`dispose()`) and window reflow animations on toggle hotkey (`F4`) with direct active text document switching (`showTextDocument`). Preserved background webview context enables 0ms instant toggling identical to tab clicks.
+- **Smart Directory Selection (Lowlight vs. Folder Opening)**: When root file tiles are visible on screen, selecting a directory (from Directory Navigation sidebar or clicking a path) dims non-selected files (opacity 0.15) to preserve full codebase layout context. If tiles have shrunk below minimum cell size thresholds into folder cards, selecting a directory opens and drills down into that folder.
+
+### Fixed
+- **Stale Repository Data Flash Prevention**: Added `clearData: true` flag on repository rescan start, preventing webviews from briefly displaying stale minimap tiles from a previous repository or session while a refresh is in progress.
+- **Reliable Window Maximization via Idempotent Commands**: Replaced boolean toggle commands with idempotent VS Code layout commands (`workbench.action.minimizeOtherEditors` and `workbench.action.evenEditorWidths`), eliminating state desynchronization and ensuring window expansion works 100% of the time.
+
 ## [0.3.0] - 2026-07-30
 
 ### Added

@@ -27,9 +27,11 @@ export class DirectoryTreeItem extends vscode.TreeItem {
 
         this.tooltip = isRoot
             ? "Show all workspace files"
-            : isIgnored
-                ? `Folder: ${folderPath} (${fileCount} files - Hidden / Ignored in Thumbview)`
-                : `Folder: ${folderPath} (${fileCount} total files including subdirectories)`;
+            : folderPath === "(root files)/"
+                ? `Show only files in the root workspace folder (${fileCount} file${fileCount === 1 ? "" : "s"})`
+                : isIgnored
+                    ? `Folder: ${folderPath} (${fileCount} files - Hidden / Ignored in Thumbview)`
+                    : `Folder: ${folderPath} (${fileCount} total files including subdirectories)`;
 
         this.description = isRoot
             ? ""
@@ -41,9 +43,11 @@ export class DirectoryTreeItem extends vscode.TreeItem {
 
         this.iconPath = isRoot
             ? new vscode.ThemeIcon("root-folder")
-            : isIgnored
-                ? new vscode.ThemeIcon("eye-closed", new vscode.ThemeColor("disabledForeground"))
-                : new vscode.ThemeIcon("folder");
+            : folderPath === "(root files)/"
+                ? new vscode.ThemeIcon("files")
+                : isIgnored
+                    ? new vscode.ThemeIcon("eye-closed", new vscode.ThemeColor("disabledForeground"))
+                    : new vscode.ThemeIcon("folder");
 
         this.command = {
             command: "thumbview.focusFolder",
@@ -93,8 +97,19 @@ export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<Direct
                     false
                 );
 
+                const rootFilesOnly = allFiles.filter(f => !f.path.includes("/"));
+                const isRootOnlyIgnored = isFolderIgnored("(root files)/", ignorePatterns);
+                const rootOnlyItem = new DirectoryTreeItem(
+                    "Root Directory Files Only",
+                    "(root files)/",
+                    rootFilesOnly.length,
+                    vscode.TreeItemCollapsibleState.None,
+                    false,
+                    isRootOnlyIgnored
+                );
+
                 const topLevelFolders = this.buildFolderTree(allFiles, validFiles, "", ignorePatterns);
-                return [rootItem, ...topLevelFolders];
+                return [rootItem, rootOnlyItem, ...topLevelFolders];
             } else {
                 return this.buildFolderTree(allFiles, validFiles, element.folderPath, ignorePatterns);
             }

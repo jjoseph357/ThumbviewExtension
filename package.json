@@ -2,8 +2,12 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.3.0",
+  "version": "0.3.8",
   "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jjoseph357/ThumbviewExtension"
+  },
   "engines": {
     "vscode": "^1.107.0"
   },
@@ -34,6 +38,16 @@
           "type": "boolean",
           "default": true,
           "description": "Whether image and PDF thumbnails are rendered inside Thumbview tiles."
+        },
+        "thumbview.minCellWidth": {
+          "type": "number",
+          "default": 32,
+          "description": "Minimum tile width in pixels before grouping workspace files into subfolder cards."
+        },
+        "thumbview.minCellHeight": {
+          "type": "number",
+          "default": 28,
+          "description": "Minimum tile height in pixels before grouping workspace files into subfolder cards."
         }
       }
     },
@@ -183,7 +197,7 @@
           "id": "thumbview-sidebar",
           "name": "Actions & Settings",
           "icon": "media/icon.svg",
-          "size": 2
+          "size": 3
         },
         {
           "id": "thumbview-directories",
@@ -195,14 +209,14 @@
           "id": "thumbview-ignores",
           "name": "Ignored Files & Directories",
           "icon": "media/icon.svg",
-          "size": 2
+          "size": 1
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "Manage your visual workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\n[Reflow Layout](command:thumbview.reflow)\n\nLayout Mode\n\n[Switch to Uniform Grid](command:thumbview.setUniformGrid)\n\n[Switch to Spanning Grid](command:thumbview.setSpanningGrid)"
+        "contents": "2D minimap grid of your whole workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
       }
     ]
   },

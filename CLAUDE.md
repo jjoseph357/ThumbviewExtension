@@ -55,7 +55,7 @@ extension.ts (host)
   ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
   ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
   ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view; supports multi-selection (canSelectMany), batch delete, disk deletion, Unignore Directory context action, and Reveal in Explorer.
-  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical, showing all workspace folders including hidden ones with gray deemphasized text and darker eye-closed icons, with Ignore/Unignore context actions, delete folder, and Reveal in Explorer).
+  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical, showing all workspace folders including 'Root Directory Files Only', with Ignore/Unignore context actions, delete folder, and Reveal in Explorer).
 
 Webview panel ("thumbview")
  └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines") ──┐
@@ -64,7 +64,7 @@ media/overview.js (webview/browser side)                                        
  ├─ Receives data payloads, pre-indexes file text into _combinedText buffer for 1-pass fast search,     │
  ├─ Pre-tokenizes lines on payload receipt and caches tokenized HTML (_htmlCache),                      │
  ├─ Performs viewport frustum culling (y + fileH < -50 || y > rectH + 50) for 60 FPS locked rendering,  │
- ├─ Low-lights non-selected files (opacity 0.15) when a subdirectory is focused to preserve layout,     │
+ ├─ Low-lights non-selected files (opacity 0.15) when a directory or 'Root Directory Files Only' is focused to preserve layout,     │
  ├─ Enforces fixed maximum line gap (6px cap) for short code files,                                     │
  ├─ Maintains Set<string> openFilesSet for O(1) tab border lookups,                                     │
  ├─ Renders editor viewport bounds overlay and handles Left CTRL hold code line magnification,         │
@@ -85,13 +85,13 @@ The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`,
 - **View Frustum Culling**: Cards outside the viewport are skipped during canvas render loops.
 - **Subdirectory Focus Lowlighting**: Focusing a folder dims non-focused files to opacity 0.15 without hiding them, keeping grid positions stable.
 - **Fixed Maximum Code Line Spacing**: Line spacing (`stepY`) is capped at 6px max so small files do not stretch lines apart.
-- **Media Aspect Ratio Preservation**: `drawAspectFit` in `media/overview.js` scales images and PDF Page 1 snapshots using `object-fit: contain` logic, preserving natural aspect ratios inside grid tiles.
+- **Media Aspect Ratio Preservation & Instant Cache Refresh**: `drawAspectFit` in `media/overview.js` scales images and PDF Page 1 snapshots using `object-fit: contain` logic, preserving natural aspect ratios inside grid tiles. `imageCache` is cleared on repository data updates and image URIs append a timestamp query parameter (`?v=timestamp`) so updated images refresh instantly on disk changes.
 - **Pre-Computed Indexing & Tokenization**: Text search uses `file._combinedText.includes(searchQuery)`, and line HTML is cached in `line._htmlCache`.
 - **Top-Level Ignore Consolidation**: Auto-ignore consolidates dense folders to top-level root paths (e.g. `BOFS/`) and prunes child subdirectories to prevent tree bloat. Folders listed in `autoIgnoreExclusions` (workspaceState) are never auto-ignored.
 - **Ignore State in workspaceState**: `ignorePatterns` and `autoIgnoreExclusions` are stored in `ExtensionContext.workspaceState` (VS Code's internal per-workspace storage), not in `.vscode/settings.json`. Old settings.json values are migrated on first activation.
 - **Multi-Select TreeView**: `thumbview-ignores` enables `canSelectMany: true` for `Shift/Ctrl` batch deletions and unignores.
-- **Left CTRL Hover & rAF Throttling**: Magnifying overlay requires `Left CTRL` hold and throttles position updates via `requestAnimationFrame`.
-- **Automatic Webview DOM Focus**: `extension.ts` sends `focusWebview` message and `media/overview.js` calls `window.focus()` upon load/receive so `Left CTRL` hover and search typing work immediately without needing to click the canvas.
+- **Left CTRL Hover & rAF Throttling**: Magnifying overlay requires `Left CTRL` hold, throttles position updates via `requestAnimationFrame`, and fixes overlay width to `min(maxWidthAllowed, widestLine)` per file to prevent tooltip box size jitter while moving across lines.
+- **Automatic Webview DOM Focus**: `extension.ts` sends `focusWebview` message (and `media/overview.js` calls `window.focus()` upon panel load) so `Left CTRL` hover and search typing work immediately. Background IPC messages (`data` and `openState`) do not invoke `window.focus()` to prevent focus stealing while typing in text editors.
 - **Instant 0ms Full-Width Expansion**: Uses `maximizeEditor` / `toggleEditorWidths` for instant 0ms editor group expansion when split windows exist, without recreating tabs or altering layout geometry.
 - **Recursive Subfolder Card Expansion**: When root grid cells fall below 60×40px, `media/overview.js` switches to a subfolder card mode that groups files by immediate child folder, rendering clickable cards. Clicking drills in recursively until tiles are readable.
 

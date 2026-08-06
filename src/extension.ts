@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { scanRepository, ScanIgnoreState } from "./scanner";
+import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile } from "./scanner";
 import { buildStableGrid } from "./layout";
 import { buildSpanningGrid } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
@@ -116,6 +116,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const cursorLocations: { [uri: string]: number } = {};
 
+    let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
 
     // Reads the user setting fresh each call (rather than caching) so a config change
@@ -201,23 +202,29 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
-    const refreshThumbview = async (panel: vscode.WebviewPanel) => {
+    let cachedScannedFiles: RepoFile[] | null = null;
+
+    const updateLayoutFromCache = async (panel: vscode.WebviewPanel) => {
+        if (!cachedScannedFiles) {
+            await refreshThumbview(panel);
+            return;
+        }
+
         try {
-            panel.webview.postMessage({
-                command: "status",
-                text: "Refreshing Thumbview..."
-            });
+            const { ignorePatterns } = getIgnoreState();
+            const activeFiles = cachedScannedFiles.filter(file => !shouldIgnore(file.path, ignorePatterns));
 
-            const files = await scanRepository(getIgnoreState(), persistIgnoreState);
-
-            fileOrder.update(files.map(f => f.id));
+            fileOrder.update(activeFiles.map(f => f.id));
             await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
 
             const order = fileOrder.getOrder();
             const mode = getLayoutMode();
-            const renderMediaThumbnails = vscode.workspace.getConfiguration("thumbview").get<boolean>("renderMediaThumbnails") ?? true;
+            const config = vscode.workspace.getConfiguration("thumbview");
+            const renderMediaThumbnails = config.get<boolean>("renderMediaThumbnails") ?? true;
+            const minCellWidth = config.get<number>("minCellWidth") ?? 32;
+            const minCellHeight = config.get<number>("minCellHeight") ?? 28;
             const openKeybinding = getOpenKeybindingLabel();
-            const filesWithWebviewUris = files.map(file => {
+            const filesWithWebviewUris = activeFiles.map(file => {
                 if ((file.isImage || file.isPdf) && file.mediaUri) {
                     try {
                         const webviewUri = panel.webview.asWebviewUri(vscode.Uri.parse(file.uri)).toString();
@@ -230,11 +237,8 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             if (mode === "spanning_grid") {
-                // Allocations/rows are persisted so a file's cell count and the grid's
-                // row count don't get recomputed (and reshuffle everyone else's slot)
-                // on every rescan — see spanning_layout.ts's buildSpanningGrid doc.
-                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("repomap.spanningAllocations") || {};
+                const savedRows = context.workspaceState.get<number | null>("repomap.spanningRows") || null;
 
                 const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows);
 
@@ -248,8 +252,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     slots: p.slots
                 }));
 
-                // Compute tight bounding box of occupied cells so the webview
-                // doesn't waste space on empty edge rows/columns from stale order
                 let spMaxCol = 0, spMaxRow = 0;
                 for (const p of layout.placements) {
                     spMaxCol = Math.max(spMaxCol, p.col);
@@ -262,6 +264,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: "data",
                     mode: "spanning_grid",
                     renderMediaThumbnails,
+                    minCellWidth,
+                    minCellHeight,
                     openKeybinding,
                     files: filesWithSlots,
                     layout: {
@@ -279,8 +283,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     slots: [layout.slots[order.indexOf(file.id)]]
                 }));
 
-                // Compute tight bounding box of occupied cells so the webview
-                // doesn't waste space on empty edge rows/columns from stale order
                 let ugMaxCol = 0, ugMaxRow = 0;
                 for (const f of filesWithSlots) {
                     if (f.slot) {
@@ -293,6 +295,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: "data",
                     mode: "uniform_grid",
                     renderMediaThumbnails,
+                    minCellWidth,
+                    minCellHeight,
                     openKeybinding,
                     files: filesWithSlots,
                     layout: {
@@ -302,20 +306,39 @@ export async function activate(context: vscode.ExtensionContext) {
                 });
             }
 
-            // Send open files list & viewport ranges
             panel.webview.postMessage({
                 command: "openState",
                 openFiles: getOpenTabUris(),
                 viewLocations
             });
 
-            // Send active editor file URI
             if (vscode.window.activeTextEditor) {
                 panel.webview.postMessage({
                     command: "activeFile",
                     uri: vscode.window.activeTextEditor.document.uri.toString()
                 });
             }
+        } catch (err: any) {
+            console.error("THUMBVIEW UPDATE LAYOUT ERROR:", err);
+            panel.webview.postMessage({
+                command: "status",
+                text: `Error: ${err?.message ?? String(err)}`
+            });
+        }
+    };
+
+    const refreshThumbview = async (panel: vscode.WebviewPanel) => {
+        try {
+            panel.webview.postMessage({
+                command: "status",
+                text: "Refreshing Thumbview...",
+                clearData: false
+            });
+
+            const files = await scanRepository(getIgnoreState(), persistIgnoreState);
+            cachedScannedFiles = files;
+
+            await updateLayoutFromCache(panel);
         } catch (err: any) {
             console.error("THUMBVIEW REFRESH ERROR:", err);
             panel.webview.postMessage({
@@ -328,16 +351,11 @@ export async function activate(context: vscode.ExtensionContext) {
     let isThumbviewMaximized = false;
 
     const maximizeThumbview = async () => {
-        if (vscode.window.tabGroups.all.length > 1 && !isThumbviewMaximized) {
+        if (vscode.window.tabGroups.all.length > 1) {
             try {
-                await vscode.commands.executeCommand("workbench.action.maximizeEditor");
+                await vscode.commands.executeCommand("workbench.action.minimizeOtherEditors");
                 isThumbviewMaximized = true;
             } catch {
-                try {
-                    await vscode.commands.executeCommand("workbench.action.toggleEditorWidths");
-                    isThumbviewMaximized = true;
-                } catch {
-                }
             }
         }
     };
@@ -346,12 +364,8 @@ export async function activate(context: vscode.ExtensionContext) {
         if (isThumbviewMaximized) {
             isThumbviewMaximized = false;
             try {
-                await vscode.commands.executeCommand("workbench.action.maximizeEditor");
+                await vscode.commands.executeCommand("workbench.action.evenEditorWidths");
             } catch {
-                try {
-                    await vscode.commands.executeCommand("workbench.action.toggleEditorWidths");
-                } catch {
-                }
             }
         }
     };
@@ -363,14 +377,26 @@ export async function activate(context: vscode.ExtensionContext) {
 
             if (activePanel) {
                 if (activePanel.active) {
-                    activePanel.dispose();
-                    activePanel = undefined;
+                    restoreSplitLayout();
+                    if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
+                        try {
+                            await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
+                        } catch {
+                            try {
+                                await vscode.commands.executeCommand("workbench.action.previousEditor");
+                            } catch { }
+                        }
+                    } else {
+                        try {
+                            await vscode.commands.executeCommand("workbench.action.previousEditor");
+                        } catch { }
+                    }
                     return;
                 } else {
                     activePanel.reveal(vscode.ViewColumn.Active, false);
                     sendOpenState();
                     activePanel.webview.postMessage({ command: "focusWebview" });
-                    await maximizeThumbview();
+                    maximizeThumbview();
                     return;
                 }
             }
@@ -651,7 +677,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
                             refreshProviders();
                             if (activePanel) {
-                                refreshThumbview(activePanel);
+                                updateLayoutFromCache(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -731,13 +757,16 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             panel.onDidChangeViewState(e => {
-                if (e.webviewPanel.visible) {
+                if (e.webviewPanel.visible && e.webviewPanel.active) {
                     const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
                     panel.webview.postMessage({
                         command: "activeFile",
                         uri: activeUri
                     });
                     sendOpenState();
+                    maximizeThumbview();
+                } else if (!e.webviewPanel.active) {
+                    restoreSplitLayout();
                 }
             });
 
@@ -773,7 +802,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await config.update("layoutMode", "uniform_grid", vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage("Thumbview Layout set to Uniform Grid.");
         if (activePanel) {
-            refreshThumbview(activePanel);
+            updateLayoutFromCache(activePanel);
         }
     });
     context.subscriptions.push(setUniformGridDisposable);
@@ -783,7 +812,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await config.update("layoutMode", "spanning_grid", vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage("Thumbview Layout set to Spanning Grid.");
         if (activePanel) {
-            refreshThumbview(activePanel);
+            updateLayoutFromCache(activePanel);
         }
     });
     context.subscriptions.push(setSpanningGridDisposable);
@@ -796,7 +825,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const ignoreProvider = new IgnoreTreeDataProvider(context, () => {
         if (activePanel) {
-            refreshThumbview(activePanel);
+            updateLayoutFromCache(activePanel);
         }
         directoryProvider.refresh();
     });
@@ -820,7 +849,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Ignored directory '${folderPath}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`);
                 refreshProviders();
                 if (activePanel) {
-                    refreshThumbview(activePanel);
+                    updateLayoutFromCache(activePanel);
                 }
             }
         }
@@ -840,7 +869,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
-                    refreshThumbview(activePanel);
+                    updateLayoutFromCache(activePanel);
                 }
             }
         }
@@ -884,7 +913,7 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(msg);
             refreshProviders();
             if (activePanel) {
-                refreshThumbview(activePanel);
+                updateLayoutFromCache(activePanel);
             }
         }
     });
@@ -892,9 +921,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const focusFolderDisposable = vscode.commands.registerCommand("thumbview.focusFolder", async (folderPath?: string | DirectoryTreeItem) => {
         let targetFolder = typeof folderPath === "string" ? folderPath : folderPath?.folderPath || "";
-        if (targetFolder === "(root files)/") {
-            targetFolder = "";
-        }
         let panel = activePanel;
         if (!panel) {
             await vscode.commands.executeCommand("thumbview.open");
@@ -1005,7 +1031,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Watch configuration changes (ignorePatterns no longer lives in config — only
     // layoutMode, renderMediaThumbnails, and autoIgnoreThreshold are real settings)
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
-        if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails")) && activePanel) {
+        if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails") || e.affectsConfiguration("thumbview.minCellWidth") || e.affectsConfiguration("thumbview.minCellHeight")) && activePanel) {
             refreshThumbview(activePanel);
         }
     });
@@ -1044,6 +1070,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Watch active editor changes
     const editorDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
+        if (editor && editor.document.uri.scheme !== "vscode-webview") {
+            lastActiveTextEditor = editor;
+        }
         updateVisibleRanges(editor);
         scheduleSendOpenState(0);
     });
@@ -1333,14 +1362,16 @@ function getHtml(
             left: 50%;
             transform: translate(-50%, -50%);
             display: none;
-            width: 480px;
+            width: 560px;
             max-width: 90vw;
-            background: rgba(20, 20, 26, 0.95);
+            max-height: 82vh;
+            overflow-y: auto;
+            background: rgba(20, 20, 26, 0.96);
             backdrop-filter: blur(16px);
             border: 1px solid rgba(168, 85, 247, 0.4);
             border-radius: 12px;
             padding: 20px 24px;
-            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.8);
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85);
             z-index: 3000;
             font-size: 13px;
             color: #d4d4d8;
@@ -1356,6 +1387,10 @@ function getHtml(
             border-bottom: 1px solid rgba(255, 255, 255, 0.12);
             padding-bottom: 10px;
             margin-bottom: 16px;
+            position: sticky;
+            top: 0;
+            background: rgba(20, 20, 26, 0.98);
+            z-index: 10;
         }
 
         .modal-close {
@@ -1368,7 +1403,7 @@ function getHtml(
 
         .modal-close:hover { color: #ffffff; }
 
-        .modal-section { margin-bottom: 16px; }
+        .modal-section { margin-bottom: 20px; }
         .modal-section-title {
             font-size: 12px;
             text-transform: uppercase;
@@ -1376,6 +1411,8 @@ function getHtml(
             color: #a855f7;
             font-weight: 600;
             margin-bottom: 8px;
+            border-bottom: 1px solid rgba(168, 85, 247, 0.2);
+            padding-bottom: 4px;
         }
 
         .shortcut-row {
@@ -1395,6 +1432,14 @@ function getHtml(
             font-size: 11px;
             color: #f472b6;
         }
+
+        .modal-guide-list {
+            font-size: 12px;
+            line-height: 1.6;
+            color: #cccccc;
+            padding-left: 18px;
+            margin: 4px 0 8px 0;
+        }
     </style>
 </head>
 <body>
@@ -1404,35 +1449,62 @@ function getHtml(
         <div id="context-menu"></div>
         <div id="actions-modal">
             <div class="modal-header">
-                <span>⚙ Actions &amp; Shortcuts</span>
+                <span>⚙ Actions &amp; Setup</span>
                 <button class="modal-close" id="close-modal">&times;</button>
             </div>
             <div class="modal-section">
-                <div class="modal-section-title">Keyboard &amp; Mouse Shortcuts</div>
+                <div class="modal-section-title">Shortcuts</div>
                 <div class="shortcut-row">
-                    <span>Open / Focus Thumbview</span>
+                    <span>Open / Focus</span>
                     <span>Press <span class="kbd" id="open-shortcut-label">${openKeybindingLabel}</span></span>
                 </div>
                 <div class="shortcut-row">
-                    <span>Magnifying Code Preview</span>
+                    <span>Code Magnifier</span>
                     <span>Hold <span class="kbd">Left CTRL</span> + Hover</span>
                 </div>
                 <div class="shortcut-row">
-                    <span>Jump to Document Line</span>
-                    <span><span class="kbd">Left Click</span> Minimap Tile</span>
+                    <span>Jump to Line</span>
+                    <span><span class="kbd">Left Click</span> Tile Line</span>
                 </div>
                 <div class="shortcut-row">
                     <span>Close Tab</span>
-                    <span><span class="kbd">Middle Click</span> or <span class="kbd">×</span> Button</span>
+                    <span><span class="kbd">Middle Click</span> or <span class="kbd">×</span></span>
                 </div>
                 <div class="shortcut-row">
                     <span>Isolate Folder</span>
-                    <span><span class="kbd">Left Click</span> Header Path Strip</span>
+                    <span><span class="kbd">Left Click</span> Header / Tree Item</span>
                 </div>
                 <div class="shortcut-row">
-                    <span>Explorer Commands</span>
-                    <span><span class="kbd">Right Click</span> Card Tile</span>
+                    <span>Context Menu</span>
+                    <span><span class="kbd">Right Click</span> Tile</span>
                 </div>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-section-title">Setup &amp; Settings</div>
+                <ul class="modal-guide-list">
+                    <li><b>Layout</b>: <code>spanning_grid</code> (tall files span cells) or <code>uniform_grid</code>.</li>
+                    <li><b>Small tiles</b> group into folder cards (<code>minCellWidth/Height</code>); use breadcrumbs to go back.</li>
+                    <li><b>Auto-Ignore</b>: folders with &gt;30 files are hidden (<code>thumbview.autoIgnoreThreshold</code>).</li>
+                </ul>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-section-title">Ignoring &amp; Unignoring</div>
+                <ul class="modal-guide-list">
+                    <li><b>Ignore</b>: right-click folder → <b>Ignore Directory</b>, or tile → <b>Ignore in Thumbview</b>.</li>
+                    <li><b>Unignore</b>: click 👁 on <code>(hidden)</code> folders, or right-click in <b>Ignored Files</b> panel.</li>
+                    <li><b>Globs</b>: <code>+</code> in <b>Ignored Files</b> panel (e.g. <code>*.log</code>, <code>build/</code>). Saved per workspace.</li>
+                </ul>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-section-title">More Features</div>
+                <ul class="modal-guide-list">
+                    <li><b>Isolate Folder</b>: click a folder or tile header to dim the rest; <b>All Workspace Files (Root)</b> resets.</li>
+                    <li><b>Root Files Only</b>: sidebar item to spotlight top-level files.</li>
+                    <li><b>Instant Search</b>: top search bar highlights tokens across all tiles.</li>
+                </ul>
             </div>
         </div>
         <div class="controls-overlay">

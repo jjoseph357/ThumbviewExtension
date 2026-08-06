@@ -123,7 +123,7 @@ function matchSingleRule(pathStr: string, rule: string): boolean {
 // Hand-rolled gitignore-glob-to-regex translator (falls back to a plain substring
 // match if the generated pattern fails to compile). Evaluates rules sequentially
 // in order and supports negation patterns ("!foo") to un-ignore files.
-function shouldIgnore(relativePath: string, rules: string[]): boolean {
+export function shouldIgnore(relativePath: string, rules: string[]): boolean {
     const pathStr = relativePath.replace(/\\/g, "/");
     let ignored = false;
 
@@ -133,7 +133,12 @@ function shouldIgnore(relativePath: string, rules: string[]): boolean {
         const pattern = isNegated ? rule.slice(1).trim() : rule.trim();
         if (!pattern) continue;
 
-        if (matchSingleRule(pathStr, pattern)) {
+        const cleanPattern = pattern.replace(/^\/+|\/+$/g, "");
+        if (cleanPattern === "(root files)") {
+            if (!pathStr.includes("/")) {
+                ignored = !isNegated;
+            }
+        } else if (matchSingleRule(pathStr, pattern)) {
             ignored = !isNegated;
         }
     }
@@ -281,10 +286,24 @@ export async function scanRepository(
     const result: RepoFile[] = [];
     const validFiles = files.filter(file => !shouldIgnore(vscode.workspace.asRelativePath(file), gitignoreRules));
 
-    // Sort files by relative workspace path so files in the same directory/level sit adjacent to each other
+    // Sort files by directory level so root-level files and subdirectories sit adjacent to their siblings
     validFiles.sort((a, b) => {
         const relA = vscode.workspace.asRelativePath(a).replace(/\\/g, "/");
         const relB = vscode.workspace.asRelativePath(b).replace(/\\/g, "/");
+
+        const lastSlashA = relA.lastIndexOf("/");
+        const lastSlashB = relB.lastIndexOf("/");
+
+        const dirA = lastSlashA !== -1 ? relA.substring(0, lastSlashA) : "";
+        const dirB = lastSlashB !== -1 ? relB.substring(0, lastSlashB) : "";
+
+        if (dirA !== dirB) {
+            // Group root directory files (dir === "") together first
+            if (dirA === "") return -1;
+            if (dirB === "") return 1;
+            return dirA.localeCompare(dirB, undefined, { numeric: true, sensitivity: "base" });
+        }
+
         return relA.localeCompare(relB, undefined, { numeric: true, sensitivity: "base" });
     });
 
