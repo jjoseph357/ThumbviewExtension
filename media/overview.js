@@ -13,7 +13,7 @@ const ctx = canvas.getContext("2d");
 const tooltip = document.getElementById("hover-tooltip");
 
 let data = null;
-let statusText = "Loading Repository Map...";
+let statusText = "Loading Thumbview...";
 let activeFileUri = null;
 let searchQuery = "";
 let focusedFolder = ""; // empty means root
