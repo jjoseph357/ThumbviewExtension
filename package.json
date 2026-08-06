@@ -216,7 +216,7 @@
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "2D minimap grid of your whole workspace.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
+        "contents": "Spatially stable code minimap.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
       }
     ]
   },

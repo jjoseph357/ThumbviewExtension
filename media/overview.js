@@ -15,12 +15,19 @@ const tooltip = document.getElementById("hover-tooltip");
 let data = null;
 let statusText = "Loading Thumbview...";
 let activeFileUri = null;
-let searchQuery = "";
 let focusedFolder = ""; // empty means root
 
 let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
+
+let matchCase = false;
+let matchWholeWord = false;
+let useRegex = false;
+let rawSearchQuery = "";   // original case, trimmed
+let searchQuery = "";      // lowercase, trimmed. kept for the existing fast substring path
+let searchRegex = null;    // compiled only when useRegex or matchWholeWord is on
+let searchInvalid = false; // true when the user's regex fails to compile
 
 let searchDebounceTimer = null;
 function triggerSearchRender(immediate = false) {
@@ -37,45 +44,172 @@ function triggerSearchRender(immediate = false) {
     }
 }
 
-// Setup search inputs
-const searchInput = document.getElementById("search-input");
-const clearSearch = document.getElementById("clear-search");
+function escapeRegExp(s) {
+    return s.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+}
 
-searchInput.addEventListener("input", e => {
-    searchQuery = e.target.value.toLowerCase().trim();
-    clearSearch.style.display = searchQuery ? "block" : "none";
+function buildLineHtml(tokens, highlightRegex) {
+    let html = "";
+    for (const tok of tokens) {
+        let escapedText = tok.text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+
+        if (highlightRegex) {
+            highlightRegex.lastIndex = 0;
+            if (highlightRegex.test(tok.text)) {
+                highlightRegex.lastIndex = 0;
+                escapedText = escapedText.replace(highlightRegex, m =>
+                    `<span style="background: rgba(236, 72, 153, 0.35); color: #f472b6; font-weight: 600; border-radius: 2px; padding: 0 2px;">${m}</span>`
+                );
+            }
+        }
+
+        const color = colorForCategory(tok.category, tok.isKey);
+        html += `<span style="color: ${color}">${escapedText}</span>`;
+    }
+    return html || " ";
+}
+
+
+// The regex/whole-word pattern-building here is duplicated in extension.ts's "jump" message
+// handler (used to flash matching lines in the document after a jump) — keep both in sync.
+function rebuildSearchState(value) {
+    rawSearchQuery = value.trim();
+    searchQuery = rawSearchQuery.toLowerCase();
+    searchInvalid = false;
+    searchRegex = null;
+
+    if (rawSearchQuery && (useRegex || matchWholeWord)) {
+        let pattern = useRegex ? rawSearchQuery : escapeRegExp(rawSearchQuery);
+        if (matchWholeWord) pattern = `\\b(?:${pattern})\\b`;
+        try {
+            searchRegex = new RegExp(pattern, matchCase ? "" : "i");
+        } catch (e) {
+            searchInvalid = true;
+        }
+    }
+
+    searchInputFld.classList.toggle('regex-error', searchInvalid);
+}
+
+// original/lowered pair so plain substring search stays on the fast pre-lowercased path
+function textMatches(original, lowered) {
+    if (!rawSearchQuery || searchInvalid) return false;
+    if (searchRegex) return searchRegex.test(original);
+    return matchCase ? original.includes(rawSearchQuery) : lowered.includes(searchQuery);
+}
+
+// Setup search inputs
+const searchInputFld = document.getElementById("search-input");
+const matchCaseBtn = document.getElementById("search-match-case");
+const matchWordBtn = document.getElementById("search-match-word");
+const useRegexBtn = document.getElementById("search-use-regex");
+const clearSearchBtn = document.getElementById("clear-search");
+
+searchInputFld.addEventListener("input", e => {
+    rebuildSearchState(e.target.value);
+    clearSearchBtn.style.display = searchQuery ? "block" : "none";
     triggerSearchRender(false);
 });
 
-clearSearch.addEventListener("click", () => {
-    searchInput.value = "";
-    searchQuery = "";
-    clearSearch.style.display = "none";
+// Clicking a search-container button blurs #search-input by default, which triggers its
+// :focus width transition (180px -> 240px) mid-click; the resulting layout shift moves the
+// button out from under the pointer before mouseup, so the browser's click never fires on
+// the first press. Suppressing the default mousedown focus change keeps the input focused
+// and the layout still, so the click lands normally.
+for (const btn of [matchCaseBtn, matchWordBtn, useRegexBtn, clearSearchBtn]) {
+    btn.addEventListener("mousedown", e => e.preventDefault());
+}
+
+matchCaseBtn.addEventListener("click", () => toggleMatchCase());
+
+matchWordBtn.addEventListener("click", () => toggleMatchWord());
+
+useRegexBtn.addEventListener("click", () => toggleRegex());
+
+clearSearchBtn.addEventListener("click", () => clearSearch());
+
+function toggleMatchCase() {
+    matchCase = !matchCase;
+    rebuildSearchState(searchInputFld.value);
+    matchCaseBtn.classList.toggle('active');
     triggerSearchRender(true);
-});
+}
+
+function toggleRegex() {
+    useRegex = !useRegex;
+    rebuildSearchState(searchInputFld.value);
+    useRegexBtn.classList.toggle('active');
+    triggerSearchRender(true);
+}
+
+function toggleMatchWord() {
+    matchWholeWord = !matchWholeWord;
+    rebuildSearchState(searchInputFld.value);
+    matchWordBtn.classList.toggle('active');
+    triggerSearchRender(true);
+}
+
+function clearSearch() {
+    searchInputFld.value = "";
+    rebuildSearchState("");
+    clearSearchBtn.style.display = "none";
+    triggerSearchRender(true);
+}
 
 // Capture global keystrokes and type directly into search box
 window.addEventListener("keydown", event => {
-    if (document.activeElement === searchInput) {
+    // Checked before the activeElement/modifier bailouts below so these fire whether
+    // focus is on the search input or anywhere else in the webview (e.g. the canvas).
+    if (event.altKey && !event.ctrlKey && !event.metaKey) {
+        const cmd = event.key.toLowerCase();
+        if        (cmd === 'c') {
+            event.preventDefault();
+            toggleMatchCase();
+            return;
+        } else if (cmd === 'w') {
+            event.preventDefault();
+            toggleMatchWord();
+            return;
+        } else if (cmd === 'x') {
+            event.preventDefault();
+            toggleRegex();
+            return;
+        }
+    }
+
+    if (event.ctrlKey && !event.altKey && !event.metaKey) {
+        if (event.key === 'Backspace') {
+            event.preventDefault();
+            clearSearch();
+            // NOTE: maybe this should also grab focus for searchInputFld?
+            return;
+        }
+    }
+
+    if (document.activeElement === searchInputFld) {
         return;
     }
+
     if (event.ctrlKey || event.altKey || event.metaKey) {
         return;
     }
 
     if (event.key.length === 1) {
         event.preventDefault();
-        searchInput.focus();
-        searchInput.value += event.key;
-        searchQuery = searchInput.value.toLowerCase().trim();
-        clearSearch.style.display = searchQuery ? "block" : "none";
+        searchInputFld.focus();
+        searchInputFld.value += event.key;
+        rebuildSearchState(searchInputFld.value);
+        clearSearchBtn.style.display = searchQuery ? "block" : "none";
         triggerSearchRender(false);
     } else if (event.key === "Backspace") {
         event.preventDefault();
-        searchInput.focus();
-        searchInput.value = searchInput.value.slice(0, -1);
-        searchQuery = searchInput.value.toLowerCase().trim();
-        clearSearch.style.display = searchQuery ? "block" : "none";
+        searchInputFld.focus();
+        searchInputFld.value = searchInputFld.value.slice(0, -1);
+        rebuildSearchState(searchInputFld.value);
+        clearSearchBtn.style.display = searchQuery ? "block" : "none";
         triggerSearchRender(false);
     }
 });
@@ -150,6 +284,7 @@ window.addEventListener("message", event => {
                 f._lowerPath = f.path ? f.path.toLowerCase() : "";
                 const lang = detectLang(f.path);
                 const textArr = [];
+                const textArrOriginal = [];
                 if (f.path) textArr.push(f.path.toLowerCase());
                 if (f.lines) {
                     for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
@@ -158,6 +293,7 @@ window.addEventListener("message", event => {
                         l._lowerText = lower;
                         l._tokens = tokenizeLine(l.text ? l.text.trimStart() : "", lang);
                         textArr.push(lower);
+                        textArrOriginal.push(l.text || "");
                     }
                 }
                 if (f.fullLines) {
@@ -166,8 +302,11 @@ window.addEventListener("message", event => {
                         textArr.push(lower);
                         return lower;
                     });
+                    textArrOriginal.push(...f.fullLines);
                 }
-                f._combinedText = textArr.join("\n");
+                f._combinedText = textArr.join("\n");                 // lowercased (existing)
+                f._combinedTextOriginal = textArrOriginal.join("\n"); // add: same loop, no .toLowerCase()
+
             }
         }
         if (msg.openKeybinding) {
@@ -845,22 +984,23 @@ function drawMinimap(file, x, y, w, h) {
         const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * 0.7;
 
         let isMatchedLine = false;
-        if (searchQuery) {
-            const checkFull = file._lowerFullLines || file.fullLines;
-            if (checkFull && file.lineCount > lines.length) {
+        if (rawSearchQuery && !searchInvalid) {
+            if (file.fullLines && file.lineCount > lines.length) {
                 const step = file.lineCount / lines.length;
                 const startLineIdx = Math.floor(i * step);
-                const endLineIdx = Math.min(Math.floor((i + 1) * step), checkFull.length);
+                const endLineIdx = Math.min(Math.floor((i + 1) * step), file.fullLines.length);
                 for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
-                    const str = file._lowerFullLines ? checkFull[fullI] : checkFull[fullI].toLowerCase();
-                    if (str.includes(searchQuery)) {
+                    const orig = file.fullLines[fullI];
+                    const lower = file._lowerFullLines ? file._lowerFullLines[fullI] : orig.toLowerCase();
+                    if (textMatches(orig, lower)) {
                         isMatchedLine = true;
                         break;
                     }
                 }
             } else {
-                const lText = line._lowerText !== undefined ? line._lowerText : line.text.toLowerCase();
-                isMatchedLine = lText.includes(searchQuery);
+                const orig = line.text;
+                const lower = line._lowerText !== undefined ? line._lowerText : orig.toLowerCase();
+                isMatchedLine = textMatches(orig, lower);
             }
         }
 
@@ -1078,7 +1218,7 @@ function render() {
         cellsTooSmall = rootCellsTooSmall;
     }
 
-    const queryActive = !!searchQuery;
+    const queryActive = !!searchQuery && !searchInvalid;
 
     // Clear stale cell bounding boxes and folder card refs across all files
     for (const f of data.files) {
@@ -1185,7 +1325,7 @@ function render() {
             if (y + fileH < -50 || y > rectH + 50) continue;
 
             const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
-            const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
+            const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
             const isActive = file.uri === activeFileUri;
             const isOpen = openFilesSet.has(file.uri);
 
@@ -1256,7 +1396,7 @@ function render() {
 
             if (y + fileH < -50 || y > rectH + 50) continue;
 
-            const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
+            const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
             const isActive = file.uri === activeFileUri;
             const isOpen = openFilesSet.has(file.uri);
 
@@ -1336,7 +1476,7 @@ function render() {
             }
 
             const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
-            const isSearchMatch = queryActive && (file._combinedText ? file._combinedText.includes(searchQuery) : (file.path.toLowerCase().includes(searchQuery)));
+            const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
 
             const isActive = file.uri === activeFileUri;
             const isOpen = openFilesSet.has(file.uri);
@@ -1502,11 +1642,18 @@ canvas.addEventListener("click", event => {
 
             const line = Math.floor(relativeY * file.lineCount);
 
+            // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
+            // above so extension.ts's "jump" handler can flash the same lines this webview
+            // considers matches — see its handler for the mirrored pattern-building logic.
             vscode.postMessage({
                 command: "jump",
                 uri: file.uri,
                 line,
-                query: searchQuery
+                query: rawSearchQuery,
+                matchCase,
+                matchWholeWord,
+                useRegex,
+                searchInvalid
             });
 
             return;
@@ -1710,27 +1857,23 @@ function updateHoverTooltip(clientX, clientY) {
 
             if (line && !line._htmlCache) {
                 const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
-                let lineHtml = "";
-                for (const tok of tokens) {
-                    let escapedText = tok.text
-                        .replace(/&/g, "&amp;")
-                        .replace(/</g, "&lt;")
-                        .replace(/>/g, "&gt;");
-
-                    if (searchQuery && tok.text.toLowerCase().includes(searchQuery)) {
-                        const escapedQuery = searchQuery.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                        const regex = new RegExp(`(${escapedQuery})`, 'gi');
-                        escapedText = escapedText.replace(regex, `<span style="background: rgba(236, 72, 153, 0.35); color: #f472b6; font-weight: 600; border-radius: 2px; padding: 0 2px;">$1</span>`);
-                    }
-
-                    const color = colorForCategory(tok.category, tok.isKey);
-                    lineHtml += `<span style="color: ${color}">${escapedText}</span>`;
-                }
-                line._htmlCache = lineHtml || " ";
+                line._htmlCache = buildLineHtml(tokens, null);
             }
 
-            const lineHtml = (line && line._htmlCache) ? line._htmlCache : lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            const isMatchLine = searchQuery && lineText.toLowerCase().includes(searchQuery);
+            let lineHtml;
+            if (rawSearchQuery && !searchInvalid && line) {
+                const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
+                const hl = searchRegex
+                    ? new RegExp(searchRegex.source, searchRegex.flags.includes("g") ? searchRegex.flags : searchRegex.flags + "g")
+                    : new RegExp(escapeRegExp(rawSearchQuery), matchCase ? "g" : "gi");
+                lineHtml = buildLineHtml(tokens, hl);
+            } else {
+                lineHtml = (line && line._htmlCache) ? line._htmlCache : lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            }
+
+            const isMatchLine = rawSearchQuery && !searchInvalid &&
+                textMatches(lineText, line && line._lowerText !== undefined ? line._lowerText : lineText.toLowerCase());
+
             let bgStyle = "";
             let prefix = "  ";
 

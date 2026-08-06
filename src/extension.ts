@@ -480,12 +480,31 @@ export async function activate(context: vscode.ExtensionContext) {
                             vscode.TextEditorRevealType.InCenter
                         );
 
-                        // Flash all matching lines pink in the document and fade away
-                        const query = (msg.query || "").trim().toLowerCase();
-                        if (query) {
+                        // Flash all matching lines pink in the document and fade away.
+                        // The regex/whole-word pattern-building here is duplicated in
+                        // media/overview.js's rebuildSearchState — keep both in sync.
+                        const query = (msg.query || "").trim();
+                        if (query && !msg.searchInvalid) {
+                            let isMatch: (lineText: string) => boolean;
+                            if (msg.useRegex || msg.matchWholeWord) {
+                                let pattern = msg.useRegex ? query : query.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+                                if (msg.matchWholeWord) pattern = `\\b(?:${pattern})\\b`;
+                                try {
+                                    const re = new RegExp(pattern, msg.matchCase ? "" : "i");
+                                    isMatch = (lineText: string) => re.test(lineText);
+                                } catch {
+                                    isMatch = () => false;
+                                }
+                            } else if (msg.matchCase) {
+                                isMatch = (lineText: string) => lineText.includes(query);
+                            } else {
+                                const lowerQuery = query.toLowerCase();
+                                isMatch = (lineText: string) => lineText.toLowerCase().includes(lowerQuery);
+                            }
+
                             const matchingRanges: vscode.Range[] = [];
                             for (let i = 0; i < doc.lineCount; i++) {
-                                if (doc.lineAt(i).text.toLowerCase().includes(query)) {
+                                if (isMatch(doc.lineAt(i).text)) {
                                     matchingRanges.push(new vscode.Range(new vscode.Position(i, 0), new vscode.Position(i, 0)));
                                 }
                             }
@@ -1243,6 +1262,11 @@ function getHtml(
             transition: width 0.2s ease;
         }
 
+        .search-input.regex-error {
+            outline: 1px solid rgba(239, 68, 68, 0.8);
+            outline-offset: -1px;
+        }
+
         .search-input:focus {
             width: 240px;
         }
@@ -1251,7 +1275,7 @@ function getHtml(
             color: #707075;
         }
 
-        .clear-search-btn {
+        .search-option-btn {
             background: transparent;
             border: none;
             outline: none;
@@ -1261,7 +1285,14 @@ function getHtml(
             padding: 0 8px;
         }
 
-        .clear-search-btn:hover {
+        .search-option-btn:hover {
+            color: #ffffff;
+        }
+        
+        .search-option-btn.active {
+            background: rgba(168, 85, 247, 0.25);
+            border: 1px solid rgba(168, 85, 247, 0.6);
+            border-radius: 4px;
             color: #ffffff;
         }
 
@@ -1509,8 +1540,11 @@ function getHtml(
         </div>
         <div class="controls-overlay">
             <div class="search-container">
-                <input type="text" id="search-input" class="search-input" placeholder="Search files (e.g. auth)...">
-                <button id="clear-search" class="clear-search-btn" style="display: none;">&times;</button>
+                <input type="text" id="search-input" class="search-input" title="Begin typing with the Thumbview open to Search" placeholder="Search files (e.g. auth)...">
+                <button id="search-match-case" class="search-option-btn" title="Match Case (Alt+C)">Aa</button>
+                <button id="search-match-word" class="search-option-btn" title="Match Whole Word (Alt+W)">[ab]</button>
+                <button id="search-use-regex" class="search-option-btn" title="Use Regular Expression (Alt+X)">.*</button>
+                <button id="clear-search" class="search-option-btn" title="Clear Search (Ctrl+Backspace)" style="display: none;">&times;</button>
             </div>
             <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
                 <span class="breadcrumb-item" id="breadcrumb-root">root</span>
