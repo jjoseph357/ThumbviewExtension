@@ -5,6 +5,15 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] - 2026-08-06
+
+### Added
+- **Match Case, Match Whole Word, and Regex Search**: The search bar now has three toggles — Match Case (`Aa`), Match Whole Word (`ab`), and Use Regular Expression (`.*`) — plus `Alt+C`/`Alt+W`/`Alt+X` keyboard shortcuts that work whether focus is on the search input or elsewhere in the webview. `media/overview.js`'s `rebuildSearchState()`/`textMatches()` are now the single matching engine behind grid tile borders/dimming, the per-line minimap match highlight, and the hover tooltip's highlighted matches. An invalid regex shows a red outline on the search input and stops dimming the grid instead of treating every tile as non-matching.
+
+### Fixed
+- **Post-Jump Line Flash Respects Search Options**: Opening a file by clicking a minimap tile now flashes matching lines in the editor using the same Match Case/Whole Word/Regex options active in the grid, instead of always doing a plain case-insensitive substring match.
+- **Search Option Buttons Swallowing Their First Click**: Clicking a Match Case/Whole Word/Regex/Clear button blurred the search input, triggering its focus-width CSS transition and shifting the button out from under the pointer before mouseup — so the first click never registered. Buttons now suppress the default focus change on `mousedown`, keeping the input focused and the layout still.
+
 ## [0.3.8] - 2026-08-06
 
 ### Changed

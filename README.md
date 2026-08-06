@@ -16,7 +16,7 @@ Tune behavior later via **File → Preferences → Settings → Thumbview** (see
 - **Jump to a line**: left-click any line on any tile and the file opens scrolled exactly there.
 - **Identify files by shape**: each tile is a syntax-highlighted minimap of one file, so you recognize code by its visual fingerprint, not by filename. The colored strip at the top of a tile shows its path.
 - **Magnify**: hold `Left CTRL` and hover over a tile to preview full-size, readable code lines without opening the file.
-- **Search everything at once**: type in the top search bar to highlight tokens across *all visible tiles* instantly. Press `×` or clear the box to reset.
+- **Search everything at once**: type in the top search bar to highlight tokens across *all visible tiles* instantly. Press `×` or clear the box to reset. Toggle **Match Case** (`Aa`), **Match Whole Word** (`ab`), or **Use Regular Expression** (`.*`) next to the search box — or `Alt+C`/`Alt+W`/`Alt+X` from anywhere in the panel — to refine what counts as a match.
 - **Close a tile tab**: middle-click it or click its `×`.
 
 ## Reading the Grid
