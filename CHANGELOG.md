@@ -5,6 +5,12 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-08-06
+
+### Changed
+- **In-Memory Cache Layout Updates**: Updated `src/extension.ts` to cache scanned files (`cachedScannedFiles`) upon repository scan and re-filter active files via `updateLayoutFromCache()` during ignore/unignore state changes or layout mode switches. This avoids redundant disk re-scans when toggling ignore rules.
+- **Preserved Webview Image & View State**: Prevented webview data resets (`clearData: false`) and preserved webview image caches during layout updates to avoid unnecessary UI flashes and image re-fetching.
+
 ## [0.3.7] - 2026-08-05
 
 ### Fixed

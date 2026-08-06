@@ -123,7 +123,7 @@ function matchSingleRule(pathStr: string, rule: string): boolean {
 // Hand-rolled gitignore-glob-to-regex translator (falls back to a plain substring
 // match if the generated pattern fails to compile). Evaluates rules sequentially
 // in order and supports negation patterns ("!foo") to un-ignore files.
-function shouldIgnore(relativePath: string, rules: string[]): boolean {
+export function shouldIgnore(relativePath: string, rules: string[]): boolean {
     const pathStr = relativePath.replace(/\\/g, "/");
     let ignored = false;
 

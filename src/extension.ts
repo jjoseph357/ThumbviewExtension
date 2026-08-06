@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { scanRepository, ScanIgnoreState } from "./scanner";
+import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile } from "./scanner";
 import { buildStableGrid } from "./layout";
 import { buildSpanningGrid } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
@@ -182,17 +182,19 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
-    const refreshRepositoryMap = async (panel: vscode.WebviewPanel) => {
+    let cachedScannedFiles: RepoFile[] | null = null;
+
+    const updateLayoutFromCache = async (panel: vscode.WebviewPanel) => {
+        if (!cachedScannedFiles) {
+            await refreshRepositoryMap(panel);
+            return;
+        }
+
         try {
-            panel.webview.postMessage({
-                command: "status",
-                text: "Refreshing repository map...",
-                clearData: true
-            });
+            const { ignorePatterns } = getIgnoreState();
+            const activeFiles = cachedScannedFiles.filter(file => !shouldIgnore(file.path, ignorePatterns));
 
-            const files = await scanRepository(getIgnoreState(), persistIgnoreState);
-
-            fileOrder.update(files.map(f => f.id));
+            fileOrder.update(activeFiles.map(f => f.id));
             await context.workspaceState.update("repomap.seenFiles", fileOrder.getOrder());
 
             const order = fileOrder.getOrder();
@@ -202,7 +204,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const minCellWidth = config.get<number>("minCellWidth") ?? 32;
             const minCellHeight = config.get<number>("minCellHeight") ?? 28;
             const openKeybinding = getOpenKeybindingLabel();
-            const filesWithWebviewUris = files.map(file => {
+            const filesWithWebviewUris = activeFiles.map(file => {
                 if ((file.isImage || file.isPdf) && file.mediaUri) {
                     try {
                         const webviewUri = panel.webview.asWebviewUri(vscode.Uri.parse(file.uri)).toString();
@@ -215,9 +217,6 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             if (mode === "spanning_grid") {
-                // Allocations/rows are persisted so a file's cell count and the grid's
-                // row count don't get recomputed (and reshuffle everyone else's slot)
-                // on every rescan — see spanning_layout.ts's buildSpanningGrid doc.
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("repomap.spanningAllocations") || {};
                 const savedRows = context.workspaceState.get<number | null>("repomap.spanningRows") || null;
 
@@ -233,8 +232,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     slots: p.slots
                 }));
 
-                // Compute tight bounding box of occupied cells so the webview
-                // doesn't waste space on empty edge rows/columns from stale order
                 let spMaxCol = 0, spMaxRow = 0;
                 for (const p of layout.placements) {
                     spMaxCol = Math.max(spMaxCol, p.col);
@@ -266,8 +263,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     slots: [layout.slots[order.indexOf(file.id)]]
                 }));
 
-                // Compute tight bounding box of occupied cells so the webview
-                // doesn't waste space on empty edge rows/columns from stale order
                 let ugMaxCol = 0, ugMaxRow = 0;
                 for (const f of filesWithSlots) {
                     if (f.slot) {
@@ -291,20 +286,39 @@ export async function activate(context: vscode.ExtensionContext) {
                 });
             }
 
-            // Send open files list & viewport ranges
             panel.webview.postMessage({
                 command: "openState",
                 openFiles: getOpenTabUris(),
                 viewLocations
             });
 
-            // Send active editor file URI
             if (vscode.window.activeTextEditor) {
                 panel.webview.postMessage({
                     command: "activeFile",
                     uri: vscode.window.activeTextEditor.document.uri.toString()
                 });
             }
+        } catch (err: any) {
+            console.error("REPOMAP UPDATE LAYOUT ERROR:", err);
+            panel.webview.postMessage({
+                command: "status",
+                text: `Error: ${err?.message ?? String(err)}`
+            });
+        }
+    };
+
+    const refreshRepositoryMap = async (panel: vscode.WebviewPanel) => {
+        try {
+            panel.webview.postMessage({
+                command: "status",
+                text: "Refreshing repository map...",
+                clearData: false
+            });
+
+            const files = await scanRepository(getIgnoreState(), persistIgnoreState);
+            cachedScannedFiles = files;
+
+            await updateLayoutFromCache(panel);
         } catch (err: any) {
             console.error("REPOMAP REFRESH ERROR:", err);
             panel.webview.postMessage({
@@ -643,7 +657,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
                             refreshProviders();
                             if (activePanel) {
-                                refreshRepositoryMap(activePanel);
+                                updateLayoutFromCache(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -768,7 +782,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await config.update("layoutMode", "uniform_grid", vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage("Thumbview Layout set to Uniform Grid.");
         if (activePanel) {
-            refreshRepositoryMap(activePanel);
+            updateLayoutFromCache(activePanel);
         }
     });
     context.subscriptions.push(setUniformGridDisposable);
@@ -778,7 +792,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await config.update("layoutMode", "spanning_grid", vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage("Thumbview Layout set to Spanning Grid.");
         if (activePanel) {
-            refreshRepositoryMap(activePanel);
+            updateLayoutFromCache(activePanel);
         }
     });
     context.subscriptions.push(setSpanningGridDisposable);
@@ -791,7 +805,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const ignoreProvider = new IgnoreTreeDataProvider(context, () => {
         if (activePanel) {
-            refreshRepositoryMap(activePanel);
+            updateLayoutFromCache(activePanel);
         }
         directoryProvider.refresh();
     });
@@ -815,7 +829,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Ignored directory '${folderPath}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`);
                 refreshProviders();
                 if (activePanel) {
-                    refreshRepositoryMap(activePanel);
+                    updateLayoutFromCache(activePanel);
                 }
             }
         }
@@ -835,7 +849,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
-                    refreshRepositoryMap(activePanel);
+                    updateLayoutFromCache(activePanel);
                 }
             }
         }
@@ -879,7 +893,7 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(msg);
             refreshProviders();
             if (activePanel) {
-                refreshRepositoryMap(activePanel);
+                updateLayoutFromCache(activePanel);
             }
         }
     });

@@ -144,7 +144,6 @@ window.addEventListener("message", event => {
         data = msg;
         statusText = "";
         hoverLineCache = {};
-        imageCache = {};
         if (data && data.files) {
             for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
                 const f = data.files[fIdx];
