@@ -274,6 +274,16 @@ window.addEventListener("message", event => {
         window.focus();
     }
 
+    // Hide/show webview content during zen mode transitions so the user
+    // doesn't see the canvas at the wrong size (hideForTransition from
+    // extension.ts onDidChangeViewState enter path — keep in sync)
+    if (msg.command === "hideForTransition") {
+        document.body.style.opacity = "0";
+    }
+    if (msg.command === "showAfterTransition") {
+        document.body.style.opacity = "1";
+    }
+
     if (msg.command === "data") {
         data = msg;
         statusText = "";

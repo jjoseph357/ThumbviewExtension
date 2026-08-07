@@ -64,17 +64,27 @@ Previously, selecting a subdirectory filtered out non-selected files completely 
 
 Minimap canvas tiles divide tile height by line count (`stepY = h / lineCount`). For short files with few lines (e.g. 5–10 lines), naive division created large 15–20px vertical gaps between lines, stretching code structure artificially. Capping `stepY` at 6px max (`Math.min(h / lineCount, 6)`) ensures short files maintain standard 1:1 code line spacing with empty space at the bottom of the card, matching how developers naturally see code files in text editors.
 
-## Full-Width Screen Expansion & Tab Group Restoration
+## Fullscreen Mode via Zen Mode
 
-When a developer works with split windows (e.g. 2 or 3 side-by-side editor columns), opening a minimap webview in a single column restricts canvas width to a fraction of the monitor. To achieve full-width screen coverage without state desynchronization:
-1. When Thumbview opens or receives focus while split editor groups exist (`vscode.window.tabGroups.all.length > 1`), the extension executes `workbench.action.minimizeOtherEditors`, expanding the active Thumbview panel to full screen width.
-2. When Thumbview is closed or hidden, the extension executes `workbench.action.evenEditorWidths` to restore split editor groups back to equal proportions. Because both commands are idempotent state declarations rather than boolean toggles, window expansion works consistently 100% of the time.
+The minimap needs the whole workbench to be readable — a single editor column squeezed between sidebar and panel restricts the canvas to a fraction of the monitor. Two constraints shaped the design:
+
+1. **Extensions cannot read workbench visibility state.** There is no API or command to query whether the sidebar, panel, or auxiliary bar is visible ([microsoft/vscode#186581](https://github.com/microsoft/vscode/issues/186581)). Context keys like `sideBarVisible` exist but are not exposed to extensions, so snapshotting "what was open" in extension code is impossible.
+2. **Blind toggles desync under concurrency.** `toggleMaximizeEditorGroup` flips global state with no way to read it. Earlier versions paired toggles with an optimistically-set boolean, but the command path and `onDidChangeViewState` both fired on panel creation, passed the flag check before either set it, and stacked toggles that cancelled each other — fullscreen worked only intermittently, and opening documents into a maximized group could spawn stray split groups.
+
+The current design outsources the snapshot to VS Code itself:
+
+1. **Zen Mode does the hiding and restoring.** `workbench.action.toggleZenMode` natively records and restores sidebar/panel/aux bar (and activity bar/tab bar) visibility. `zenMode.centerLayout` and `zenMode.fullScreen` are temporarily forced to `false` so the grid uses the full window instead of a narrow centered column; the original values are backed up in `workspaceState` and restored on exit, or on next activation if the session died mid-fullscreen. Settings with an explicit workspace-level value are left untouched.
+2. **Splits are maximized symmetrically — and always against the same group.** `toggleMaximizeEditorGroup` is the only size-restoring mechanism (`minimizeOtherEditors`/`evenEditorWidths` can't restore proportions), but it acts on the *active* editor group. Firing it with different groups active on enter vs. exit skews split widths every cycle instead of restoring them. So maximize (`maximizeThumbviewGroup`) runs only after the Thumbview panel is active, and unmaximize (in `exitFullscreen`) first re-reveals the panel if it isn't active, guaranteeing both toggles land on Thumbview's group.
+3. **All layout ops are serialized, and view-state churn is suppressed.** `enterFullscreen`/`exitFullscreen` funnel through a single promise queue and set their state flags synchronously, so concurrent invocations can't stack. Zen/maximize shuffles focus, making the panel's `active` flag flicker — so `onDidChangeViewState` ignores events while a layout op is in flight (plus a 300ms grace window), and exits fullscreen only when the panel is actually *hidden* (`visible === false`), not merely inactive. `jump`/`switchTab` exit fullscreen *before* opening a document so editors never open into a maximized group.
+4. **Speed comes from concurrency and ordering, not from skipping steps.** Fullscreen (zen) is entered *before* the panel is created or revealed, so Thumbview renders at full size immediately rather than snapping through intermediate layouts, with the group maximize following right behind it in the layout queue. On exit, `jump`/`switchTab` overlap the layout exit with the file's disk read (`openTextDocument`), so the editor appears as soon as both finish instead of after both run sequentially.
+
+Exit runs from all leave paths: the toggle-off branch of `thumbview.open`, panel deactivation in `onDidChangeViewState`, and `onDidDispose`.
 
 ## Instant Hotkey Toggle & Retained Webview Context (`F4`)
 
 In earlier versions, pressing the toggle hotkey (`F4`) to close Thumbview called `activePanel.dispose()`. This completely destroyed the webview panel, forcing a full repository rescan (`scanRepository()`) and line tokenization phase when reopening in large codebases.
 
-In 0.3.1, pressing `F4` while Thumbview is active restores split layout (if maximized) and switches focus to the most recent editor tab (`workbench.action.openPreviousRecentlyUsedEditorInGroup`). Because the panel was created with `retainContextWhenHidden: true`, keeping the WebviewPanel alive in the background preserves its DOM canvas, line cache, and search index in memory. Pressing `F4` again instantly reveals the background panel with 0ms delay and zero scanning overhead. Closing the tab manually (`×` or `Ctrl+W`) disposes the panel as normal.
+In 0.3.1, pressing `F4` while Thumbview is active exits fullscreen (see "Fullscreen Mode via Zen Mode") and switches focus to the most recent editor tab (`workbench.action.openPreviousRecentlyUsedEditorInGroup`). Because the panel was created with `retainContextWhenHidden: true`, keeping the WebviewPanel alive in the background preserves its DOM canvas, line cache, and search index in memory. Pressing `F4` again instantly reveals the background panel with 0ms delay and zero scanning overhead. Closing the tab manually (`×` or `Ctrl+W`) disposes the panel as normal.
 
 ## Configurable Subfolder Card Threshold (`thumbview.minCellWidth` & `thumbview.minCellHeight`)
 

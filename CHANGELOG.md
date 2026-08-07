@@ -5,6 +5,18 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-07
+
+### Changed
+- **Always-Fullscreen Thumbview via Zen Mode**: Opening Thumbview now takes over the whole workbench — Zen Mode hides sidebars, panel/terminal, and auxiliary bar, and split editor groups are maximized — instead of only maximizing the editor group. Zen Mode natively snapshots and restores the exact prior layout on exit (extensions cannot read workbench visibility state, so VS Code must do the snapshotting). `zenMode.centerLayout` and `zenMode.fullScreen` are temporarily forced off so the grid uses the full window, with original values backed up to workspaceState and restored on exit or next activation after a crash.
+
+### Fixed
+- **Slow, Multi-Step Fullscreen Transitions**: Zen Mode and editor-group maximize now fire concurrently (one visual step instead of two sequential resizes), fullscreen is entered *before* the Thumbview panel is created or revealed so it renders at full size immediately, and opening a file from the grid overlaps the layout exit with the file's disk read — no more "switch tab → resize → zen" crawl in either direction.
+- **Fullscreen Only Working Every Fourth Toggle / Phantom Split Groups**: All layout operations are now serialized through a promise queue with synchronously-set state flags. Previously, concurrent `enterFullscreen()` calls from the command path and `onDidChangeViewState` both passed the `fullscreenActive` check before either set it, stacking blind `toggleMaximizeEditorGroup` calls that cancelled each other or left splits stuck hidden.
+- **Stray Split Groups When Opening Files from the Grid**: `jump` and `switchTab` now exit fullscreen before opening the document, so editors never open into a maximized group and force VS Code to spawn a side group that didn't exist before.
+- **Split Widths Drifting Every Toggle**: `toggleMaximizeEditorGroup` acts on the *active* editor group, but it was fired at moments when different groups were active (maximize on the code group before `reveal()`, unmaximize on Thumbview's group), skewing split widths each cycle instead of restoring them. Maximize now runs only after the Thumbview panel is active (`maximizeThumbviewGroup()`), and unmaximize re-reveals the panel first if needed, so both toggles always land on Thumbview's group.
+- **Zen Mode Inverted (Code in Zen, Thumbview Not)**: The `onDidChangeViewState` handler exited fullscreen on any deactivation, but zen/maximize layout churn makes the panel's `active` flag flicker transiently — queuing an `exitFullscreen()` behind every `enterFullscreen()` and putting the whole cycle one toggle out of phase. The handler now exits only when the panel is actually hidden (`visible === false`), and ignores all view-state events while a layout op is in flight (plus a 300ms grace window).
+
 ## [0.3.9] - 2026-08-06
 
 ### Added
