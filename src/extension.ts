@@ -118,6 +118,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
+    let directoryTreeView: vscode.TreeView<any> | undefined;
+    let initialTabGroupCount = 1;
 
     // Reads the user setting fresh each call (rather than caching) so a config change
     // picked up by the onDidChangeConfiguration listener below is always honored.
@@ -362,6 +364,7 @@ export async function activate(context: vscode.ExtensionContext) {
         centerLayout: boolean | undefined;
         fullScreen: boolean | undefined;
         hideActivityBar: boolean | undefined;
+        hideLineNumbers: boolean | undefined;
         showTabs: string | undefined;
     }
 
@@ -376,6 +379,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (config.inspect<boolean>("zenMode.centerLayout")?.workspaceValue !== undefined ||
             config.inspect<boolean>("zenMode.fullScreen")?.workspaceValue !== undefined ||
             config.inspect<boolean>("zenMode.hideActivityBar")?.workspaceValue !== undefined ||
+            config.inspect<boolean>("zenMode.hideLineNumbers")?.workspaceValue !== undefined ||
             config.inspect<string>("zenMode.showTabs")?.workspaceValue !== undefined) {
             return;
         }
@@ -383,12 +387,14 @@ export async function activate(context: vscode.ExtensionContext) {
             centerLayout: config.get<boolean>("zenMode.centerLayout"),
             fullScreen: config.get<boolean>("zenMode.fullScreen"),
             hideActivityBar: config.get<boolean>("zenMode.hideActivityBar"),
+            hideLineNumbers: config.get<boolean>("zenMode.hideLineNumbers"),
             showTabs: config.get<string>("zenMode.showTabs")
         };
         await context.workspaceState.update(ZEN_SETTINGS_KEY, backup);
         await config.update("zenMode.centerLayout", false, vscode.ConfigurationTarget.Global);
         await config.update("zenMode.fullScreen", false, vscode.ConfigurationTarget.Global);
         await config.update("zenMode.hideActivityBar", false, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.hideLineNumbers", false, vscode.ConfigurationTarget.Global);
         await config.update("zenMode.showTabs", "none", vscode.ConfigurationTarget.Global);
     };
 
@@ -402,6 +408,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await config.update("zenMode.centerLayout", backup.centerLayout, vscode.ConfigurationTarget.Global);
         await config.update("zenMode.fullScreen", backup.fullScreen, vscode.ConfigurationTarget.Global);
         await config.update("zenMode.hideActivityBar", backup.hideActivityBar, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.hideLineNumbers", backup.hideLineNumbers, vscode.ConfigurationTarget.Global);
         await config.update("zenMode.showTabs", backup.showTabs, vscode.ConfigurationTarget.Global);
     };
 
@@ -414,6 +421,7 @@ export async function activate(context: vscode.ExtensionContext) {
         config.update("zenMode.centerLayout", leftoverBackup.centerLayout, vscode.ConfigurationTarget.Global);
         config.update("zenMode.fullScreen", leftoverBackup.fullScreen, vscode.ConfigurationTarget.Global);
         config.update("zenMode.hideActivityBar", leftoverBackup.hideActivityBar, vscode.ConfigurationTarget.Global);
+        config.update("zenMode.hideLineNumbers", leftoverBackup.hideLineNumbers, vscode.ConfigurationTarget.Global);
         config.update("zenMode.showTabs", leftoverBackup.showTabs, vscode.ConfigurationTarget.Global);
         context.workspaceState.update(ZEN_SETTINGS_KEY, undefined);
         vscode.commands.executeCommand("workbench.action.toggleZenMode");
@@ -455,7 +463,8 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
         }
         try {
-            if (vscode.window.tabGroups.all.length > 1) {
+            initialTabGroupCount = vscode.window.tabGroups.all.length;
+            if (initialTabGroupCount > 1) {
                 groupMaximizedByUs = true;
                 await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
             }
@@ -915,6 +924,11 @@ export async function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 if (e.webviewPanel.visible && e.webviewPanel.active) {
+                    if (fullscreenActive && vscode.window.tabGroups.all.length > initialTabGroupCount) {
+                        // User dragged the tab into a new split, breaking zen mode layout. Close gracefully.
+                        panel.dispose();
+                        return;
+                    }
                     const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
                     panel.webview.postMessage({
                         command: "activeFile",
@@ -982,7 +996,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(setSpanningGridDisposable);
 
     const directoryProvider = new DirectoryTreeDataProvider(context);
-    const directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
+    directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
         treeDataProvider: directoryProvider
     });
     context.subscriptions.push(directoryTreeView);

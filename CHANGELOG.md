@@ -5,6 +5,17 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-07
+
+### Added
+- **README Catchphrases**: Added a couple fun catchphrases to the README.md to help explain the value proposition.
+
+### Fixed
+- **Line Numbers Disappearing**: Forced `zenMode.hideLineNumbers` to `false` during Thumbview to prevent VS Code from hiding them in editor windows upon exiting zen mode.
+- **Tab Dragging Splitting Guard**: Added layout protection that automatically closes Thumbview if its tab is dragged into a new split while in fullscreen mode, preventing the zen mode layout from breaking.
+- **Manual Zen Mode Inversion**: Added tree-view visibility detection to ensure Thumbview doesn't accidentally exit an existing manual zen mode session when initialized.
+- **Zen Mode Layout Inversion and Visible Tabs**: Removed a buggy visibility check that incorrectly inverted manual zen mode sessions and sometimes caused tabs to remain visible when opening Thumbview.
+
 ## [0.4.0] - 2026-08-07
 
 ### Changed
