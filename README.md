@@ -1,6 +1,8 @@
 # Thumbview
 
-A 2D, syntax-highlighted minimap grid of your entire VS Code workspace. See every file at once, search across all of them instantly, and jump to any line in one click.
+> Because life's too short to thumb-wrestle with the VS Code sidebar.
+
+A 2D, syntax-highlighted minimap grid of your entire VS Code workspace. Keep a thumb on your whole codebase without opening 80 tabs. See every file at once, search across all of them instantly, and jump to any line in one click.
 
 ## Setup
 

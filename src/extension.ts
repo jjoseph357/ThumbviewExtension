@@ -118,6 +118,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
+    let directoryTreeView: vscode.TreeView<any> | undefined;
+    let initialTabGroupCount = 1;
 
     // Reads the user setting fresh each call (rather than caching) so a config change
     // picked up by the onDidChangeConfiguration listener below is always honored.
@@ -348,27 +350,151 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
-    let isThumbviewMaximized = false;
+    // Fullscreen = Zen Mode (natively hides AND restores sidebar/panel/aux bar —
+    // extensions cannot read workbench visibility state, so VS Code must do the
+    // snapshotting) + a symmetric editor-group maximize for splits. All layout ops
+    // are serialized through layoutQueue; concurrent enter/exit calls from the
+    // command path and onDidChangeViewState must not stack blind toggles.
+    let fullscreenActive = false;
+    let groupMaximizedByUs = false;
+    let layoutQueue: Promise<void> = Promise.resolve();
 
-    const maximizeThumbview = async () => {
-        if (vscode.window.tabGroups.all.length > 1) {
-            try {
-                await vscode.commands.executeCommand("workbench.action.minimizeOtherEditors");
-                isThumbviewMaximized = true;
-            } catch {
-            }
+    const ZEN_SETTINGS_KEY = "thumbview.zenSettingsBackup";
+    interface ZenSettingsBackup {
+        centerLayout: boolean | undefined;
+        fullScreen: boolean | undefined;
+        hideActivityBar: boolean | undefined;
+        hideLineNumbers: boolean | undefined;
+        showTabs: string | undefined;
+    }
+
+    // Zen Mode defaults squeeze the editor into a narrow centered column, take
+    // over the OS screen, hide the activity bar, and show tabs; force all to
+    // Thumbview-preferred values while we own the layout. The sidebar is re-shown
+    // after entering zen (no setting prevents zen from hiding it). Original values
+    // are backed up to workspaceState so a reload mid-fullscreen can still restore
+    // them on the next activation.
+    const forceZenSettings = async (): Promise<void> => {
+        const config = vscode.workspace.getConfiguration();
+        if (config.inspect<boolean>("zenMode.centerLayout")?.workspaceValue !== undefined ||
+            config.inspect<boolean>("zenMode.fullScreen")?.workspaceValue !== undefined ||
+            config.inspect<boolean>("zenMode.hideActivityBar")?.workspaceValue !== undefined ||
+            config.inspect<boolean>("zenMode.hideLineNumbers")?.workspaceValue !== undefined ||
+            config.inspect<string>("zenMode.showTabs")?.workspaceValue !== undefined) {
+            return;
         }
+        const backup: ZenSettingsBackup = {
+            centerLayout: config.get<boolean>("zenMode.centerLayout"),
+            fullScreen: config.get<boolean>("zenMode.fullScreen"),
+            hideActivityBar: config.get<boolean>("zenMode.hideActivityBar"),
+            hideLineNumbers: config.get<boolean>("zenMode.hideLineNumbers"),
+            showTabs: config.get<string>("zenMode.showTabs")
+        };
+        await context.workspaceState.update(ZEN_SETTINGS_KEY, backup);
+        await config.update("zenMode.centerLayout", false, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.fullScreen", false, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.hideActivityBar", false, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.hideLineNumbers", false, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.showTabs", "none", vscode.ConfigurationTarget.Global);
     };
 
-    const restoreSplitLayout = async () => {
-        if (isThumbviewMaximized) {
-            isThumbviewMaximized = false;
-            try {
-                await vscode.commands.executeCommand("workbench.action.evenEditorWidths");
-            } catch {
-            }
+    const restoreZenSettings = async (): Promise<void> => {
+        const backup = context.workspaceState.get<ZenSettingsBackup>(ZEN_SETTINGS_KEY);
+        if (!backup) {
+            return;
         }
+        await context.workspaceState.update(ZEN_SETTINGS_KEY, undefined);
+        const config = vscode.workspace.getConfiguration();
+        await config.update("zenMode.centerLayout", backup.centerLayout, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.fullScreen", backup.fullScreen, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.hideActivityBar", backup.hideActivityBar, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.hideLineNumbers", backup.hideLineNumbers, vscode.ConfigurationTarget.Global);
+        await config.update("zenMode.showTabs", backup.showTabs, vscode.ConfigurationTarget.Global);
     };
+
+    // A leftover backup means the previous session died while fullscreen — put the
+    // user's zenMode settings back before doing anything else, and exit the
+    // stale zen mode that VS Code persisted across the session boundary.
+    const leftoverBackup = context.workspaceState.get<ZenSettingsBackup>(ZEN_SETTINGS_KEY);
+    if (leftoverBackup) {
+        const config = vscode.workspace.getConfiguration();
+        config.update("zenMode.centerLayout", leftoverBackup.centerLayout, vscode.ConfigurationTarget.Global);
+        config.update("zenMode.fullScreen", leftoverBackup.fullScreen, vscode.ConfigurationTarget.Global);
+        config.update("zenMode.hideActivityBar", leftoverBackup.hideActivityBar, vscode.ConfigurationTarget.Global);
+        config.update("zenMode.hideLineNumbers", leftoverBackup.hideLineNumbers, vscode.ConfigurationTarget.Global);
+        config.update("zenMode.showTabs", leftoverBackup.showTabs, vscode.ConfigurationTarget.Global);
+        context.workspaceState.update(ZEN_SETTINGS_KEY, undefined);
+        vscode.commands.executeCommand("workbench.action.toggleZenMode");
+    }
+
+    // Count of layout ops in flight (plus a short grace window). Zen/maximize
+    // shuffles focus, making the panel's active flag flicker — onDidChangeViewState
+    // must ignore that churn or it queues exits that undo the enter.
+    let layoutOpsInFlight = 0;
+
+    const runLayoutOp = (op: () => Promise<void>): Promise<void> => {
+        layoutOpsInFlight++;
+        layoutQueue = layoutQueue.then(op, op).then(() => {
+            setTimeout(() => { layoutOpsInFlight--; }, 300);
+        });
+        return layoutQueue;
+    };
+
+    const enterFullscreen = (): Promise<void> => runLayoutOp(async () => {
+        if (fullscreenActive) {
+            return;
+        }
+        fullscreenActive = true;
+        try {
+            await forceZenSettings();
+            await vscode.commands.executeCommand("workbench.action.toggleZenMode");
+            // Zen mode always hides the sidebar (no setting prevents it) — toggle
+            // it back on so the user can access ignore/directory tree views
+            await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
+        } catch {
+        }
+    });
+
+    // toggleMaximizeEditorGroup acts on the ACTIVE editor group, so it must only
+    // ever fire while the thumbview's group is active — toggling with different
+    // groups active on enter vs. exit skews split widths instead of restoring them.
+    const maximizeThumbviewGroup = (): Promise<void> => runLayoutOp(async () => {
+        if (!fullscreenActive || groupMaximizedByUs) {
+            return;
+        }
+        try {
+            initialTabGroupCount = vscode.window.tabGroups.all.length;
+            if (initialTabGroupCount > 1) {
+                groupMaximizedByUs = true;
+                await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
+            }
+        } catch {
+        }
+    });
+
+    const exitFullscreen = (): Promise<void> => runLayoutOp(async () => {
+        if (!fullscreenActive) {
+            return;
+        }
+        fullscreenActive = false;
+        try {
+            if (groupMaximizedByUs) {
+                groupMaximizedByUs = false;
+                // Bring the thumbview forward first so the unmaximize lands on
+                // the same group the maximize was applied to
+                if (activePanel && !activePanel.active) {
+                    try {
+                        activePanel.reveal(vscode.ViewColumn.Active, false);
+                    } catch {
+                    }
+                }
+                await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
+            }
+            await vscode.commands.executeCommand("workbench.action.toggleZenMode");
+            await restoreZenSettings();
+        } catch {
+        }
+    });
 
     const disposable = vscode.commands.registerCommand(
         "thumbview.open",
@@ -377,7 +503,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
             if (activePanel) {
                 if (activePanel.active) {
-                    restoreSplitLayout();
+                    // Hide webview content so the user doesn't see the zen exit
+                    // resize on Thumbview, then exit zen before switching tabs
+                    // (switching tabs first causes a race where zen exit can
+                    // re-activate the Thumbview tab via layout restoration)
+                    activePanel.webview.postMessage({ command: "hideForTransition" });
+                    await exitFullscreen();
                     if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
                         try {
                             await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
@@ -393,15 +524,21 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                     return;
                 } else {
+                    await enterFullscreen();
                     activePanel.reveal(vscode.ViewColumn.Active, false);
                     sendOpenState();
                     activePanel.webview.postMessage({ command: "focusWebview" });
-                    maximizeThumbview();
+                    await maximizeThumbviewGroup();
+                    activePanel.webview.postMessage({ command: "showAfterTransition" });
                     return;
                 }
             }
 
             vscode.window.showInformationMessage("Thumbview opening...");
+
+            // Enter fullscreen BEFORE creating the panel so Thumbview renders
+            // directly at full size instead of snapping through layouts
+            await enterFullscreen();
 
             const panel = vscode.window.createWebviewPanel(
                 "thumbview",
@@ -418,7 +555,7 @@ export async function activate(context: vscode.ExtensionContext) {
             );
 
             activePanel = panel;
-            await maximizeThumbview();
+            await maximizeThumbviewGroup();
 
             panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
 
@@ -438,8 +575,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "switchTab") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
-                        // PDFs: skip openTextDocument (which shows raw binary metadata)
-                        // and go straight to vscode.open so the user's PDF viewer extension handles it
+                        // Hide webview content, exit zen, THEN switch tab — exiting
+                        // zen first avoids the race where zen layout restoration
+                        // re-activates the Thumbview tab after showTextDocument
+                        panel.webview.postMessage({ command: "hideForTransition" });
+                        await exitFullscreen();
                         if (msg.uri.toLowerCase().endsWith(".pdf")) {
                             await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
                         } else {
@@ -458,6 +598,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "jump") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
+                        // Hide webview content, exit zen, THEN switch tab (same
+                        // rationale as switchTab — see comment there)
+                        panel.webview.postMessage({ command: "hideForTransition" });
+                        await exitFullscreen();
                         let doc: vscode.TextDocument;
                         try {
                             doc = await vscode.workspace.openTextDocument(uri);
@@ -479,7 +623,6 @@ export async function activate(context: vscode.ExtensionContext) {
                             new vscode.Range(pos, pos),
                             vscode.TextEditorRevealType.InCenter
                         );
-
                         // Flash all matching lines pink in the document and fade away.
                         // The regex/whole-word pattern-building here is duplicated in
                         // media/overview.js's rebuildSearchState — keep both in sync.
@@ -775,17 +918,33 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             });
 
-            panel.onDidChangeViewState(e => {
+            panel.onDidChangeViewState(async e => {
+                // Ignore the active-flag flicker caused by our own zen/maximize ops
+                if (layoutOpsInFlight > 0) {
+                    return;
+                }
                 if (e.webviewPanel.visible && e.webviewPanel.active) {
+                    if (fullscreenActive && vscode.window.tabGroups.all.length > initialTabGroupCount) {
+                        // User dragged the tab into a new split, breaking zen mode layout. Close gracefully.
+                        panel.dispose();
+                        return;
+                    }
                     const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
                     panel.webview.postMessage({
                         command: "activeFile",
                         uri: activeUri
                     });
                     sendOpenState();
-                    maximizeThumbview();
-                } else if (!e.webviewPanel.active) {
-                    restoreSplitLayout();
+                    // Hide webview content while zen/maximize transitions run so
+                    // the user doesn't see Thumbview at the wrong size
+                    panel.webview.postMessage({ command: "hideForTransition" });
+                    await enterFullscreen();
+                    await maximizeThumbviewGroup();
+                    panel.webview.postMessage({ command: "showAfterTransition" });
+                } else if (!e.webviewPanel.visible) {
+                    // Exit only when Thumbview is truly backgrounded — an inactive
+                    // but still visible panel is just a focus shift, not leaving
+                    exitFullscreen();
                 }
             });
 
@@ -793,7 +952,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (activePanel === panel) {
                     activePanel = undefined;
                 }
-                await restoreSplitLayout();
+                await exitFullscreen();
             });
         }
     );
@@ -837,7 +996,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(setSpanningGridDisposable);
 
     const directoryProvider = new DirectoryTreeDataProvider(context);
-    const directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
+    directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
         treeDataProvider: directoryProvider
     });
     context.subscriptions.push(directoryTreeView);
