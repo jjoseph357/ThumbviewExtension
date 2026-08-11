@@ -129,6 +129,12 @@ export async function activate(context: vscode.ExtensionContext) {
         return mode === "uniform_grid" ? "uniform_grid" : "spanning_grid";
     };
 
+    const getDragReorderMode = (): "swap" | "shift" => {
+        const config = vscode.workspace.getConfiguration("thumbview");
+        const mode = config.get<string>("dragReorderMode");
+        return mode === "swap" ? "swap" : "shift";
+    };
+
     // Four progressively-fainter pink decoration types used to fade a "jump" search
     // match out over ~2s (see the "jump" message handler below) instead of an abrupt
     // on/off highlight — VS Code decorations don't support CSS transitions, so the
@@ -221,6 +227,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
             const order = fileOrder.getOrder();
             const mode = getLayoutMode();
+            const dragReorderMode = getDragReorderMode();
             const config = vscode.workspace.getConfiguration("thumbview");
             const renderMediaThumbnails = config.get<boolean>("renderMediaThumbnails") ?? true;
             const minCellWidth = config.get<number>("minCellWidth") ?? 32;
@@ -265,6 +272,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 panel.webview.postMessage({
                     command: "data",
                     mode: "spanning_grid",
+                    dragReorderMode,
                     renderMediaThumbnails,
                     minCellWidth,
                     minCellHeight,
@@ -275,7 +283,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         rows: Math.max(1, spMaxRow + 1)
                     }
                 });
-            } else {
+            } else { // uniform grid (default)
                 const layout = buildStableGrid(order.length);
 
                 const filesWithSlots = filesWithWebviewUris.map(file => ({
@@ -284,6 +292,10 @@ export async function activate(context: vscode.ExtensionContext) {
                     nCells: 1,
                     slots: [layout.slots[order.indexOf(file.id)]]
                 }));
+                
+                // sort so that array order reflects the user's custom order because subfolder views
+                // build their grids by iterating this array directly (ignoring slot position)
+                filesWithSlots.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 
                 let ugMaxCol = 0, ugMaxRow = 0;
                 for (const f of filesWithSlots) {
@@ -296,6 +308,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 panel.webview.postMessage({
                     command: "data",
                     mode: "uniform_grid",
+                    dragReorderMode,
                     renderMediaThumbnails,
                     minCellWidth,
                     minCellHeight,
@@ -916,6 +929,38 @@ export async function activate(context: vscode.ExtensionContext) {
                         vscode.window.showErrorMessage(`Failed to open containing folder: ${err?.message ?? String(err)}`);
                     }
                 }
+
+                if (msg.command === "reorderFile") {
+                    const mode = getDragReorderMode();
+
+                    try {
+                        if (mode === "shift") {
+                            fileOrder.move(msg.sourceId, msg.targetId);
+                        } else { // mode === "swap" by default
+                            fileOrder.swap(msg.sourceId, msg.targetId);
+                        }
+                        
+                        if (activePanel) {
+                            updateLayoutFromCache(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to reorder file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "setDragReorderMode") {
+                    try {
+                        const config = vscode.workspace.getConfiguration("thumbview");
+                        await config.update("dragReorderMode", msg.mode, vscode.ConfigurationTarget.Global);
+                        const modeStr = !msg.mode ? "" : msg.mode.charAt(0).toUpperCase() + msg.mode.slice(1);
+                        vscode.window.showInformationMessage(`Thumbview Drag Reorder Mode set to ${modeStr}.`);
+                        if (activePanel) {
+                            updateLayoutFromCache(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to set drag reorder mode: ${err?.message ?? String(err)}`);
+                    }
+                }
             });
 
             panel.onDidChangeViewState(async e => {
@@ -994,6 +1039,26 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     });
     context.subscriptions.push(setSpanningGridDisposable);
+
+    const setSwapReorderModeDisposable = vscode.commands.registerCommand("thumbview.setSwapReorderMode", async () => {
+        const config = vscode.workspace.getConfiguration("thumbview");
+        await config.update("dragReorderMode", "swap", vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage("Thumbview Drag Reorder Mode set to Swap.");
+        if (activePanel) {
+            updateLayoutFromCache(activePanel);
+        }
+    });
+    context.subscriptions.push(setSwapReorderModeDisposable);
+
+    const setShiftReorderModeDisposable = vscode.commands.registerCommand("thumbview.setShiftReorderMode", async () => {
+        const config = vscode.workspace.getConfiguration("thumbview");
+        await config.update("dragReorderMode", "shift", vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage("Thumbview Drag Reorder Mode set to Shift.");
+        if (activePanel) {
+            updateLayoutFromCache(activePanel);
+        }   
+    });
+    context.subscriptions.push(setShiftReorderModeDisposable);
 
     const directoryProvider = new DirectoryTreeDataProvider(context);
     directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
@@ -1674,6 +1739,7 @@ function getHtml(
                 <div class="modal-section-title">Setup &amp; Settings</div>
                 <ul class="modal-guide-list">
                     <li><b>Layout</b>: <code>spanning_grid</code> (tall files span cells) or <code>uniform_grid</code>.</li>
+                    <li><b>Drag-to-Reorder</b>: <code>swap</code> to swap the location of two files (if possible) or <code>shift</code> to shift all remaining thumbnails in column order.</li>
                     <li><b>Small tiles</b> group into folder cards (<code>minCellWidth/Height</code>); use breadcrumbs to go back.</li>
                     <li><b>Auto-Ignore</b>: folders with &gt;30 files are hidden (<code>thumbview.autoIgnoreThreshold</code>).</li>
                 </ul>

@@ -46,4 +46,18 @@ export class PersistentFileOrder {
         return this.seenFiles;
     }
 
+    swap(idA: string, idB: string) {
+        const i = this.seenFiles.indexOf(idA), j = this.seenFiles.indexOf(idB);
+        if (i === -1 || j === -1 || i === j) return;
+        [this.seenFiles[i], this.seenFiles[j]] = [this.seenFiles[j], this.seenFiles[i]];
+    }
+
+    move(idToMove: string, idTarget: string | null) {
+        const from = this.seenFiles.indexOf(idToMove);
+        if (from === -1 || idToMove === idTarget) return;
+        this.seenFiles.splice(from, 1);
+        const to = idTarget === null ? -1 : this.seenFiles.indexOf(idTarget);
+        // if idTarget is null, place the tile at the end of the array
+        this.seenFiles.splice(to === -1 ? this.seenFiles.length : to, 0, idToMove);
+    }
 }

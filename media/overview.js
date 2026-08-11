@@ -21,6 +21,15 @@ let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
 
+const DRAG_THRESHOLD = 5; // px
+let dragCandidate = null;
+let draggingFile = null;
+let dragGrabOffset = null;
+let dragPos = null;
+let dragRafId = null;
+let dragTargetFile = null;
+let justDragged = false;
+
 let matchCase = false;
 let matchWholeWord = false;
 let useRegex = false;
@@ -28,6 +37,58 @@ let rawSearchQuery = "";   // original case, trimmed
 let searchQuery = "";      // lowercase, trimmed. kept for the existing fast substring path
 let searchRegex = null;    // compiled only when useRegex or matchWholeWord is on
 let searchInvalid = false; // true when the user's regex fails to compile
+
+/** Converts a mouse event's screen coordinates to coordinates local to the canvas element. */
+function getCanvasPos(event) {
+    const rect = canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    return { px, py };
+}
+
+function findNearestFile(px, py) {
+    const filteredFiles = getFilteredFiles();
+    let closestDist = Infinity;
+    let closestFile = null;
+
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (c.x <= px && px <= c.x + c.w &&
+            c.y <= py && py <= c.y + c.h) {
+            return file;
+        }
+
+        const dist = Math.hypot(px - (c.x + c.w / 2), py - (c.y + c.h / 2));
+        if (dist < closestDist) {
+            closestDist = dist;
+            closestFile = file;
+        }
+    }
+
+    return closestFile;
+}
+
+
+function updateDragTarget() {
+    if (!draggingFile || !dragPos) return;
+
+    dragTargetFile = findNearestFile(dragPos.px, dragPos.py);
+}
+
+function clearDragState() {
+    dragCandidate = null;
+    draggingFile = null;
+    dragGrabOffset = null;
+    dragPos = null;
+    dragTargetFile = null;
+
+    if (dragRafId !== null) {
+        cancelAnimationFrame(dragRafId);
+        dragRafId = null;
+    }
+}
 
 let searchDebounceTimer = null;
 function triggerSearchRender(immediate = false) {
@@ -1563,13 +1624,12 @@ function render() {
 // that file's parent folder), then the minimap body (jumps the real editor to the
 // clicked line — see extension.ts's "jump" handler).
 canvas.addEventListener("click", event => {
+    if (justDragged) { justDragged = false; return; }
     if (!data) {
         return;
     }
 
-    const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const { px, py } = getCanvasPos(event);
 
     // Check folder card clicks first (subfolder card mode)
     if (data._folderCards) {
@@ -1677,9 +1737,7 @@ canvas.addEventListener("auxclick", event => {
         return;
     }
 
-    const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const { px, py } = getCanvasPos(event);
 
     const filteredFiles = getFilteredFiles();
     for (const file of filteredFiles) {
@@ -1708,7 +1766,10 @@ let isCtrlDown = false;
 let hoverRafId = null;
 
 window.addEventListener("keydown", event => {
-    if (event.key === "Control") {
+    if (event.key === "Escape") {
+        clearDragState();
+        render();
+    } else if (event.key === "Control") {
         isCtrlDown = true;
         if (lastMousePos) {
             updateHoverTooltip(lastMousePos.x, lastMousePos.y);
@@ -1779,9 +1840,7 @@ function updateHoverTooltip(clientX, clientY) {
         return;
     }
 
-    const rect = canvas.getBoundingClientRect();
-    const px = clientX - rect.left;
-    const py = clientY - rect.top;
+    const { px, py } = getCanvasPos(event);
 
     const filteredFiles = getFilteredFiles();
     let hoveredFile = null;
@@ -1952,14 +2011,72 @@ function checkWindowFocus() {
 }
 
 window.addEventListener("mouseenter", checkWindowFocus);
+
+canvas.addEventListener("mousedown", event => {
+    if (!data) return;
+    const { px, py } = getCanvasPos(event);
+
+    // ignore folder cards as drag candidates for now
+    if (data._folderCards) {
+        for (const card of data._folderCards) {
+            if (card.x <= px && px <= card.x + card.w &&
+                card.y <= py && py <= card.y + card.h) {
+                    return;
+                }
+        }
+    }
+
+    // find the held file and set it as the drag candidate
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (c.x <= px && px <= c.x + c.w &&
+            c.y <= py && py <= c.y + c.h) {
+                dragCandidate = { file, startX: px, startY: py };
+                dragGrabOffset = { x: px - c.x, y: py - c.y }
+                break;
+            }
+    }
+});
+
 canvas.addEventListener("mousemove", event => {
     checkWindowFocus();
+
     lastMousePos = { x: event.clientX, y: event.clientY };
+
+    dragPos = getCanvasPos(event);
+    if (dragCandidate && !draggingFile) {
+        const dx = Math.abs(dragCandidate.startX - dragPos.px);
+        const dy = Math.abs(dragCandidate.startY - dragPos.py);
+
+        // only start dragging if cursor has moved more than the threshold
+        if ( dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
+            draggingFile = dragCandidate.file;
+            dragCandidate = null;
+        }
+    }
+    if (draggingFile) {
+        if (!dragRafId) {
+            dragRafId = requestAnimationFrame(() => {
+                dragRafId = null;
+                updateDragTarget();
+                render();
+            });
+        }
+
+        isCtrlDown = false;
+        tooltip.style.display = "none";
+        return;
+    }
+
     if (!event.ctrlKey) {
         isCtrlDown = false;
         tooltip.style.display = "none";
         return;
     }
+
     if (!hoverRafId) {
         hoverRafId = requestAnimationFrame(() => {
             hoverRafId = null;
@@ -1968,7 +2085,37 @@ canvas.addEventListener("mousemove", event => {
     }
 });
 
+canvas.addEventListener("mouseup", event => {
+    if (!draggingFile) {
+        dragCandidate = null; // clean up
+        return;
+    }
+
+    dragPos = getCanvasPos(event);
+    updateDragTarget();
+
+    // dropping on/near the last tile means "append to the end"
+    const filteredFiles = getFilteredFiles();
+    if (dragTargetFile === filteredFiles[filteredFiles.length - 1]) {
+        dragTargetFile = null; 
+    }
+
+    vscode.postMessage({
+        command: "reorderFile",
+        sourceId: draggingFile.id,
+        targetId: dragTargetFile ? dragTargetFile.id : null
+    });
+
+    justDragged = true;
+    clearDragState();
+    render();
+});
+
 canvas.addEventListener("mouseleave", () => {
+    if (draggingFile) {
+        clearDragState();
+        render();
+    }
     isCtrlDown = false;
     tooltip.style.display = "none";
 });
@@ -1994,11 +2141,16 @@ document.addEventListener("click", event => {
 
 canvas.addEventListener("contextmenu", event => {
     event.preventDefault();
+
+    if (draggingFile) {
+        clearDragState();
+        render();
+        return;
+    }
+
     if (!data) return;
 
-    const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const { px, py } = getCanvasPos(event);
 
     const filteredFiles = getFilteredFiles();
     let targetFile = null;

@@ -27,7 +27,20 @@
             "Spanning Grid (tall files span multiple vertical cells)"
           ],
           "default": "spanning_grid",
-          "description": "Select the layout algorithm mode for displaying codebase minimaps."
+          "description": "Select the layout algorithm mode for displaying codebase thumbnails."
+        },
+        "thumbview.dragReorderMode": {
+          "type": "string",
+          "enum": [
+            "swap",
+            "shift"
+          ],
+          "enumDescriptions": [
+            "If thumbnails are the same shape, they will simply swap positions.",
+            "Thumbnails will be shifted down and to the left in column order, reflowing the layout."
+          ],
+          "default": "swap",
+          "description": "Select the drag-and-drop behaviour when manually re-arranging thumbnails."
         },
         "thumbview.autoIgnoreThreshold": {
           "type": "number",
@@ -54,59 +67,67 @@
     "commands": [
       {
         "command": "thumbview.open",
-        "title": "Thumbview",
+        "title": "Thumbview: Open Thumbview",
         "icon": "media/icon.svg"
       },
       {
         "command": "thumbview.reflow",
-        "title": "Reflow Layout"
+        "title": "Thumbview: Reflow Layout"
       },
       {
         "command": "thumbview.setUniformGrid",
-        "title": "Use Uniform Grid Layout"
+        "title": "Thumbview: Use Uniform Grid Layout"
       },
       {
         "command": "thumbview.setSpanningGrid",
-        "title": "Use Spanning Grid Layout"
+        "title": "Thumbview: Use Spanning Grid Layout"
+      },
+      {
+        "command": "thumbview.setSwapReorderMode",
+        "title": "Thumbview: Use Swap Reorder Mode"
+      },
+      {
+        "command": "thumbview.setShiftReorderMode",
+        "title": "Thumbview: Use Shift Reorder Mode"
       },
       {
         "command": "thumbview.addIgnorePattern",
-        "title": "Add Ignore Pattern...",
+        "title": "Thumbview: Add Ignore Pattern...",
         "icon": "$(add)"
       },
       {
         "command": "thumbview.removeIgnorePattern",
-        "title": "Unignore Directory",
+        "title": "Thumbview: Unignore Directory",
         "icon": "$(eye)"
       },
       {
         "command": "thumbview.focusFolder",
-        "title": "Focus Directory in Thumbview",
+        "title": "Thumbview: Focus Directory in Thumbview",
         "icon": "$(eye)"
       },
       {
         "command": "thumbview.showAllFolders",
-        "title": "Show All Workspace Directories",
+        "title": "Thumbview: Show All Workspace Directories",
         "icon": "$(clear-all)"
       },
       {
         "command": "thumbview.ignoreDirectory",
-        "title": "Ignore Directory",
+        "title": "Thumbview: Ignore Directory",
         "icon": "$(eye-closed)"
       },
       {
         "command": "thumbview.deleteDirectory",
-        "title": "Delete Directory",
+        "title": "Thumbview: Delete Directory",
         "icon": "$(trash)"
       },
       {
         "command": "thumbview.deleteIgnoredItem",
-        "title": "Delete",
+        "title": "Thumbview: Delete Ignored Item",
         "icon": "$(trash)"
       },
       {
         "command": "thumbview.revealInExplorer",
-        "title": "Reveal in Explorer",
+        "title": "Thumbview: Reveal File in Explorer",
         "icon": "$(folder-opened)"
       }
     ],
@@ -216,7 +237,7 @@
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "Spatially stable code minimap.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
+        "contents": "Spatially stable code minimap.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\n[Swap Reorder](command:thumbview.setSwapReorderMode)\n\n[Shift Reorder](command:thumbview.setShiftReorderMode)\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
       }
     ]
   },
