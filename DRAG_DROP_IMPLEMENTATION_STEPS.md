@@ -243,6 +243,12 @@ built:
 
 ### 3. Known bugs (not yet fixed)
 
+> **Superseded 2026-08-12:** both bugs below, plus the two tabled feature requests in
+> section 4, are rolled into a single unified fix in
+> [DRAG_DROP_GRID_TARGETING_PLAN.md](DRAG_DROP_GRID_TARGETING_PLAN.md) — an internal
+> grid-slot representation that resolves drops to a slot (occupied or empty) instead of
+> "the nearest file." Kept here for the original bug trace/root-cause detail.
+
 1. **Dragging onto or past the last file does nothing — confirmed root cause in swap
    mode.** `mouseup` converts a resolved target of "the last file" into
    `targetId: null` to mean "append to the end." In **swap mode**,
@@ -281,6 +287,10 @@ built:
    silently.
 
 ### 4. Tabled feature requests (not scheduled)
+
+> **Superseded 2026-08-12:** see the note at the top of section 3 — both items below
+> are folded into [DRAG_DROP_GRID_TARGETING_PLAN.md](DRAG_DROP_GRID_TARGETING_PLAN.md)
+> along with the two known bugs. Kept here for the original architecture trace.
 
 Two behavior changes the user asked for, explicitly tabled for a future pass. Recorded
 here so they aren't lost, with enough of the current architecture traced out —
