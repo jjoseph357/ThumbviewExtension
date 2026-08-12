@@ -1,5 +1,5 @@
 // spanning_grid layout mode: unlike layout.ts's one-cell-per-file uniform grid, a tall
-// file here occupies several vertically-stacked cells so its minimap gets proportionally
+// file here occupies several vertically-stacked cells so its thumbnail gets proportionally
 // more room. Per-file cell counts and the derived row count are persisted by the caller
 // (extension.ts) so they don't recompute — and reshuffle the grid — on every rescan.
 import { RepoFile } from "./scanner";

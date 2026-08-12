@@ -5,6 +5,15 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Drag-and-Drop Tile Reordering**: Click-drag any file tile onto another to reorder the grid. Two modes — Swap (the dragged tile and the drop target trade places) and Shift (the dragged tile inserts at the drop target, everything between shifts over by one) — toggle via the Command Palette or new sidebar links under a "Drag-and-Drop Settings" section. Works in both Uniform and Spanning grid layouts, persists across rescans and reloads, and shows a live ghost of the dragged tile plus an outline on the current drop target while dragging.
+- **General Hover Outline**: Hovering any tile now outlines it in the same accent color as the drag ghost/drop-target outline, for a consistent "you're interacting with this tile" affordance.
+
+### Fixed
+- **Active-File Border Never Showing**: The purple "this file is open in the editor" tile border relied on VS Code's live active-editor state, which is never set to a real file while Thumbview itself has focus — so it never actually worked. Now tracks the last real editor that had focus before Thumbview took over.
+
 ## [0.4.1] - 2026-08-07
 
 ### Added

@@ -21,6 +21,19 @@ let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
 
+const CLOSE_BUTTON_PADDING = 4; // px
+
+const DRAG_THRESHOLD = 5; // px
+let candidateFile = null;
+let candidateFolder = null;
+let draggingFile = null;
+let dragGrabOffset = null;
+let cursorPos = null;
+let dragRafId = null;
+let dragTargetFile = null;
+
+let hoveredFile = null;
+
 let matchCase = false;
 let matchWholeWord = false;
 let useRegex = false;
@@ -29,7 +42,81 @@ let searchQuery = "";      // lowercase, trimmed. kept for the existing fast sub
 let searchRegex = null;    // compiled only when useRegex or matchWholeWord is on
 let searchInvalid = false; // true when the user's regex fails to compile
 
+/** Converts a mouse event's screen coordinates to coordinates local to the canvas element. */
+function getCanvasPos(event) {
+    const rect = canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    return { px, py };
+}
+
+/** True if (px, py) falls inside rect's {x, y, w, h} box, optionally grown by pad px on each side. */
+function pointInRect(rect, px, py, pad = 0) {
+    return rect.x - pad <= px && px <= rect.x + rect.w + pad &&
+           rect.y - pad <= py && py <= rect.y + rect.h + pad;
+}
+
+/** Returns the file containing px, py if it exists, else returns null. */
+function findFileAt(px, py) {
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (pointInRect(c, px, py)) {
+            return file;
+        }
+    }
+    return null;
+}
+
+/** Finds the file whose _cell contains (px, py); if none does, falls back to the file with the closest cell-center distance (used for drag drop-target resolution). */
+function findNearestFile(px, py) {
+    const filteredFiles = getFilteredFiles();
+    let closestDist = Infinity;
+    let closestFile = null;
+
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (pointInRect(c, px, py)) {
+            return file;
+        }
+
+        const dist = Math.hypot(px - (c.x + c.w / 2), py - (c.y + c.h / 2));
+        if (dist < closestDist) {
+            closestDist = dist;
+            closestFile = file;
+        }
+    }
+
+    return closestFile;
+}
+
+
+/** Recomputes dragTargetFile from the live drag cursor position (cursorPos); called on every throttled mousemove while dragging. */
+function updateDragTarget() {
+    if (!draggingFile || !cursorPos) return;
+
+    dragTargetFile = findNearestFile(cursorPos.px, cursorPos.py);
+}
+
+/** Resets all drag-related module state and cancels any pending drag animation frame. */
+function clearDragState() {
+    candidateFile = null;
+    draggingFile = null;
+    dragGrabOffset = null;
+    dragTargetFile = null;
+
+    if (dragRafId !== null) {
+        cancelAnimationFrame(dragRafId);
+        dragRafId = null;
+    }
+}
+
 let searchDebounceTimer = null;
+/** Re-renders after a search input change, debounced by 80ms unless immediate rendering is requested. */
 function triggerSearchRender(immediate = false) {
     if (searchDebounceTimer) {
         clearTimeout(searchDebounceTimer);
@@ -44,10 +131,12 @@ function triggerSearchRender(immediate = false) {
     }
 }
 
+/** Escapes regex-special characters so a literal string can be embedded in a RegExp pattern. */
 function escapeRegExp(s) {
     return s.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
 }
 
+/** Builds a line's syntax-highlighted HTML from its tokens, optionally wrapping search-match substrings in a highlight span. */
 function buildLineHtml(tokens, highlightRegex) {
     let html = "";
     for (const tok of tokens) {
@@ -73,8 +162,11 @@ function buildLineHtml(tokens, highlightRegex) {
 }
 
 
-// The regex/whole-word pattern-building here is duplicated in extension.ts's "jump" message
-// handler (used to flash matching lines in the document after a jump) — keep both in sync.
+/**
+ * Recompiles searchQuery/searchRegex from the raw input text and the match-case/whole-word/regex toggles.
+ * The regex/whole-word pattern-building here is duplicated in extension.ts's "jump" message handler
+ * (used to flash matching lines in the document after a jump) — keep both in sync.
+ */
 function rebuildSearchState(value) {
     rawSearchQuery = value.trim();
     searchQuery = rawSearchQuery.toLowerCase();
@@ -94,7 +186,11 @@ function rebuildSearchState(value) {
     searchInputFld.classList.toggle('regex-error', searchInvalid);
 }
 
-// original/lowered pair so plain substring search stays on the fast pre-lowercased path
+/**
+ * True if the current search query matches this line, checked against whichever of the
+ * original/lowered pair the active toggles call for. Kept as a pair so plain substring
+ * search stays on the fast pre-lowercased path.
+ */
 function textMatches(original, lowered) {
     if (!rawSearchQuery || searchInvalid) return false;
     if (searchRegex) return searchRegex.test(original);
@@ -131,6 +227,7 @@ useRegexBtn.addEventListener("click", () => toggleRegex());
 
 clearSearchBtn.addEventListener("click", () => clearSearch());
 
+/** Toggles case-sensitive search and re-renders with the new search state. */
 function toggleMatchCase() {
     matchCase = !matchCase;
     rebuildSearchState(searchInputFld.value);
@@ -138,6 +235,7 @@ function toggleMatchCase() {
     triggerSearchRender(true);
 }
 
+/** Toggles regex search mode and re-renders with the new search state. */
 function toggleRegex() {
     useRegex = !useRegex;
     rebuildSearchState(searchInputFld.value);
@@ -145,6 +243,7 @@ function toggleRegex() {
     triggerSearchRender(true);
 }
 
+/** Toggles whole-word search matching and re-renders with the new search state. */
 function toggleMatchWord() {
     matchWholeWord = !matchWholeWord;
     rebuildSearchState(searchInputFld.value);
@@ -152,6 +251,7 @@ function toggleMatchWord() {
     triggerSearchRender(true);
 }
 
+/** Clears the search input/state and re-renders. */
 function clearSearch() {
     searchInputFld.value = "";
     rebuildSearchState("");
@@ -216,6 +316,7 @@ window.addEventListener("keydown", event => {
 
 let resizeRafId = null;
 
+/** Resyncs the canvas backing-store size to the (DPR-scaled) window size and re-renders; retries via rAF while the tab is hidden/backgrounded. */
 function resize() {
     if (window.innerWidth < 100 || window.innerHeight < 100) {
         // Webview tab is hidden or backgrounded; ignore transient collapsed dimensions
@@ -362,14 +463,17 @@ window.addEventListener("message", event => {
         }
         // Force hover re-evaluation to update tooltip with newly fetched lines
         if (lastMousePos) {
-            updateHoverTooltip(lastMousePos.x, lastMousePos.y);
+            updateHoverTooltip();
         }
     }
 });
 
-// Duplicate of layout.ts's buildStableGrid (uniform_grid mode only) — used here only
-// to lay out a focused folder's subset of files (see render() below), since the host
-// never computes a layout for that subset. Keep in sync with layout.ts by hand.
+/**
+ * Packs nCells items into a near-16:9 grid, returning {rows, cols, slots}. Duplicate of
+ * layout.ts's buildStableGrid (uniform_grid mode only) — used here only to lay out a
+ * focused folder's subset of files (see render() below), since the host never computes
+ * a layout for that subset. Keep in sync with layout.ts by hand.
+ */
 function buildStableGrid(nCells, targetAspect = 1.777) {
     let rows = 1;
     let cols = Math.max(2, Math.ceil(rows * targetAspect));
@@ -412,6 +516,7 @@ function buildStableGrid(nCells, targetAspect = 1.777) {
     };
 }
 
+/** Rebuilds the breadcrumb trail DOM for the current focusedFolder, each segment clickable to refocus. */
 function updateBreadcrumbs() {
     const container = document.getElementById("breadcrumbs");
     if (!focusedFolder) {
@@ -467,13 +572,16 @@ function updateBreadcrumbs() {
     }
 }
 
+/** Returns the file list to render/hit-test against (currently unfiltered — all of data.files). */
 function getFilteredFiles() {
     if (!data) return [];
     return data.files;
 }
 
-// Groups files by their immediate child subfolder relative to basePath.
-// Returns { folders: [{name, path, fileCount, files}], rootFiles: [file...] }
+/**
+ * Groups files by their immediate child subfolder relative to basePath.
+ * Returns { folders: [{name, path, fileCount, files}], rootFiles: [file...] }.
+ */
 function getSubfolderGroups(files, basePath) {
     const groups = {};
     const rootFiles = [];
@@ -498,6 +606,7 @@ function getSubfolderGroups(files, basePath) {
     return { folders, rootFiles };
 }
 
+/** Paints the loading/error status screen shown before repository data has arrived. */
 function drawStatus() {
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     ctx.fillStyle = "#18181c";
@@ -512,6 +621,7 @@ function drawStatus() {
     ctx.fillText("Waiting for repository data...", 24, 100);
 }
 
+/** Infers a coarse language id from a file path's extension, used to pick a tokenizer. */
 function detectLang(path) {
     if (!path) return 'plaintext';
     const filename = path.split('/').pop().toLowerCase();
@@ -530,7 +640,7 @@ function detectLang(path) {
     return 'js';
 }
 
-// Dispatches to one of five small regex-based tokenizers by detected language.
+/** Dispatches to one of five small regex-based tokenizers by detected language. */
 function tokenizeLine(text, lang) {
     if (!text) return [];
     if (lang === 'plaintext') return [{ text, category: 'normal', isKey: false }];
@@ -541,6 +651,7 @@ function tokenizeLine(text, lang) {
     return tokenizeJS(text, lang);
 }
 
+/** Tokenizes a line of JSON into colorable spans, marking string tokens that precede a ':' as object keys. */
 function tokenizeJSON(text) {
     const tokens = [];
     const regex = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}()\[\]:,]|\s+|.)/g;
@@ -574,6 +685,7 @@ function tokenizeJSON(text) {
     return tokens;
 }
 
+/** Tokenizes a line of Markdown into colorable spans (headings, quotes, lists, emphasis, code, links). */
 function tokenizeMarkdown(text) {
     const tokens = [];
 
@@ -634,10 +746,12 @@ function tokenizeMarkdown(text) {
     return tokens.length > 0 ? tokens : [{ text, category: "normal", isKey: false }];
 }
 
-// Single regex splits the line into candidate tokens (comments/strings/@rules/colors/
-// units/identifiers/punctuation), then each token is classified by shape. A trailing
-// pass re-labels a value/selector token as "function" if it's immediately followed by
-// "(" (e.g. `rgba(`, `calc(`).
+/**
+ * Tokenizes a line of CSS into colorable spans. A single regex splits the line into
+ * candidate tokens (comments/strings/@rules/colors/units/identifiers/punctuation), then
+ * each token is classified by shape. A trailing pass re-labels a value/selector token as
+ * "function" if it's immediately followed by "(" (e.g. `rgba(`, `calc(`).
+ */
 function tokenizeCSS(text) {
     const tokens = [];
     const regex = /(\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|@[\w-]+|!important|#[\da-fA-F]{3,8}\b|\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|vmin|vmax|s|ms|deg|fr|ch|ex|pt)?|:[\w-]+|\.[\w-]+|[\w-]+|[{}();:,>+~\[\]*=]|\s+|.)/g;
@@ -676,8 +790,11 @@ function tokenizeCSS(text) {
     return tokens;
 }
 
-// Same single-regex-then-classify approach as tokenizeCSS, tracking a small bit of
-// state (inTag/seenTagName) across matches to tell a tag name from an attribute name.
+/**
+ * Tokenizes a line of HTML into colorable spans. Same single-regex-then-classify approach
+ * as tokenizeCSS, tracking a small bit of state (inTag/seenTagName) across matches to tell
+ * a tag name from an attribute name.
+ */
 function tokenizeHTML(text) {
     const tokens = [];
     const regex = /(<!--[\s\S]*?-->|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|<\/?|\/?>|=|&\w+;|[\w:-]+|\s+|.)/g;
@@ -713,11 +830,13 @@ function tokenizeHTML(text) {
     return tokens;
 }
 
-// Covers JS/TS/most C-like languages plus a separate Python keyword list, picked by a
-// single shared regex per lang (JSON reuses the JS path). After the initial token pass,
-// a second loop re-labels tokens using their neighbors: identifier-after-"." becomes
-// "property", identifier-before-"(" becomes "function", and (JSON only) a string
-// immediately before ":" becomes a highlighted key.
+/**
+ * Tokenizes a line of JS/TS/most C-like languages (plus a separate Python keyword list)
+ * into colorable spans, picked by a single shared regex per lang (JSON reuses this path).
+ * After the initial token pass, a second loop re-labels tokens using their neighbors:
+ * identifier-after-"." becomes "property", identifier-before-"(" becomes "function", and
+ * (JSON only) a string immediately before ":" becomes a highlighted key.
+ */
 function tokenizeJS(text, lang) {
     const isJson = lang === 'json';
     const isPy = lang === 'python';
@@ -787,11 +906,13 @@ function tokenizeJS(text, lang) {
     return tokens;
 }
 
+/** Reads a VS Code theme CSS variable off body, falling back to fallbackHex if unset. */
 function getThemeColor(varName, fallbackHex) {
     const val = getComputedStyle(document.body).getPropertyValue(varName).trim();
     return val || fallbackHex;
 }
 
+/** Maps a token's syntax category (and isKey flag) to the hex color used to draw it. */
 function colorForCategory(category, isKey) {
     if (isKey) return "#9cdcfe";
 
@@ -832,13 +953,9 @@ function colorForCategory(category, isKey) {
     }
 }
 
-// Draws one file's minimap into the given cell rect, one row per source line scaled to
-// fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
-// render real glyphs, so each token is drawn as a flat colored rect proportional to its
-let imageCache = {};
+let imageCache = {}; // keyed by media URI; cleared on repository data updates (see "data" handler)
 
-// character length instead ("useText" branch below) — this is what makes small tiles
-// still readable as a rough shape/density map rather than unreadable tiny text.
+/** Draws img into the x,y,w,h rect scaled to fit while preserving its aspect ratio (object-fit: contain), background-filling the rest. */
 function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
     const imgWidth = img.naturalWidth || img.width;
     const imgHeight = img.naturalHeight || img.height;
@@ -868,7 +985,15 @@ function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
 }
 
-function drawMinimap(file, x, y, w, h) {
+// MARK: drawThumbnail
+/**
+ * Draws one file's thumbnail into the given cell rect, one row per source line scaled to
+ * fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
+ * render real glyphs, so each token is drawn as a flat colored rect proportional to its
+ * character length instead ("useText" branch below) — this is what makes small tiles
+ * still readable as a rough shape/density map rather than unreadable tiny text.
+ */
+function drawThumbnail(file, x, y, w, h) {
     ctx.save();
     ctx.beginPath();
     ctx.rect(x, y, w, h);
@@ -1069,11 +1194,11 @@ function drawMinimap(file, x, y, w, h) {
         const startRatio = startL / totalRealLines;
         const endRatio = (endL + 1) / totalRealLines;
 
-        const minimapY = y;
-        const minimapH = h;
+        const thumbnailY = y;
+        const thumbnailH = h;
 
-        const bandY = minimapY + startRatio * minimapH;
-        const bandH = Math.max((endRatio - startRatio) * minimapH, 4.0);
+        const bandY = thumbnailY + startRatio * thumbnailH;
+        const bandH = Math.max((endRatio - startRatio) * thumbnailH, 4.0);
 
         // Store bounding rect of view band on cell for click detection
         file._cell._viewBand = {
@@ -1086,7 +1211,7 @@ function drawMinimap(file, x, y, w, h) {
             x,
             bandY,
             w,
-            Math.min(bandH, minimapY + minimapH - bandY)
+            Math.min(bandH, thumbnailY + thumbnailH - bandY)
         );
     } else if (file._cell) {
         delete file._cell._viewBand;
@@ -1095,10 +1220,12 @@ function drawMinimap(file, x, y, w, h) {
     ctx.restore();
 }
 
-// Truncates a file path to fit maxWidth, preferring to drop leading directory segments
-// ("...dir/file.ts") over the filename itself. Binary-searches the cut point in the
-// directory portion rather than trimming a character at a time, since ctx.measureText
-// is comparatively expensive and this runs once per visible card per frame.
+/**
+ * Truncates a file path to fit maxWidth, preferring to drop leading directory segments
+ * ("...dir/file.ts") over the filename itself. Binary-searches the cut point in the
+ * directory portion rather than trimming a character at a time, since ctx.measureText
+ * is comparatively expensive and this runs once per visible card per frame.
+ */
 function fitPathText(path, maxWidth) {
     if (ctx.measureText(path).width <= maxWidth) {
         return path;
@@ -1132,6 +1259,106 @@ function fitPathText(path, maxWidth) {
     return bestFit;
 }
 
+// MARK: drawBorder
+const TILE_PADDING = 4;       // inset from cell edge to the card's fill/stroke rect
+const TILE_DIM_ALPHA = 0.15;  // opacity applied when a tile is unfocused or being dragged
+const TILE_BACKGROUND = "#1e1e24";
+const TILE_LABEL_FONT = "10px system-ui, sans-serif";
+const TILE_LABEL_OFFSET_X = 10;
+const TILE_LABEL_OFFSET_Y = 18;
+const TILE_LABEL_WIDTH_MARGIN = 36; // reserved space so the label doesn't run under the close button
+const TILE_LABEL_COLOR = { searchMatch: "#ec4899", active: "#ffffff", normal: "#a0a0a5" };
+const TILE_THUMBNAIL_OFFSET_X = 10;
+const TILE_THUMBNAIL_OFFSET_Y = 24;
+const TILE_THUMBNAIL_WIDTH_MARGIN = 20;
+const TILE_THUMBNAIL_HEIGHT_MARGIN = 34;
+
+const BORDER_STYLES = {
+    searchMatch: { color: "#ec4899", width: 2.5 }, // Pink
+    active:      { color: "#a855f7", width: 2.5 }, // Purple
+    open:        { color: "#f97316", width: 1.8 }, // Orange
+    dragging:        { color: "#648fff", width: 1.8 }, // Light Blue
+    default:     { color: "rgba(255, 255, 255, 0.08)", width: 1 }
+};
+
+/** Strokes a tile's priority-ordered border: search match > active > open > default. */
+function drawTileBorder(x, y, w, h, isSearchMatch, isActive, isOpen) {
+    const style = isSearchMatch ? BORDER_STYLES.searchMatch
+        : isActive ? BORDER_STYLES.active
+        : isOpen ? BORDER_STYLES.open
+        : BORDER_STYLES.default;
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.width;
+    ctx.strokeRect(x + TILE_PADDING, y + TILE_PADDING, w - TILE_PADDING * 2, h - TILE_PADDING * 2);
+}
+
+// MARK: drawCloseBtn
+const CLOSE_BTN_SIZE = 12;
+const CLOSE_BTN_MARGIN_RIGHT = 20;
+const CLOSE_BTN_MARGIN_TOP = 10;
+const CLOSE_BTN_GLYPH_Y_OFFSET = 8;
+const CLOSE_BTN_FONT = "12px system-ui, sans-serif";
+const CLOSE_BTN_COLOR = "#707075";
+
+/** Draws the '×' close button on an open tile and stores its hit-box on file._closeBtn. */
+function drawCloseBtn(file, x, y, w) {
+    const closeBtnX = x + w - CLOSE_BTN_MARGIN_RIGHT;
+    const closeBtnY = y + CLOSE_BTN_MARGIN_TOP;
+    file._closeBtn = { x: closeBtnX, y: closeBtnY, w: CLOSE_BTN_SIZE, h: CLOSE_BTN_SIZE };
+
+    ctx.fillStyle = CLOSE_BTN_COLOR;
+    ctx.font = CLOSE_BTN_FONT;
+    ctx.fillText("×", closeBtnX, closeBtnY + CLOSE_BTN_GLYPH_Y_OFFSET);
+}
+
+// MARK: drawFileTile
+/** Draws one file's tile: background, border, label, close button, and thumbnail; stores file._cell for hit-testing and dims the tile if dimForFocus is set or it's the file currently being dragged. */
+function drawFileTile(file, x, y, w, h, dimForFocus) {
+    file._cell = { x, y, w, h };
+
+    const queryActive = !!searchQuery && !searchInvalid;
+    const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+    const isActive = file.uri === activeFileUri;
+    const isOpen = openFilesSet.has(file.uri);
+
+    ctx.save();
+    if (dimForFocus || file === draggingFile) {
+        ctx.globalAlpha = TILE_DIM_ALPHA;
+    }
+
+    ctx.fillStyle = TILE_BACKGROUND;
+    ctx.fillRect(x + TILE_PADDING, y + TILE_PADDING, w - TILE_PADDING * 2, h - TILE_PADDING * 2);
+
+    drawTileBorder(x, y, w, h, isSearchMatch, isActive, isOpen);
+
+    ctx.fillStyle = isSearchMatch ? TILE_LABEL_COLOR.searchMatch : (isActive ? TILE_LABEL_COLOR.active : TILE_LABEL_COLOR.normal);
+    ctx.font = TILE_LABEL_FONT;
+
+    if (file._lastCellW !== w || !file._fittedLabel) {
+        file._lastCellW = w;
+        file._fittedLabel = fitPathText(file.path, w - TILE_LABEL_WIDTH_MARGIN);
+    }
+    ctx.fillText(file._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
+
+    if (isOpen) {
+        drawCloseBtn(file, x, y, w);
+    } else {
+        delete file._closeBtn;
+    }
+
+    drawThumbnail(
+        file,
+        x + TILE_THUMBNAIL_OFFSET_X,
+        y + TILE_THUMBNAIL_OFFSET_Y,
+        Math.max(1, w - TILE_THUMBNAIL_WIDTH_MARGIN),
+        Math.max(1, h - TILE_THUMBNAIL_HEIGHT_MARGIN)
+    );
+
+    ctx.restore();
+}
+
+// MARK: render
+/** Redraws the whole canvas for the current data/filter/search/drag state — clears, computes grid geometry, then dispatches to one of three per-tile rendering modes (subfolder cards, folder drill-down, or the normal root grid). */
 function render() {
     if (!ctx) {
         return;
@@ -1336,52 +1563,8 @@ function render() {
 
             const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
             const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
-            const isActive = file.uri === activeFileUri;
-            const isOpen = openFilesSet.has(file.uri);
 
-            ctx.save();
-            if (!isFolderMatch || (queryActive && !isSearchMatch)) ctx.globalAlpha = 0.15;
-
-            ctx.fillStyle = "#1e1e24";
-            ctx.fillRect(x + 4, y + 4, localCellW - 8, fileH - 8);
-
-            if (queryActive && isSearchMatch) {
-                ctx.strokeStyle = "#ec4899";
-                ctx.lineWidth = 2.5;
-            } else if (isActive) {
-                ctx.strokeStyle = "#a855f7";
-                ctx.lineWidth = 2.5;
-            } else if (isOpen) {
-                ctx.strokeStyle = "#f97316";
-                ctx.lineWidth = 1.8;
-            } else {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-                ctx.lineWidth = 1;
-            }
-            ctx.strokeRect(x + 4, y + 4, localCellW - 8, fileH - 8);
-
-            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
-            ctx.font = "10px system-ui, sans-serif";
-
-            if (file._lastCellW !== localCellW || !file._fittedLabel) {
-                file._lastCellW = localCellW;
-                file._fittedLabel = fitPathText(file.path, localCellW - 36);
-            }
-            ctx.fillText(file._fittedLabel, x + 10, y + 18);
-
-            if (isOpen) {
-                const closeBtnX = x + localCellW - 20;
-                const closeBtnY = y + 10;
-                file._closeBtn = { x: closeBtnX, y: closeBtnY, w: 12, h: 12 };
-                ctx.fillStyle = "#707075";
-                ctx.font = "12px system-ui, sans-serif";
-                ctx.fillText("×", closeBtnX, closeBtnY + 8);
-            } else {
-                delete file._closeBtn;
-            }
-
-            drawMinimap(file, x + 10, y + 24, Math.max(1, localCellW - 20), Math.max(1, fileH - 34));
-            ctx.restore();
+            drawFileTile(file, x, y, localCellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
         }
     } else if (shouldOpenFolder) {
         // Directory drill-down mode — render all files in focusedFolder as a Thumbview grid
@@ -1407,55 +1590,11 @@ function render() {
             if (y + fileH < -50 || y > rectH + 50) continue;
 
             const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
-            const isActive = file.uri === activeFileUri;
-            const isOpen = openFilesSet.has(file.uri);
 
-            ctx.save();
-            if (queryActive && !isSearchMatch) ctx.globalAlpha = 0.15;
-
-            ctx.fillStyle = "#1e1e24";
-            ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            if (queryActive && isSearchMatch) {
-                ctx.strokeStyle = "#ec4899";
-                ctx.lineWidth = 2.5;
-            } else if (isActive) {
-                ctx.strokeStyle = "#a855f7";
-                ctx.lineWidth = 2.5;
-            } else if (isOpen) {
-                ctx.strokeStyle = "#f97316";
-                ctx.lineWidth = 1.8;
-            } else {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-                ctx.lineWidth = 1;
-            }
-            ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
-            ctx.font = "10px system-ui, sans-serif";
-
-            if (file._lastCellW !== cellW || !file._fittedLabel) {
-                file._lastCellW = cellW;
-                file._fittedLabel = fitPathText(file.path, cellW - 36);
-            }
-            ctx.fillText(file._fittedLabel, x + 10, y + 18);
-
-            if (isOpen) {
-                const closeBtnX = x + cellW - 20;
-                const closeBtnY = y + 10;
-                file._closeBtn = { x: closeBtnX, y: closeBtnY, w: 12, h: 12 };
-                ctx.fillStyle = "#707075";
-                ctx.font = "12px system-ui, sans-serif";
-                ctx.fillText("×", closeBtnX, closeBtnY + 8);
-            } else {
-                delete file._closeBtn;
-            }
-
-            drawMinimap(file, x + 10, y + 24, Math.max(1, cellW - 20), Math.max(1, fileH - 34));
-            ctx.restore();
+            drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
         }
     } else {
-        // Normal file tile mode — cells are large enough to render individual minimaps
+        // Normal file tile mode — cells are large enough to render individual thumbnails
         const slots = filteredFiles.map(f => f.slot);
         const cellW = rootCellW;
         const cellH = rootCellH;
@@ -1488,188 +1627,33 @@ function render() {
             const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
             const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
 
-            const isActive = file.uri === activeFileUri;
-            const isOpen = openFilesSet.has(file.uri);
+            drawFileTile(file, x, y, cellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
+        }
+    }
 
-            ctx.save();
+    if (draggingFile) {
+        // ghost for currently-dragged file
+        const x = cursorPos.px - dragGrabOffset.x;
+        const y = cursorPos.py - dragGrabOffset.y;
+        const style = BORDER_STYLES.dragging;
+        ctx.strokeStyle = style.color;
+        ctx.lineWidth = style.width;
+        ctx.strokeRect(x, y, draggingFile._cell.w, draggingFile._cell.h);
+        ctx.fillStyle = style.color;
+        ctx.font = TILE_LABEL_FONT;
+        ctx.fillText(draggingFile._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
 
-            if (!isFolderMatch || (queryActive && !isSearchMatch)) {
-                ctx.globalAlpha = 0.15;
-            }
-
-            // Draw card background
-            ctx.fillStyle = "#1e1e24";
-            ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            // Border rendering prioritisation
-            if (queryActive && isSearchMatch) {
-                ctx.strokeStyle = "#ec4899"; // Pink search match border
-                ctx.lineWidth = 2.5;
-            } else if (isActive) {
-                ctx.strokeStyle = "#a855f7"; // Purple active border
-                ctx.lineWidth = 2.5;
-            } else if (isOpen) {
-                ctx.strokeStyle = "#f97316"; // Orange open tab border
-                ctx.lineWidth = 1.8;
-            } else {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-                ctx.lineWidth = 1;
-            }
-            ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
-            ctx.font = "10px system-ui, sans-serif";
-
-            if (file._lastCellW !== cellW || !file._fittedLabel) {
-                file._lastCellW = cellW;
-                file._fittedLabel = fitPathText(file.path, cellW - 36);
-            }
-
-            ctx.fillText(file._fittedLabel, x + 10, y + 18);
-
-            // Draw close '×' button if tab is open
-            if (isOpen) {
-                const closeBtnX = x + cellW - 20;
-                const closeBtnY = y + 10;
-                file._closeBtn = {
-                    x: closeBtnX,
-                    y: closeBtnY,
-                    w: 12,
-                    h: 12
-                };
-
-                ctx.fillStyle = "#707075";
-                ctx.font = "12px system-ui, sans-serif";
-                ctx.fillText("×", closeBtnX, closeBtnY + 8);
-            } else {
-                delete file._closeBtn;
-            }
-
-            drawMinimap(
-                file,
-                x + 10,
-                y + 24,
-                Math.max(1, cellW - 20),
-                Math.max(1, fileH - 34)
-            );
-
-            ctx.restore();
+        // drop-target outline
+        if (dragTargetFile) {
+            ctx.strokeRect(
+                dragTargetFile._cell.x,
+                dragTargetFile._cell.y,
+                dragTargetFile._cell.w,
+                dragTargetFile._cell.h
+            );  
         }
     }
 }
-
-// Three click targets within a card, checked most-specific first: the '×' close
-// button (only present when the tab is open), the header/path-label strip (isolates
-// that file's parent folder), then the minimap body (jumps the real editor to the
-// clicked line — see extension.ts's "jump" handler).
-canvas.addEventListener("click", event => {
-    if (!data) {
-        return;
-    }
-
-    const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
-
-    // Check folder card clicks first (subfolder card mode)
-    if (data._folderCards) {
-        for (const card of data._folderCards) {
-            if (px >= card.x && px <= card.x + card.w && py >= card.y && py <= card.y + card.h) {
-                focusedFolder = card.folderPath;
-                updateBreadcrumbs();
-                render();
-                return;
-            }
-        }
-    }
-
-    const filteredFiles = getFilteredFiles();
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
-
-        if (
-            px >= c.x &&
-            px <= c.x + c.w &&
-            py >= c.y &&
-            py <= c.y + c.h
-        ) {
-            // Check if click was on close '×' button
-            const cb = file._closeBtn;
-            if (cb && px >= cb.x - 4 && px <= cb.x + cb.w + 4 && py >= cb.y - 4 && py <= cb.y + cb.h + 4) {
-                openFiles = openFiles.filter(u => u !== file.uri);
-                render();
-                vscode.postMessage({
-                    command: "close",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            const headerHeight = 24;
-            const isHeaderClick = py < c.y + headerHeight;
-
-            if (isHeaderClick) {
-                // Clicked the file path/folder header bar -> isolate parent folder (or root files if in root folder)
-                const lastSlash = file.path.lastIndexOf('/');
-                if (lastSlash !== -1) {
-                    const folder = file.path.substring(0, lastSlash + 1);
-                    focusedFolder = folder;
-                } else {
-                    focusedFolder = "(root files)/";
-                }
-                updateBreadcrumbs();
-                render();
-                return;
-            }
-
-            // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
-            if (c._viewBand && py >= c._viewBand.y && py <= c._viewBand.y + c._viewBand.h) {
-                vscode.postMessage({
-                    command: "switchTab",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            // Clicked inside media card body -> switch/open tab without line jump
-            if (file.isImage || file.isPdf) {
-                vscode.postMessage({
-                    command: "switchTab",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            // Clicked inside the minimap body -> jump to line in document
-            const minimapTop = c.y + headerHeight;
-            const minimapHeight = Math.max(1, c.h - 34);
-
-            const relativeY = Math.max(
-                0,
-                Math.min(1, (py - minimapTop) / minimapHeight)
-            );
-
-            const line = Math.floor(relativeY * file.lineCount);
-
-            // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
-            // above so extension.ts's "jump" handler can flash the same lines this webview
-            // considers matches — see its handler for the mirrored pattern-building logic.
-            vscode.postMessage({
-                command: "jump",
-                uri: file.uri,
-                line,
-                query: rawSearchQuery,
-                matchCase,
-                matchWholeWord,
-                useRegex,
-                searchInvalid
-            });
-
-            return;
-        }
-    }
-});
 
 // Middle-click (auxclick) to close tab
 canvas.addEventListener("auxclick", event => {
@@ -1677,9 +1661,7 @@ canvas.addEventListener("auxclick", event => {
         return;
     }
 
-    const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const { px, py } = getCanvasPos(event);
 
     const filteredFiles = getFilteredFiles();
     for (const file of filteredFiles) {
@@ -1708,10 +1690,13 @@ let isCtrlDown = false;
 let hoverRafId = null;
 
 window.addEventListener("keydown", event => {
-    if (event.key === "Control") {
+    if (event.key === "Escape") {
+        clearDragState();
+        render();
+    } else if (event.key === "Control") {
         isCtrlDown = true;
         if (lastMousePos) {
-            updateHoverTooltip(lastMousePos.x, lastMousePos.y);
+            updateHoverTooltip();
         }
     } else if (event.ctrlKey) {
         isCtrlDown = false;
@@ -1731,6 +1716,7 @@ window.addEventListener("blur", () => {
     tooltip.style.display = "none";
 });
 
+/** Estimates the pixel width the CTRL-hover tooltip needs to fit the widest line/path in file, so its width doesn't jitter as the cursor moves between lines. */
 function getFileWidestLineWidth(file) {
     if (!file) return 300;
     let maxCharLen = 0;
@@ -1771,7 +1757,9 @@ function getFileWidestLineWidth(file) {
     return Math.max(220, Math.min(maxAllowedWidth, maxLineWidth));
 }
 
-function updateHoverTooltip(clientX, clientY) {
+// MARK: updateHoverTooltip
+/** Finds the file/line under the cursor during a CTRL-hover and rebuilds the tooltip's HTML, size, and position to show it. */
+function updateHoverTooltip() {
     if (!data) return;
 
     if (!isCtrlDown) {
@@ -1779,36 +1767,13 @@ function updateHoverTooltip(clientX, clientY) {
         return;
     }
 
-    const rect = canvas.getBoundingClientRect();
-    const px = clientX - rect.left;
-    const py = clientY - rect.top;
-
-    const filteredFiles = getFilteredFiles();
-    let hoveredFile = null;
     let hoveredLineIdx = -1;
-
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
-
-        if (
-            px >= c.x &&
-            px <= c.x + c.w &&
-            py >= c.y &&
-            py <= c.y + c.h
-        ) {
-            hoveredFile = file;
-            const minimapTop = c.y + 24;
-            const minimapHeight = Math.max(1, c.h - 34);
-
-            const relativeY = Math.max(
-                0,
-                Math.min(1, (py - minimapTop) / minimapHeight)
-            );
-
-            hoveredLineIdx = Math.floor(relativeY * file.lineCount);
-            break;
-        }
+    if (hoveredFile && hoveredFile._cell) {
+        const c = hoveredFile._cell;
+        const thumbnailTop = c.y + 24;
+        const thumbnailHeight = Math.max(1, c.h - 34);
+        const relativeY = Math.max(0, Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight));
+        hoveredLineIdx = Math.floor(relativeY * hoveredFile.lineCount);
     }
 
     if (hoveredFile && (hoveredFile.isImage || hoveredFile.isPdf)) {
@@ -1927,7 +1892,7 @@ function updateHoverTooltip(clientX, clientY) {
             }
         }
 
-        let ty = clientY + 16;
+        let ty = lastMousePos.y + 16;
         if (ty + tooltip.offsetHeight > window.innerHeight - 16) {
             ty = window.innerHeight - tooltip.offsetHeight - 16;
         }
@@ -1941,6 +1906,7 @@ function updateHoverTooltip(clientX, clientY) {
 }
 
 let lastFocusRequestTime = 0;
+/** Asks the extension host to focus the webview when the window lacks OS focus, throttled to once per 500ms. */
 function checkWindowFocus() {
     if (!document.hasFocus()) {
         const now = Date.now();
@@ -1952,23 +1918,219 @@ function checkWindowFocus() {
 }
 
 window.addEventListener("mouseenter", checkWindowFocus);
+
+// MARK: mousedown
+canvas.addEventListener("mousedown", event => {
+    if (!data) return;
+    cursorPos = getCanvasPos(event);
+
+    // is mousedown on a folder
+    if (data._folderCards) {
+        for (const card of data._folderCards) {
+            if (pointInRect(card, cursorPos.px, cursorPos.py)) {
+                    candidateFolder = { card, startX: cursorPos.px, startY: cursorPos.py };
+                    return;
+                }
+        }
+    }
+
+    // is mousedown on a file
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (pointInRect(c, cursorPos.px, cursorPos.py)) {
+                candidateFile = { file, startX: cursorPos.px, startY: cursorPos.py };
+                dragGrabOffset = { x: cursorPos.px - c.x, y: cursorPos.py - c.y };
+                return;
+            }
+    }
+});
+
+// MARK: mousemove
 canvas.addEventListener("mousemove", event => {
     checkWindowFocus();
+
     lastMousePos = { x: event.clientX, y: event.clientY };
+    cursorPos = getCanvasPos(event);
+    hoveredFile = findFileAt(cursorPos.px, cursorPos.py);
+
+    if (candidateFile && !draggingFile) {
+        const dx = Math.abs(candidateFile.startX - cursorPos.px);
+        const dy = Math.abs(candidateFile.startY - cursorPos.py);
+
+        // only start dragging if cursor has moved more than the threshold
+        if ( dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
+            draggingFile = candidateFile.file;
+            candidateFile = null;
+        }
+    }
+    if (draggingFile) {
+        if (!dragRafId) {
+            dragRafId = requestAnimationFrame(() => {
+                dragRafId = null;
+                updateDragTarget();
+                render();
+            });
+        }
+
+        isCtrlDown = false;
+        tooltip.style.display = "none";
+        return;
+    }
+
     if (!event.ctrlKey) {
         isCtrlDown = false;
         tooltip.style.display = "none";
         return;
     }
+
     if (!hoverRafId) {
         hoverRafId = requestAnimationFrame(() => {
             hoverRafId = null;
-            updateHoverTooltip(event.clientX, event.clientY);
+            updateHoverTooltip();
         });
     }
 });
 
+// MARK: mouseup
+canvas.addEventListener("mouseup", event => {
+    if (!data) return;
+    cursorPos = getCanvasPos(event);
+
+    if (draggingFile) {
+        updateDragTarget();
+    
+        // dropping on/near the last tile means "append to the end"
+        const filteredFiles = getFilteredFiles();
+        if (dragTargetFile === filteredFiles[filteredFiles.length - 1]) {
+            dragTargetFile = null; 
+        }
+    
+        vscode.postMessage({
+            command: "reorderFile",
+            sourceId: draggingFile.id,
+            targetId: dragTargetFile ? dragTargetFile.id : null
+        });
+    
+        clearDragState();
+        render();
+        return;
+    }
+
+    // Check folder card clicks first (subfolder card mode)
+    if (data._folderCards && candidateFolder) {
+        for (const card of data._folderCards) {
+            if (pointInRect(card, cursorPos.px, cursorPos.py) &&
+                card.folderPath === candidateFolder.card.folderPath) {
+                    focusedFolder = card.folderPath;
+                    updateBreadcrumbs();
+                    render();
+                    return;
+                }
+        }
+    }
+
+    // Three click targets within a file card, checked most-specific first: the '×' close
+    // button (only present when the tab is open), the header/path-label strip (isolates
+    // that file's parent folder), then the thumbnail body (jumps the real editor to the
+    // clicked line — see extension.ts's "jump" handler).
+    if (!candidateFile) {
+        candidateFolder = null;
+        return;
+    }
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (pointInRect(c, cursorPos.px, cursorPos.py) && file === candidateFile.file) {
+            // Check if click was on close '×' button
+            const cb = file._closeBtn;
+            if (cb && pointInRect(cb, cursorPos.px, cursorPos.py, CLOSE_BUTTON_PADDING)) {
+                openFiles = openFiles.filter(u => u !== file.uri);
+                render();
+                vscode.postMessage({
+                    command: "close",
+                    uri: file.uri
+                });
+                return;
+            }
+
+            const headerHeight = 24;
+            const isHeaderClick = cursorPos.py < c.y + headerHeight;
+
+            if (isHeaderClick) {
+                // Clicked the file path/folder header bar -> isolate parent folder (or root files if in root folder)
+                const lastSlash = file.path.lastIndexOf('/');
+                if (lastSlash !== -1) {
+                    const folder = file.path.substring(0, lastSlash + 1);
+                    focusedFolder = folder;
+                } else {
+                    focusedFolder = "(root files)/";
+                }
+                updateBreadcrumbs();
+                render();
+                return;
+            }
+
+            // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
+            if (c._viewBand && cursorPos.py >= c._viewBand.y && cursorPos.py <= c._viewBand.y + c._viewBand.h) {
+                vscode.postMessage({
+                    command: "switchTab",
+                    uri: file.uri
+                });
+                return;
+            }
+
+            // Clicked inside media card body -> switch/open tab without line jump
+            if (file.isImage || file.isPdf) {
+                vscode.postMessage({
+                    command: "switchTab",
+                    uri: file.uri
+                });
+                return;
+            }
+
+            // Clicked inside the thumbnail body -> jump to line in document
+            const thumbnailTop = c.y + headerHeight;
+            const thumbnailHeight = Math.max(1, c.h - 34);
+
+            const relativeY = Math.max(
+                0,
+                Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight)
+            );
+
+            const line = Math.floor(relativeY * file.lineCount);
+
+            // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
+            // above so extension.ts's "jump" handler can flash the same lines this webview
+            // considers matches — see its handler for the mirrored pattern-building logic.
+            vscode.postMessage({
+                command: "jump",
+                uri: file.uri,
+                line,
+                query: rawSearchQuery,
+                matchCase,
+                matchWholeWord,
+                useRegex,
+                searchInvalid
+            });
+
+            return;
+        }
+    }
+    
+    candidateFile = null;
+    candidateFolder = null;
+});
+
 canvas.addEventListener("mouseleave", () => {
+    clearDragState();
+    hoveredFile = null;
+    cursorPos = null;
+    render();
     isCtrlDown = false;
     tooltip.style.display = "none";
 });
@@ -1980,6 +2142,7 @@ document.addEventListener("mouseleave", () => {
 
 const contextMenu = document.getElementById("context-menu");
 
+/** Hides the custom right-click context menu. */
 function hideContextMenu() {
     if (contextMenu) {
         contextMenu.style.display = "none";
@@ -1994,11 +2157,16 @@ document.addEventListener("click", event => {
 
 canvas.addEventListener("contextmenu", event => {
     event.preventDefault();
+
+    if (draggingFile) {
+        clearDragState();
+        render();
+        return;
+    }
+
     if (!data) return;
 
-    const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const { px, py } = getCanvasPos(event);
 
     const filteredFiles = getFilteredFiles();
     let targetFile = null;
@@ -2007,12 +2175,7 @@ canvas.addEventListener("contextmenu", event => {
         const c = file._cell;
         if (!c) continue;
 
-        if (
-            px >= c.x &&
-            px <= c.x + c.w &&
-            py >= c.y &&
-            py <= c.y + c.h
-        ) {
+        if (pointInRect(c, px, py)) {
             targetFile = file;
             break;
         }
