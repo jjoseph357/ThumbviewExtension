@@ -21,11 +21,14 @@ let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
 
+const CLOSE_BUTTON_PADDING = 4; // px
+
 const DRAG_THRESHOLD = 5; // px
-let dragCandidate = null;
+let candidateFile = null;
+let candidateFolder = null;
 let draggingFile = null;
 let dragGrabOffset = null;
-let dragPos = null;
+let cursorPos = null;
 let dragRafId = null;
 let dragTargetFile = null;
 let justDragged = false;
@@ -46,6 +49,13 @@ function getCanvasPos(event) {
     return { px, py };
 }
 
+/** True if (px, py) falls inside rect's {x, y, w, h} box, optionally grown by pad px on each side. */
+function pointInRect(rect, px, py, pad = 0) {
+    return rect.x - pad <= px && px <= rect.x + rect.w + pad &&
+           rect.y - pad <= py && py <= rect.y + rect.h + pad;
+}
+
+/** Finds the file whose _cell contains (px, py); if none does, falls back to the file with the closest cell-center distance (used for drag drop-target resolution). */
 function findNearestFile(px, py) {
     const filteredFiles = getFilteredFiles();
     let closestDist = Infinity;
@@ -55,8 +65,7 @@ function findNearestFile(px, py) {
         const c = file._cell;
         if (!c) continue;
 
-        if (c.x <= px && px <= c.x + c.w &&
-            c.y <= py && py <= c.y + c.h) {
+        if (pointInRect(c, px, py)) {
             return file;
         }
 
@@ -71,17 +80,19 @@ function findNearestFile(px, py) {
 }
 
 
+/** Recomputes dragTargetFile from the live drag cursor position (cursorPos); called on every throttled mousemove while dragging. */
 function updateDragTarget() {
-    if (!draggingFile || !dragPos) return;
+    if (!draggingFile || !cursorPos) return;
 
-    dragTargetFile = findNearestFile(dragPos.px, dragPos.py);
+    dragTargetFile = findNearestFile(cursorPos.px, cursorPos.py);
 }
 
+/** Resets all drag-related module state and cancels any pending drag animation frame. */
 function clearDragState() {
-    dragCandidate = null;
+    candidateFile = null;
     draggingFile = null;
     dragGrabOffset = null;
-    dragPos = null;
+    cursorPos = null;
     dragTargetFile = null;
 
     if (dragRafId !== null) {
@@ -91,6 +102,7 @@ function clearDragState() {
 }
 
 let searchDebounceTimer = null;
+/** Re-renders after a search input change, debounced by 80ms unless immediate rendering is requested. */
 function triggerSearchRender(immediate = false) {
     if (searchDebounceTimer) {
         clearTimeout(searchDebounceTimer);
@@ -105,10 +117,12 @@ function triggerSearchRender(immediate = false) {
     }
 }
 
+/** Escapes regex-special characters so a literal string can be embedded in a RegExp pattern. */
 function escapeRegExp(s) {
     return s.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
 }
 
+/** Builds a line's syntax-highlighted HTML from its tokens, optionally wrapping search-match substrings in a highlight span. */
 function buildLineHtml(tokens, highlightRegex) {
     let html = "";
     for (const tok of tokens) {
@@ -134,8 +148,11 @@ function buildLineHtml(tokens, highlightRegex) {
 }
 
 
-// The regex/whole-word pattern-building here is duplicated in extension.ts's "jump" message
-// handler (used to flash matching lines in the document after a jump) — keep both in sync.
+/**
+ * Recompiles searchQuery/searchRegex from the raw input text and the match-case/whole-word/regex toggles.
+ * The regex/whole-word pattern-building here is duplicated in extension.ts's "jump" message handler
+ * (used to flash matching lines in the document after a jump) — keep both in sync.
+ */
 function rebuildSearchState(value) {
     rawSearchQuery = value.trim();
     searchQuery = rawSearchQuery.toLowerCase();
@@ -155,7 +172,11 @@ function rebuildSearchState(value) {
     searchInputFld.classList.toggle('regex-error', searchInvalid);
 }
 
-// original/lowered pair so plain substring search stays on the fast pre-lowercased path
+/**
+ * True if the current search query matches this line, checked against whichever of the
+ * original/lowered pair the active toggles call for. Kept as a pair so plain substring
+ * search stays on the fast pre-lowercased path.
+ */
 function textMatches(original, lowered) {
     if (!rawSearchQuery || searchInvalid) return false;
     if (searchRegex) return searchRegex.test(original);
@@ -192,6 +213,7 @@ useRegexBtn.addEventListener("click", () => toggleRegex());
 
 clearSearchBtn.addEventListener("click", () => clearSearch());
 
+/** Toggles case-sensitive search and re-renders with the new search state. */
 function toggleMatchCase() {
     matchCase = !matchCase;
     rebuildSearchState(searchInputFld.value);
@@ -199,6 +221,7 @@ function toggleMatchCase() {
     triggerSearchRender(true);
 }
 
+/** Toggles regex search mode and re-renders with the new search state. */
 function toggleRegex() {
     useRegex = !useRegex;
     rebuildSearchState(searchInputFld.value);
@@ -206,6 +229,7 @@ function toggleRegex() {
     triggerSearchRender(true);
 }
 
+/** Toggles whole-word search matching and re-renders with the new search state. */
 function toggleMatchWord() {
     matchWholeWord = !matchWholeWord;
     rebuildSearchState(searchInputFld.value);
@@ -213,6 +237,7 @@ function toggleMatchWord() {
     triggerSearchRender(true);
 }
 
+/** Clears the search input/state and re-renders. */
 function clearSearch() {
     searchInputFld.value = "";
     rebuildSearchState("");
@@ -277,6 +302,7 @@ window.addEventListener("keydown", event => {
 
 let resizeRafId = null;
 
+/** Resyncs the canvas backing-store size to the (DPR-scaled) window size and re-renders; retries via rAF while the tab is hidden/backgrounded. */
 function resize() {
     if (window.innerWidth < 100 || window.innerHeight < 100) {
         // Webview tab is hidden or backgrounded; ignore transient collapsed dimensions
@@ -428,9 +454,12 @@ window.addEventListener("message", event => {
     }
 });
 
-// Duplicate of layout.ts's buildStableGrid (uniform_grid mode only) — used here only
-// to lay out a focused folder's subset of files (see render() below), since the host
-// never computes a layout for that subset. Keep in sync with layout.ts by hand.
+/**
+ * Packs nCells items into a near-16:9 grid, returning {rows, cols, slots}. Duplicate of
+ * layout.ts's buildStableGrid (uniform_grid mode only) — used here only to lay out a
+ * focused folder's subset of files (see render() below), since the host never computes
+ * a layout for that subset. Keep in sync with layout.ts by hand.
+ */
 function buildStableGrid(nCells, targetAspect = 1.777) {
     let rows = 1;
     let cols = Math.max(2, Math.ceil(rows * targetAspect));
@@ -473,6 +502,7 @@ function buildStableGrid(nCells, targetAspect = 1.777) {
     };
 }
 
+/** Rebuilds the breadcrumb trail DOM for the current focusedFolder, each segment clickable to refocus. */
 function updateBreadcrumbs() {
     const container = document.getElementById("breadcrumbs");
     if (!focusedFolder) {
@@ -528,13 +558,16 @@ function updateBreadcrumbs() {
     }
 }
 
+/** Returns the file list to render/hit-test against (currently unfiltered — all of data.files). */
 function getFilteredFiles() {
     if (!data) return [];
     return data.files;
 }
 
-// Groups files by their immediate child subfolder relative to basePath.
-// Returns { folders: [{name, path, fileCount, files}], rootFiles: [file...] }
+/**
+ * Groups files by their immediate child subfolder relative to basePath.
+ * Returns { folders: [{name, path, fileCount, files}], rootFiles: [file...] }.
+ */
 function getSubfolderGroups(files, basePath) {
     const groups = {};
     const rootFiles = [];
@@ -559,6 +592,7 @@ function getSubfolderGroups(files, basePath) {
     return { folders, rootFiles };
 }
 
+/** Paints the loading/error status screen shown before repository data has arrived. */
 function drawStatus() {
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     ctx.fillStyle = "#18181c";
@@ -573,6 +607,7 @@ function drawStatus() {
     ctx.fillText("Waiting for repository data...", 24, 100);
 }
 
+/** Infers a coarse language id from a file path's extension, used to pick a tokenizer. */
 function detectLang(path) {
     if (!path) return 'plaintext';
     const filename = path.split('/').pop().toLowerCase();
@@ -591,7 +626,7 @@ function detectLang(path) {
     return 'js';
 }
 
-// Dispatches to one of five small regex-based tokenizers by detected language.
+/** Dispatches to one of five small regex-based tokenizers by detected language. */
 function tokenizeLine(text, lang) {
     if (!text) return [];
     if (lang === 'plaintext') return [{ text, category: 'normal', isKey: false }];
@@ -602,6 +637,7 @@ function tokenizeLine(text, lang) {
     return tokenizeJS(text, lang);
 }
 
+/** Tokenizes a line of JSON into colorable spans, marking string tokens that precede a ':' as object keys. */
 function tokenizeJSON(text) {
     const tokens = [];
     const regex = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}()\[\]:,]|\s+|.)/g;
@@ -635,6 +671,7 @@ function tokenizeJSON(text) {
     return tokens;
 }
 
+/** Tokenizes a line of Markdown into colorable spans (headings, quotes, lists, emphasis, code, links). */
 function tokenizeMarkdown(text) {
     const tokens = [];
 
@@ -695,10 +732,12 @@ function tokenizeMarkdown(text) {
     return tokens.length > 0 ? tokens : [{ text, category: "normal", isKey: false }];
 }
 
-// Single regex splits the line into candidate tokens (comments/strings/@rules/colors/
-// units/identifiers/punctuation), then each token is classified by shape. A trailing
-// pass re-labels a value/selector token as "function" if it's immediately followed by
-// "(" (e.g. `rgba(`, `calc(`).
+/**
+ * Tokenizes a line of CSS into colorable spans. A single regex splits the line into
+ * candidate tokens (comments/strings/@rules/colors/units/identifiers/punctuation), then
+ * each token is classified by shape. A trailing pass re-labels a value/selector token as
+ * "function" if it's immediately followed by "(" (e.g. `rgba(`, `calc(`).
+ */
 function tokenizeCSS(text) {
     const tokens = [];
     const regex = /(\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|@[\w-]+|!important|#[\da-fA-F]{3,8}\b|\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|vmin|vmax|s|ms|deg|fr|ch|ex|pt)?|:[\w-]+|\.[\w-]+|[\w-]+|[{}();:,>+~\[\]*=]|\s+|.)/g;
@@ -737,8 +776,11 @@ function tokenizeCSS(text) {
     return tokens;
 }
 
-// Same single-regex-then-classify approach as tokenizeCSS, tracking a small bit of
-// state (inTag/seenTagName) across matches to tell a tag name from an attribute name.
+/**
+ * Tokenizes a line of HTML into colorable spans. Same single-regex-then-classify approach
+ * as tokenizeCSS, tracking a small bit of state (inTag/seenTagName) across matches to tell
+ * a tag name from an attribute name.
+ */
 function tokenizeHTML(text) {
     const tokens = [];
     const regex = /(<!--[\s\S]*?-->|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|<\/?|\/?>|=|&\w+;|[\w:-]+|\s+|.)/g;
@@ -774,11 +816,13 @@ function tokenizeHTML(text) {
     return tokens;
 }
 
-// Covers JS/TS/most C-like languages plus a separate Python keyword list, picked by a
-// single shared regex per lang (JSON reuses the JS path). After the initial token pass,
-// a second loop re-labels tokens using their neighbors: identifier-after-"." becomes
-// "property", identifier-before-"(" becomes "function", and (JSON only) a string
-// immediately before ":" becomes a highlighted key.
+/**
+ * Tokenizes a line of JS/TS/most C-like languages (plus a separate Python keyword list)
+ * into colorable spans, picked by a single shared regex per lang (JSON reuses this path).
+ * After the initial token pass, a second loop re-labels tokens using their neighbors:
+ * identifier-after-"." becomes "property", identifier-before-"(" becomes "function", and
+ * (JSON only) a string immediately before ":" becomes a highlighted key.
+ */
 function tokenizeJS(text, lang) {
     const isJson = lang === 'json';
     const isPy = lang === 'python';
@@ -848,11 +892,13 @@ function tokenizeJS(text, lang) {
     return tokens;
 }
 
+/** Reads a VS Code theme CSS variable off body, falling back to fallbackHex if unset. */
 function getThemeColor(varName, fallbackHex) {
     const val = getComputedStyle(document.body).getPropertyValue(varName).trim();
     return val || fallbackHex;
 }
 
+/** Maps a token's syntax category (and isKey flag) to the hex color used to draw it. */
 function colorForCategory(category, isKey) {
     if (isKey) return "#9cdcfe";
 
@@ -893,13 +939,9 @@ function colorForCategory(category, isKey) {
     }
 }
 
-// Draws one file's minimap into the given cell rect, one row per source line scaled to
-// fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
-// render real glyphs, so each token is drawn as a flat colored rect proportional to its
-let imageCache = {};
+let imageCache = {}; // keyed by media URI; cleared on repository data updates (see "data" handler)
 
-// character length instead ("useText" branch below) — this is what makes small tiles
-// still readable as a rough shape/density map rather than unreadable tiny text.
+/** Draws img into the x,y,w,h rect scaled to fit while preserving its aspect ratio (object-fit: contain), background-filling the rest. */
 function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
     const imgWidth = img.naturalWidth || img.width;
     const imgHeight = img.naturalHeight || img.height;
@@ -929,6 +971,13 @@ function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
 }
 
+/**
+ * Draws one file's minimap into the given cell rect, one row per source line scaled to
+ * fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
+ * render real glyphs, so each token is drawn as a flat colored rect proportional to its
+ * character length instead ("useText" branch below) — this is what makes small tiles
+ * still readable as a rough shape/density map rather than unreadable tiny text.
+ */
 function drawMinimap(file, x, y, w, h) {
     ctx.save();
     ctx.beginPath();
@@ -1156,10 +1205,12 @@ function drawMinimap(file, x, y, w, h) {
     ctx.restore();
 }
 
-// Truncates a file path to fit maxWidth, preferring to drop leading directory segments
-// ("...dir/file.ts") over the filename itself. Binary-searches the cut point in the
-// directory portion rather than trimming a character at a time, since ctx.measureText
-// is comparatively expensive and this runs once per visible card per frame.
+/**
+ * Truncates a file path to fit maxWidth, preferring to drop leading directory segments
+ * ("...dir/file.ts") over the filename itself. Binary-searches the cut point in the
+ * directory portion rather than trimming a character at a time, since ctx.measureText
+ * is comparatively expensive and this runs once per visible card per frame.
+ */
 function fitPathText(path, maxWidth) {
     if (ctx.measureText(path).width <= maxWidth) {
         return path;
@@ -1193,6 +1244,8 @@ function fitPathText(path, maxWidth) {
     return bestFit;
 }
 
+// MARK: render
+/** Redraws the whole canvas for the current data/filter/search/drag state — clears, computes grid geometry, then dispatches to one of three per-tile rendering modes (subfolder cards, folder drill-down, or the normal root grid). */
 function render() {
     if (!ctx) {
         return;
@@ -1619,118 +1672,6 @@ function render() {
     }
 }
 
-// Three click targets within a card, checked most-specific first: the '×' close
-// button (only present when the tab is open), the header/path-label strip (isolates
-// that file's parent folder), then the minimap body (jumps the real editor to the
-// clicked line — see extension.ts's "jump" handler).
-canvas.addEventListener("click", event => {
-    if (justDragged) { justDragged = false; return; }
-    if (!data) {
-        return;
-    }
-
-    const { px, py } = getCanvasPos(event);
-
-    // Check folder card clicks first (subfolder card mode)
-    if (data._folderCards) {
-        for (const card of data._folderCards) {
-            if (px >= card.x && px <= card.x + card.w && py >= card.y && py <= card.y + card.h) {
-                focusedFolder = card.folderPath;
-                updateBreadcrumbs();
-                render();
-                return;
-            }
-        }
-    }
-
-    const filteredFiles = getFilteredFiles();
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
-
-        if (
-            px >= c.x &&
-            px <= c.x + c.w &&
-            py >= c.y &&
-            py <= c.y + c.h
-        ) {
-            // Check if click was on close '×' button
-            const cb = file._closeBtn;
-            if (cb && px >= cb.x - 4 && px <= cb.x + cb.w + 4 && py >= cb.y - 4 && py <= cb.y + cb.h + 4) {
-                openFiles = openFiles.filter(u => u !== file.uri);
-                render();
-                vscode.postMessage({
-                    command: "close",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            const headerHeight = 24;
-            const isHeaderClick = py < c.y + headerHeight;
-
-            if (isHeaderClick) {
-                // Clicked the file path/folder header bar -> isolate parent folder (or root files if in root folder)
-                const lastSlash = file.path.lastIndexOf('/');
-                if (lastSlash !== -1) {
-                    const folder = file.path.substring(0, lastSlash + 1);
-                    focusedFolder = folder;
-                } else {
-                    focusedFolder = "(root files)/";
-                }
-                updateBreadcrumbs();
-                render();
-                return;
-            }
-
-            // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
-            if (c._viewBand && py >= c._viewBand.y && py <= c._viewBand.y + c._viewBand.h) {
-                vscode.postMessage({
-                    command: "switchTab",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            // Clicked inside media card body -> switch/open tab without line jump
-            if (file.isImage || file.isPdf) {
-                vscode.postMessage({
-                    command: "switchTab",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            // Clicked inside the minimap body -> jump to line in document
-            const minimapTop = c.y + headerHeight;
-            const minimapHeight = Math.max(1, c.h - 34);
-
-            const relativeY = Math.max(
-                0,
-                Math.min(1, (py - minimapTop) / minimapHeight)
-            );
-
-            const line = Math.floor(relativeY * file.lineCount);
-
-            // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
-            // above so extension.ts's "jump" handler can flash the same lines this webview
-            // considers matches — see its handler for the mirrored pattern-building logic.
-            vscode.postMessage({
-                command: "jump",
-                uri: file.uri,
-                line,
-                query: rawSearchQuery,
-                matchCase,
-                matchWholeWord,
-                useRegex,
-                searchInvalid
-            });
-
-            return;
-        }
-    }
-});
-
 // Middle-click (auxclick) to close tab
 canvas.addEventListener("auxclick", event => {
     if (!data || event.button !== 1) { // 1 = middle mouse button
@@ -1792,6 +1733,7 @@ window.addEventListener("blur", () => {
     tooltip.style.display = "none";
 });
 
+/** Estimates the pixel width the CTRL-hover tooltip needs to fit the widest line/path in file, so its width doesn't jitter as the cursor moves between lines. */
 function getFileWidestLineWidth(file) {
     if (!file) return 300;
     let maxCharLen = 0;
@@ -1832,6 +1774,7 @@ function getFileWidestLineWidth(file) {
     return Math.max(220, Math.min(maxAllowedWidth, maxLineWidth));
 }
 
+/** Finds the file/line under the cursor during a CTRL-hover and rebuilds the tooltip's HTML, size, and position to show it. */
 function updateHoverTooltip(clientX, clientY) {
     if (!data) return;
 
@@ -2000,6 +1943,7 @@ function updateHoverTooltip(clientX, clientY) {
 }
 
 let lastFocusRequestTime = 0;
+/** Asks the extension host to focus the webview when the window lacks OS focus, throttled to once per 500ms. */
 function checkWindowFocus() {
     if (!document.hasFocus()) {
         const now = Date.now();
@@ -2012,49 +1956,50 @@ function checkWindowFocus() {
 
 window.addEventListener("mouseenter", checkWindowFocus);
 
+// MARK: mousedown
 canvas.addEventListener("mousedown", event => {
     if (!data) return;
-    const { px, py } = getCanvasPos(event);
+    cursorPos = getCanvasPos(event);
 
-    // ignore folder cards as drag candidates for now
+    // is mousedown on a folder
     if (data._folderCards) {
         for (const card of data._folderCards) {
-            if (card.x <= px && px <= card.x + card.w &&
-                card.y <= py && py <= card.y + card.h) {
+            if (pointInRect(card, cursorPos.px, cursorPos.py)) {
+                    candidateFolder = { card, startX: cursorPos.px, startY: cursorPos.py };
                     return;
                 }
         }
     }
 
-    // find the held file and set it as the drag candidate
+    // is mousedown on a file
     const filteredFiles = getFilteredFiles();
     for (const file of filteredFiles) {
         const c = file._cell;
         if (!c) continue;
 
-        if (c.x <= px && px <= c.x + c.w &&
-            c.y <= py && py <= c.y + c.h) {
-                dragCandidate = { file, startX: px, startY: py };
-                dragGrabOffset = { x: px - c.x, y: py - c.y }
-                break;
+        if (pointInRect(c, cursorPos.px, cursorPos.py)) {
+                candidateFile = { file, startX: cursorPos.px, startY: cursorPos.py };
+                dragGrabOffset = { x: cursorPos.px - c.x, y: cursorPos.py - c.y };
+                return;
             }
     }
 });
 
+// MARK: mousemove
 canvas.addEventListener("mousemove", event => {
     checkWindowFocus();
 
     lastMousePos = { x: event.clientX, y: event.clientY };
 
-    dragPos = getCanvasPos(event);
-    if (dragCandidate && !draggingFile) {
-        const dx = Math.abs(dragCandidate.startX - dragPos.px);
-        const dy = Math.abs(dragCandidate.startY - dragPos.py);
+    cursorPos = getCanvasPos(event);
+    if (candidateFile && !draggingFile) {
+        const dx = Math.abs(candidateFile.startX - cursorPos.px);
+        const dy = Math.abs(candidateFile.startY - cursorPos.py);
 
         // only start dragging if cursor has moved more than the threshold
         if ( dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
-            draggingFile = dragCandidate.file;
-            dragCandidate = null;
+            draggingFile = candidateFile.file;
+            candidateFile = null;
         }
     }
     if (draggingFile) {
@@ -2085,30 +2030,137 @@ canvas.addEventListener("mousemove", event => {
     }
 });
 
+// MARK: mouseup
 canvas.addEventListener("mouseup", event => {
-    if (!draggingFile) {
-        dragCandidate = null; // clean up
+    if (!data) return;
+    cursorPos = getCanvasPos(event);
+
+    if (draggingFile) {
+        updateDragTarget();
+    
+        // dropping on/near the last tile means "append to the end"
+        const filteredFiles = getFilteredFiles();
+        if (dragTargetFile === filteredFiles[filteredFiles.length - 1]) {
+            dragTargetFile = null; 
+        }
+    
+        vscode.postMessage({
+            command: "reorderFile",
+            sourceId: draggingFile.id,
+            targetId: dragTargetFile ? dragTargetFile.id : null
+        });
+    
+        justDragged = true;
+        clearDragState();
+        render();
         return;
     }
 
-    dragPos = getCanvasPos(event);
-    updateDragTarget();
-
-    // dropping on/near the last tile means "append to the end"
-    const filteredFiles = getFilteredFiles();
-    if (dragTargetFile === filteredFiles[filteredFiles.length - 1]) {
-        dragTargetFile = null; 
+    // Check folder card clicks first (subfolder card mode)
+    if (data._folderCards && candidateFolder) {
+        for (const card of data._folderCards) {
+            if (pointInRect(card, cursorPos.px, cursorPos.py) &&
+                card.folderPath === candidateFolder.card.folderPath) {
+                    focusedFolder = card.folderPath;
+                    updateBreadcrumbs();
+                    render();
+                    return;
+                }
+        }
     }
 
-    vscode.postMessage({
-        command: "reorderFile",
-        sourceId: draggingFile.id,
-        targetId: dragTargetFile ? dragTargetFile.id : null
-    });
+    // Three click targets within a file card, checked most-specific first: the '×' close
+    // button (only present when the tab is open), the header/path-label strip (isolates
+    // that file's parent folder), then the minimap body (jumps the real editor to the
+    // clicked line — see extension.ts's "jump" handler).
+    if (!candidateFile) {
+        candidateFolder = null;
+        return;
+    }
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
 
-    justDragged = true;
-    clearDragState();
-    render();
+        if (pointInRect(c, cursorPos.px, cursorPos.py) && file === candidateFile.file) {
+            // Check if click was on close '×' button
+            const cb = file._closeBtn;
+            if (cb && pointInRect(cb, cursorPos.px, cursorPos.py, CLOSE_BUTTON_PADDING)) {
+                openFiles = openFiles.filter(u => u !== file.uri);
+                render();
+                vscode.postMessage({
+                    command: "close",
+                    uri: file.uri
+                });
+                return;
+            }
+
+            const headerHeight = 24;
+            const isHeaderClick = cursorPos.py < c.y + headerHeight;
+
+            if (isHeaderClick) {
+                // Clicked the file path/folder header bar -> isolate parent folder (or root files if in root folder)
+                const lastSlash = file.path.lastIndexOf('/');
+                if (lastSlash !== -1) {
+                    const folder = file.path.substring(0, lastSlash + 1);
+                    focusedFolder = folder;
+                } else {
+                    focusedFolder = "(root files)/";
+                }
+                updateBreadcrumbs();
+                render();
+                return;
+            }
+
+            // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
+            if (c._viewBand && cursorPos.py >= c._viewBand.y && cursorPos.py <= c._viewBand.y + c._viewBand.h) {
+                vscode.postMessage({
+                    command: "switchTab",
+                    uri: file.uri
+                });
+                return;
+            }
+
+            // Clicked inside media card body -> switch/open tab without line jump
+            if (file.isImage || file.isPdf) {
+                vscode.postMessage({
+                    command: "switchTab",
+                    uri: file.uri
+                });
+                return;
+            }
+
+            // Clicked inside the minimap body -> jump to line in document
+            const minimapTop = c.y + headerHeight;
+            const minimapHeight = Math.max(1, c.h - 34);
+
+            const relativeY = Math.max(
+                0,
+                Math.min(1, (cursorPos.py - minimapTop) / minimapHeight)
+            );
+
+            const line = Math.floor(relativeY * file.lineCount);
+
+            // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
+            // above so extension.ts's "jump" handler can flash the same lines this webview
+            // considers matches — see its handler for the mirrored pattern-building logic.
+            vscode.postMessage({
+                command: "jump",
+                uri: file.uri,
+                line,
+                query: rawSearchQuery,
+                matchCase,
+                matchWholeWord,
+                useRegex,
+                searchInvalid
+            });
+
+            return;
+        }
+    }
+    
+    candidateFile = null;
+    candidateFolder = null;
 });
 
 canvas.addEventListener("mouseleave", () => {
@@ -2127,6 +2179,7 @@ document.addEventListener("mouseleave", () => {
 
 const contextMenu = document.getElementById("context-menu");
 
+/** Hides the custom right-click context menu. */
 function hideContextMenu() {
     if (contextMenu) {
         contextMenu.style.display = "none";
@@ -2159,12 +2212,7 @@ canvas.addEventListener("contextmenu", event => {
         const c = file._cell;
         if (!c) continue;
 
-        if (
-            px >= c.x &&
-            px <= c.x + c.w &&
-            py >= c.y &&
-            py <= c.y + c.h
-        ) {
+        if (pointInRect(c, px, py)) {
             targetFile = file;
             break;
         }

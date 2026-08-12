@@ -18,7 +18,7 @@ Every change must update all affected documentation before the task is complete.
 Follow the global no-comments-by-default rule (comment the WHY, never the WHAT). On top of that, this project's conventions:
 
 - **Top-of-file summary** — 1–2 lines on the pure-logic modules (`scanner.ts`, `layout.ts`, `spanning_layout.ts`, `state.ts`) and on `media/overview.js`: what the module computes and what it hands back to its caller. `extension.ts` doesn't need one — its command registrations are self-orienting.
-- **No MARK-style section comments.** This codebase doesn't use them; don't introduce them unprompted.
+- **MARK-style section comments** are used in `media/overview.js` on the top-level render/event-handler blocks (`render()`, `mousedown`, `mousemove`, `mouseup`, ...) at the user's request, for personal navigation of the file. Don't introduce them elsewhere unprompted.
 - **Duplicated logic must say so.** Anything that exists in two places (see "Non-obvious things worth knowing" below — `buildStableGrid`, the tokenizers) needs a one-line comment at each copy pointing at its twin, so an edit to one side doesn't silently leave the other stale.
 
 ## Commands
