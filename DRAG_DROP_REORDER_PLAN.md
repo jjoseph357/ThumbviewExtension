@@ -1,11 +1,16 @@
 # Drag-and-drop tile reordering (swap vs. shift, A/B testable)
 
-> **Status:** Planning only — not yet implemented. Written 2026-08-07 on `woody-dev`;
-> refreshed 2026-08-11 against `main` @ v0.4.1 (line refs and the design below account
-> for the v0.4.0/v0.4.1 always-fullscreen zen-mode work merged in between — see
-> "Zen mode" note at the end of Context). Update or delete this doc once the feature
-> lands (fold the durable parts into CLAUDE.md/DESIGN.md per this repo's
-> documentation-currency rule).
+> **Status:** Implemented — core swap/shift drag-to-reorder, render polish (ghost,
+> dimming, drop-target outline), and a general hover outline all landed and merged to
+> `main` 2026-08-12. Written 2026-08-07 on `woody-dev`; the design below is the
+> original plan and may describe details that shifted during implementation (e.g. the
+> separate canvas `click` listener described in section 4 was later merged into
+> `mouseup` itself). For current status, known bugs, and remaining/tabled follow-up
+> work, see `DRAG_DROP_IMPLEMENTATION_STEPS.md`. The durable architectural facts (the
+> order-array-only design, the `postMessage` protocol additions) have been folded into
+> CLAUDE.md's "Non-obvious things worth knowing" and "Cross-module interface"
+> sections — this plan doc is kept around for its implementation-narrative detail but
+> is no longer the source of truth for status.
 
 ## Context
 

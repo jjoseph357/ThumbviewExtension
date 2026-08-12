@@ -191,7 +191,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const sendOpenState = () => {
         updateVisibleRanges();
         if (activePanel) {
-            const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
+            const activeUri = lastActiveTextEditor?.document.uri.toString() || null;
             activePanel.webview.postMessage({
                 command: "openState",
                 activeFileUri: activeUri,
@@ -974,7 +974,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         panel.dispose();
                         return;
                     }
-                    const activeUri = vscode.window.activeTextEditor?.document.uri.toString() || null;
+                    const activeUri = lastActiveTextEditor?.document.uri.toString() || null;
                     panel.webview.postMessage({
                         command: "activeFile",
                         uri: activeUri

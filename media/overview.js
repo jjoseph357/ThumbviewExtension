@@ -31,7 +31,8 @@ let dragGrabOffset = null;
 let cursorPos = null;
 let dragRafId = null;
 let dragTargetFile = null;
-let justDragged = false;
+
+let hoveredFile = null;
 
 let matchCase = false;
 let matchWholeWord = false;
@@ -53,6 +54,20 @@ function getCanvasPos(event) {
 function pointInRect(rect, px, py, pad = 0) {
     return rect.x - pad <= px && px <= rect.x + rect.w + pad &&
            rect.y - pad <= py && py <= rect.y + rect.h + pad;
+}
+
+/** Returns the file containing px, py if it exists, else returns null. */
+function findFileAt(px, py) {
+    const filteredFiles = getFilteredFiles();
+    for (const file of filteredFiles) {
+        const c = file._cell;
+        if (!c) continue;
+
+        if (pointInRect(c, px, py)) {
+            return file;
+        }
+    }
+    return null;
 }
 
 /** Finds the file whose _cell contains (px, py); if none does, falls back to the file with the closest cell-center distance (used for drag drop-target resolution). */
@@ -92,7 +107,6 @@ function clearDragState() {
     candidateFile = null;
     draggingFile = null;
     dragGrabOffset = null;
-    cursorPos = null;
     dragTargetFile = null;
 
     if (dragRafId !== null) {
@@ -449,7 +463,7 @@ window.addEventListener("message", event => {
         }
         // Force hover re-evaluation to update tooltip with newly fetched lines
         if (lastMousePos) {
-            updateHoverTooltip(lastMousePos.x, lastMousePos.y);
+            updateHoverTooltip();
         }
     }
 });
@@ -971,14 +985,15 @@ function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
 }
 
+// MARK: drawThumbnail
 /**
- * Draws one file's minimap into the given cell rect, one row per source line scaled to
+ * Draws one file's thumbnail into the given cell rect, one row per source line scaled to
  * fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
  * render real glyphs, so each token is drawn as a flat colored rect proportional to its
  * character length instead ("useText" branch below) — this is what makes small tiles
  * still readable as a rough shape/density map rather than unreadable tiny text.
  */
-function drawMinimap(file, x, y, w, h) {
+function drawThumbnail(file, x, y, w, h) {
     ctx.save();
     ctx.beginPath();
     ctx.rect(x, y, w, h);
@@ -1179,11 +1194,11 @@ function drawMinimap(file, x, y, w, h) {
         const startRatio = startL / totalRealLines;
         const endRatio = (endL + 1) / totalRealLines;
 
-        const minimapY = y;
-        const minimapH = h;
+        const thumbnailY = y;
+        const thumbnailH = h;
 
-        const bandY = minimapY + startRatio * minimapH;
-        const bandH = Math.max((endRatio - startRatio) * minimapH, 4.0);
+        const bandY = thumbnailY + startRatio * thumbnailH;
+        const bandH = Math.max((endRatio - startRatio) * thumbnailH, 4.0);
 
         // Store bounding rect of view band on cell for click detection
         file._cell._viewBand = {
@@ -1196,7 +1211,7 @@ function drawMinimap(file, x, y, w, h) {
             x,
             bandY,
             w,
-            Math.min(bandH, minimapY + minimapH - bandY)
+            Math.min(bandH, thumbnailY + thumbnailH - bandY)
         );
     } else if (file._cell) {
         delete file._cell._viewBand;
@@ -1242,6 +1257,104 @@ function fitPathText(path, maxWidth) {
         }
     }
     return bestFit;
+}
+
+// MARK: drawBorder
+const TILE_PADDING = 4;       // inset from cell edge to the card's fill/stroke rect
+const TILE_DIM_ALPHA = 0.15;  // opacity applied when a tile is unfocused or being dragged
+const TILE_BACKGROUND = "#1e1e24";
+const TILE_LABEL_FONT = "10px system-ui, sans-serif";
+const TILE_LABEL_OFFSET_X = 10;
+const TILE_LABEL_OFFSET_Y = 18;
+const TILE_LABEL_WIDTH_MARGIN = 36; // reserved space so the label doesn't run under the close button
+const TILE_LABEL_COLOR = { searchMatch: "#ec4899", active: "#ffffff", normal: "#a0a0a5" };
+const TILE_THUMBNAIL_OFFSET_X = 10;
+const TILE_THUMBNAIL_OFFSET_Y = 24;
+const TILE_THUMBNAIL_WIDTH_MARGIN = 20;
+const TILE_THUMBNAIL_HEIGHT_MARGIN = 34;
+
+const BORDER_STYLES = {
+    searchMatch: { color: "#ec4899", width: 2.5 }, // Pink
+    active:      { color: "#a855f7", width: 2.5 }, // Purple
+    open:        { color: "#f97316", width: 1.8 }, // Orange
+    dragging:        { color: "#648fff", width: 1.8 }, // Light Blue
+    default:     { color: "rgba(255, 255, 255, 0.08)", width: 1 }
+};
+
+/** Strokes a tile's priority-ordered border: search match > active > open > default. */
+function drawTileBorder(x, y, w, h, isSearchMatch, isActive, isOpen) {
+    const style = isSearchMatch ? BORDER_STYLES.searchMatch
+        : isActive ? BORDER_STYLES.active
+        : isOpen ? BORDER_STYLES.open
+        : BORDER_STYLES.default;
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.width;
+    ctx.strokeRect(x + TILE_PADDING, y + TILE_PADDING, w - TILE_PADDING * 2, h - TILE_PADDING * 2);
+}
+
+// MARK: drawCloseBtn
+const CLOSE_BTN_SIZE = 12;
+const CLOSE_BTN_MARGIN_RIGHT = 20;
+const CLOSE_BTN_MARGIN_TOP = 10;
+const CLOSE_BTN_GLYPH_Y_OFFSET = 8;
+const CLOSE_BTN_FONT = "12px system-ui, sans-serif";
+const CLOSE_BTN_COLOR = "#707075";
+
+/** Draws the '×' close button on an open tile and stores its hit-box on file._closeBtn. */
+function drawCloseBtn(file, x, y, w) {
+    const closeBtnX = x + w - CLOSE_BTN_MARGIN_RIGHT;
+    const closeBtnY = y + CLOSE_BTN_MARGIN_TOP;
+    file._closeBtn = { x: closeBtnX, y: closeBtnY, w: CLOSE_BTN_SIZE, h: CLOSE_BTN_SIZE };
+
+    ctx.fillStyle = CLOSE_BTN_COLOR;
+    ctx.font = CLOSE_BTN_FONT;
+    ctx.fillText("×", closeBtnX, closeBtnY + CLOSE_BTN_GLYPH_Y_OFFSET);
+}
+
+// MARK: drawFileTile
+/** Draws one file's tile: background, border, label, close button, and thumbnail; stores file._cell for hit-testing and dims the tile if dimForFocus is set or it's the file currently being dragged. */
+function drawFileTile(file, x, y, w, h, dimForFocus) {
+    file._cell = { x, y, w, h };
+
+    const queryActive = !!searchQuery && !searchInvalid;
+    const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+    const isActive = file.uri === activeFileUri;
+    const isOpen = openFilesSet.has(file.uri);
+
+    ctx.save();
+    if (dimForFocus || file === draggingFile) {
+        ctx.globalAlpha = TILE_DIM_ALPHA;
+    }
+
+    ctx.fillStyle = TILE_BACKGROUND;
+    ctx.fillRect(x + TILE_PADDING, y + TILE_PADDING, w - TILE_PADDING * 2, h - TILE_PADDING * 2);
+
+    drawTileBorder(x, y, w, h, isSearchMatch, isActive, isOpen);
+
+    ctx.fillStyle = isSearchMatch ? TILE_LABEL_COLOR.searchMatch : (isActive ? TILE_LABEL_COLOR.active : TILE_LABEL_COLOR.normal);
+    ctx.font = TILE_LABEL_FONT;
+
+    if (file._lastCellW !== w || !file._fittedLabel) {
+        file._lastCellW = w;
+        file._fittedLabel = fitPathText(file.path, w - TILE_LABEL_WIDTH_MARGIN);
+    }
+    ctx.fillText(file._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
+
+    if (isOpen) {
+        drawCloseBtn(file, x, y, w);
+    } else {
+        delete file._closeBtn;
+    }
+
+    drawThumbnail(
+        file,
+        x + TILE_THUMBNAIL_OFFSET_X,
+        y + TILE_THUMBNAIL_OFFSET_Y,
+        Math.max(1, w - TILE_THUMBNAIL_WIDTH_MARGIN),
+        Math.max(1, h - TILE_THUMBNAIL_HEIGHT_MARGIN)
+    );
+
+    ctx.restore();
 }
 
 // MARK: render
@@ -1450,52 +1563,8 @@ function render() {
 
             const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
             const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
-            const isActive = file.uri === activeFileUri;
-            const isOpen = openFilesSet.has(file.uri);
 
-            ctx.save();
-            if (!isFolderMatch || (queryActive && !isSearchMatch)) ctx.globalAlpha = 0.15;
-
-            ctx.fillStyle = "#1e1e24";
-            ctx.fillRect(x + 4, y + 4, localCellW - 8, fileH - 8);
-
-            if (queryActive && isSearchMatch) {
-                ctx.strokeStyle = "#ec4899";
-                ctx.lineWidth = 2.5;
-            } else if (isActive) {
-                ctx.strokeStyle = "#a855f7";
-                ctx.lineWidth = 2.5;
-            } else if (isOpen) {
-                ctx.strokeStyle = "#f97316";
-                ctx.lineWidth = 1.8;
-            } else {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-                ctx.lineWidth = 1;
-            }
-            ctx.strokeRect(x + 4, y + 4, localCellW - 8, fileH - 8);
-
-            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
-            ctx.font = "10px system-ui, sans-serif";
-
-            if (file._lastCellW !== localCellW || !file._fittedLabel) {
-                file._lastCellW = localCellW;
-                file._fittedLabel = fitPathText(file.path, localCellW - 36);
-            }
-            ctx.fillText(file._fittedLabel, x + 10, y + 18);
-
-            if (isOpen) {
-                const closeBtnX = x + localCellW - 20;
-                const closeBtnY = y + 10;
-                file._closeBtn = { x: closeBtnX, y: closeBtnY, w: 12, h: 12 };
-                ctx.fillStyle = "#707075";
-                ctx.font = "12px system-ui, sans-serif";
-                ctx.fillText("×", closeBtnX, closeBtnY + 8);
-            } else {
-                delete file._closeBtn;
-            }
-
-            drawMinimap(file, x + 10, y + 24, Math.max(1, localCellW - 20), Math.max(1, fileH - 34));
-            ctx.restore();
+            drawFileTile(file, x, y, localCellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
         }
     } else if (shouldOpenFolder) {
         // Directory drill-down mode — render all files in focusedFolder as a Thumbview grid
@@ -1521,55 +1590,11 @@ function render() {
             if (y + fileH < -50 || y > rectH + 50) continue;
 
             const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
-            const isActive = file.uri === activeFileUri;
-            const isOpen = openFilesSet.has(file.uri);
 
-            ctx.save();
-            if (queryActive && !isSearchMatch) ctx.globalAlpha = 0.15;
-
-            ctx.fillStyle = "#1e1e24";
-            ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            if (queryActive && isSearchMatch) {
-                ctx.strokeStyle = "#ec4899";
-                ctx.lineWidth = 2.5;
-            } else if (isActive) {
-                ctx.strokeStyle = "#a855f7";
-                ctx.lineWidth = 2.5;
-            } else if (isOpen) {
-                ctx.strokeStyle = "#f97316";
-                ctx.lineWidth = 1.8;
-            } else {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-                ctx.lineWidth = 1;
-            }
-            ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
-            ctx.font = "10px system-ui, sans-serif";
-
-            if (file._lastCellW !== cellW || !file._fittedLabel) {
-                file._lastCellW = cellW;
-                file._fittedLabel = fitPathText(file.path, cellW - 36);
-            }
-            ctx.fillText(file._fittedLabel, x + 10, y + 18);
-
-            if (isOpen) {
-                const closeBtnX = x + cellW - 20;
-                const closeBtnY = y + 10;
-                file._closeBtn = { x: closeBtnX, y: closeBtnY, w: 12, h: 12 };
-                ctx.fillStyle = "#707075";
-                ctx.font = "12px system-ui, sans-serif";
-                ctx.fillText("×", closeBtnX, closeBtnY + 8);
-            } else {
-                delete file._closeBtn;
-            }
-
-            drawMinimap(file, x + 10, y + 24, Math.max(1, cellW - 20), Math.max(1, fileH - 34));
-            ctx.restore();
+            drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
         }
     } else {
-        // Normal file tile mode — cells are large enough to render individual minimaps
+        // Normal file tile mode — cells are large enough to render individual thumbnails
         const slots = filteredFiles.map(f => f.slot);
         const cellW = rootCellW;
         const cellH = rootCellH;
@@ -1602,72 +1627,30 @@ function render() {
             const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
             const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
 
-            const isActive = file.uri === activeFileUri;
-            const isOpen = openFilesSet.has(file.uri);
+            drawFileTile(file, x, y, cellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
+        }
+    }
 
-            ctx.save();
+    if (draggingFile) {
+        // ghost for currently-dragged file
+        const x = cursorPos.px - dragGrabOffset.x;
+        const y = cursorPos.py - dragGrabOffset.y;
+        const style = BORDER_STYLES.dragging;
+        ctx.strokeStyle = style.color;
+        ctx.lineWidth = style.width;
+        ctx.strokeRect(x, y, draggingFile._cell.w, draggingFile._cell.h);
+        ctx.fillStyle = style.color;
+        ctx.font = TILE_LABEL_FONT;
+        ctx.fillText(draggingFile._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
 
-            if (!isFolderMatch || (queryActive && !isSearchMatch)) {
-                ctx.globalAlpha = 0.15;
-            }
-
-            // Draw card background
-            ctx.fillStyle = "#1e1e24";
-            ctx.fillRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            // Border rendering prioritisation
-            if (queryActive && isSearchMatch) {
-                ctx.strokeStyle = "#ec4899"; // Pink search match border
-                ctx.lineWidth = 2.5;
-            } else if (isActive) {
-                ctx.strokeStyle = "#a855f7"; // Purple active border
-                ctx.lineWidth = 2.5;
-            } else if (isOpen) {
-                ctx.strokeStyle = "#f97316"; // Orange open tab border
-                ctx.lineWidth = 1.8;
-            } else {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-                ctx.lineWidth = 1;
-            }
-            ctx.strokeRect(x + 4, y + 4, cellW - 8, fileH - 8);
-
-            ctx.fillStyle = isSearchMatch ? "#ec4899" : (isActive ? "#ffffff" : "#a0a0a5");
-            ctx.font = "10px system-ui, sans-serif";
-
-            if (file._lastCellW !== cellW || !file._fittedLabel) {
-                file._lastCellW = cellW;
-                file._fittedLabel = fitPathText(file.path, cellW - 36);
-            }
-
-            ctx.fillText(file._fittedLabel, x + 10, y + 18);
-
-            // Draw close '×' button if tab is open
-            if (isOpen) {
-                const closeBtnX = x + cellW - 20;
-                const closeBtnY = y + 10;
-                file._closeBtn = {
-                    x: closeBtnX,
-                    y: closeBtnY,
-                    w: 12,
-                    h: 12
-                };
-
-                ctx.fillStyle = "#707075";
-                ctx.font = "12px system-ui, sans-serif";
-                ctx.fillText("×", closeBtnX, closeBtnY + 8);
-            } else {
-                delete file._closeBtn;
-            }
-
-            drawMinimap(
-                file,
-                x + 10,
-                y + 24,
-                Math.max(1, cellW - 20),
-                Math.max(1, fileH - 34)
-            );
-
-            ctx.restore();
+        // drop-target outline
+        if (dragTargetFile) {
+            ctx.strokeRect(
+                dragTargetFile._cell.x,
+                dragTargetFile._cell.y,
+                dragTargetFile._cell.w,
+                dragTargetFile._cell.h
+            );  
         }
     }
 }
@@ -1713,7 +1696,7 @@ window.addEventListener("keydown", event => {
     } else if (event.key === "Control") {
         isCtrlDown = true;
         if (lastMousePos) {
-            updateHoverTooltip(lastMousePos.x, lastMousePos.y);
+            updateHoverTooltip();
         }
     } else if (event.ctrlKey) {
         isCtrlDown = false;
@@ -1774,8 +1757,9 @@ function getFileWidestLineWidth(file) {
     return Math.max(220, Math.min(maxAllowedWidth, maxLineWidth));
 }
 
+// MARK: updateHoverTooltip
 /** Finds the file/line under the cursor during a CTRL-hover and rebuilds the tooltip's HTML, size, and position to show it. */
-function updateHoverTooltip(clientX, clientY) {
+function updateHoverTooltip() {
     if (!data) return;
 
     if (!isCtrlDown) {
@@ -1783,34 +1767,13 @@ function updateHoverTooltip(clientX, clientY) {
         return;
     }
 
-    const { px, py } = getCanvasPos(event);
-
-    const filteredFiles = getFilteredFiles();
-    let hoveredFile = null;
     let hoveredLineIdx = -1;
-
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
-
-        if (
-            px >= c.x &&
-            px <= c.x + c.w &&
-            py >= c.y &&
-            py <= c.y + c.h
-        ) {
-            hoveredFile = file;
-            const minimapTop = c.y + 24;
-            const minimapHeight = Math.max(1, c.h - 34);
-
-            const relativeY = Math.max(
-                0,
-                Math.min(1, (py - minimapTop) / minimapHeight)
-            );
-
-            hoveredLineIdx = Math.floor(relativeY * file.lineCount);
-            break;
-        }
+    if (hoveredFile && hoveredFile._cell) {
+        const c = hoveredFile._cell;
+        const thumbnailTop = c.y + 24;
+        const thumbnailHeight = Math.max(1, c.h - 34);
+        const relativeY = Math.max(0, Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight));
+        hoveredLineIdx = Math.floor(relativeY * hoveredFile.lineCount);
     }
 
     if (hoveredFile && (hoveredFile.isImage || hoveredFile.isPdf)) {
@@ -1929,7 +1892,7 @@ function updateHoverTooltip(clientX, clientY) {
             }
         }
 
-        let ty = clientY + 16;
+        let ty = lastMousePos.y + 16;
         if (ty + tooltip.offsetHeight > window.innerHeight - 16) {
             ty = window.innerHeight - tooltip.offsetHeight - 16;
         }
@@ -1990,8 +1953,9 @@ canvas.addEventListener("mousemove", event => {
     checkWindowFocus();
 
     lastMousePos = { x: event.clientX, y: event.clientY };
-
     cursorPos = getCanvasPos(event);
+    hoveredFile = findFileAt(cursorPos.px, cursorPos.py);
+
     if (candidateFile && !draggingFile) {
         const dx = Math.abs(candidateFile.startX - cursorPos.px);
         const dy = Math.abs(candidateFile.startY - cursorPos.py);
@@ -2025,7 +1989,7 @@ canvas.addEventListener("mousemove", event => {
     if (!hoverRafId) {
         hoverRafId = requestAnimationFrame(() => {
             hoverRafId = null;
-            updateHoverTooltip(event.clientX, event.clientY);
+            updateHoverTooltip();
         });
     }
 });
@@ -2050,7 +2014,6 @@ canvas.addEventListener("mouseup", event => {
             targetId: dragTargetFile ? dragTargetFile.id : null
         });
     
-        justDragged = true;
         clearDragState();
         render();
         return;
@@ -2071,7 +2034,7 @@ canvas.addEventListener("mouseup", event => {
 
     // Three click targets within a file card, checked most-specific first: the '×' close
     // button (only present when the tab is open), the header/path-label strip (isolates
-    // that file's parent folder), then the minimap body (jumps the real editor to the
+    // that file's parent folder), then the thumbnail body (jumps the real editor to the
     // clicked line — see extension.ts's "jump" handler).
     if (!candidateFile) {
         candidateFolder = null;
@@ -2130,13 +2093,13 @@ canvas.addEventListener("mouseup", event => {
                 return;
             }
 
-            // Clicked inside the minimap body -> jump to line in document
-            const minimapTop = c.y + headerHeight;
-            const minimapHeight = Math.max(1, c.h - 34);
+            // Clicked inside the thumbnail body -> jump to line in document
+            const thumbnailTop = c.y + headerHeight;
+            const thumbnailHeight = Math.max(1, c.h - 34);
 
             const relativeY = Math.max(
                 0,
-                Math.min(1, (cursorPos.py - minimapTop) / minimapHeight)
+                Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight)
             );
 
             const line = Math.floor(relativeY * file.lineCount);
@@ -2164,10 +2127,10 @@ canvas.addEventListener("mouseup", event => {
 });
 
 canvas.addEventListener("mouseleave", () => {
-    if (draggingFile) {
-        clearDragState();
-        render();
-    }
+    clearDragState();
+    hoveredFile = null;
+    cursorPos = null;
+    render();
     isCtrlDown = false;
     tooltip.style.display = "none";
 });

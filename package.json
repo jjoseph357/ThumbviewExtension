@@ -237,7 +237,7 @@
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "Spatially stable code minimap.\n\n[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\n[Swap Reorder](command:thumbview.setSwapReorderMode)\n\n[Shift Reorder](command:thumbview.setShiftReorderMode)\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
+        "contents": "[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\nDrag-and-Drop Settings\n\n[Swap Reorder](command:thumbview.setSwapReorderMode)\n\n[Shift Reorder](command:thumbview.setShiftReorderMode)\n\nAdditional Settings\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
       }
     ]
   },
@@ -255,7 +255,7 @@
     "@types/vscode": "~1.107.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
-    "eslint": "^10.5.0",
+    "eslint": "^10.8.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.1"
   },
