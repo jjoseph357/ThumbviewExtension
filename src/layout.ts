@@ -63,3 +63,8 @@ export function buildStableGrid(
         slots
     };
 }
+
+export function slotToIndex(col: number, row: number, cols: number): number {
+    const index = row * cols + col;
+    return index;
+}

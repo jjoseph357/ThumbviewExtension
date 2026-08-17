@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile } from "./scanner";
-import { buildStableGrid } from "./layout";
+import { buildStableGrid, slotToIndex } from "./layout";
 import { buildSpanningGrid } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
 import { IgnoreTreeDataProvider, IgnoreTreeItem } from "./ignoreProvider";
@@ -212,7 +212,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let cachedScannedFiles: RepoFile[] | null = null;
 
-    const updateLayoutFromCache = async (panel: vscode.WebviewPanel) => {
+    const updateLayoutFromCache = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
         if (!cachedScannedFiles) {
             await refreshThumbview(panel);
             return;
@@ -249,7 +249,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("repomap.spanningAllocations") || {};
                 const savedRows = context.workspaceState.get<number | null>("repomap.spanningRows") || null;
 
-                const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows);
+                const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows, forceBreakBeforeId ?? null);
 
                 await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
                 await context.workspaceState.update("thumbview.spanningRows", layout.rows);
@@ -931,17 +931,60 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (msg.command === "reorderFile") {
+                    // Grid-slot targeting — msg: { sourceId, targetId (occupied slot's
+                    // file id, or null when targetIsEmpty), targetIsEmpty, targetCol,
+                    // targetRow, targetGridCols (trust this over recomputing layout.cols
+                    // locally) }. Sent from mouseup in media/overview.js (keep both ends
+                    // in sync).
                     const mode = getDragReorderMode();
+                    const layoutMode = getLayoutMode();
 
                     try {
-                        if (mode === "shift") {
-                            fileOrder.move(msg.sourceId, msg.targetId);
-                        } else { // mode === "swap" by default
-                            fileOrder.swap(msg.sourceId, msg.targetId);
+                        let forceBreakBeforeId: string | undefined;
+
+                        if (msg.targetIsEmpty) {
+                            if (layoutMode === "spanning_grid") {
+                                // spanning_grid empty-slot placement isn't implemented yet — row-major
+                                // slotToIndex doesn't apply to its column-major packing. See
+                                // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 3 follow-up note.
+                            } else {
+                                const index = slotToIndex(msg.targetCol, msg.targetRow, msg.targetGridCols);
+                                fileOrder.placeAt(msg.sourceId, index);
+                            }
+                        } else {
+                            let sizeMismatch = false;
+                            if (layoutMode === "spanning_grid") {
+                                // Read persisted cell allocations rather than trusting the
+                                // webview for this — the host already owns this data, see
+                                // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 4 (Step 8a).
+                                const allocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                                const sourceCells = allocations[msg.sourceId] ?? 1;
+                                const targetCells = allocations[msg.targetId] ?? 1;
+                                sizeMismatch = sourceCells !== targetCells;
+                            }
+
+                            if (sizeMismatch) {
+                                // Differently-sized spanning_grid files: always swap array
+                                // positions (regardless of dragReorderMode) so the dragged
+                                // file lands exactly at the target's old array index, then
+                                // force buildSpanningGrid to start a fresh column there — a
+                                // plain swap alone isn't enough, since the dragged file can
+                                // be silently absorbed into whichever column precedes it
+                                // instead of displacing the target. See
+                                // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 4 (Step 8b) for
+                                // the worked trace. Same-size spanning_grid files have no
+                                // size-aware case and fall through to the branch below.
+                                fileOrder.swap(msg.sourceId, msg.targetId);
+                                forceBreakBeforeId = msg.sourceId;
+                            } else if (mode === "shift") {
+                                fileOrder.move(msg.sourceId, msg.targetId);
+                            } else { // mode === "swap" by default
+                                fileOrder.swap(msg.sourceId, msg.targetId);
+                            }
                         }
-                        
+
                         if (activePanel) {
-                            updateLayoutFromCache(activePanel);
+                            updateLayoutFromCache(activePanel, forceBreakBeforeId);
                         }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to reorder file: ${err?.message ?? String(err)}`);

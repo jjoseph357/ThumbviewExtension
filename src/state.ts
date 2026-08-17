@@ -60,4 +60,13 @@ export class PersistentFileOrder {
         // if idTarget is null, place the tile at the end of the array
         this.seenFiles.splice(to === -1 ? this.seenFiles.length : to, 0, idToMove);
     }
+
+    placeAt(idToMove: string, index: number) {
+        const from = this.seenFiles.indexOf(idToMove);
+        if (from === -1) return;
+        this.seenFiles.splice(from, 1);
+        const adjusted = index > from ? index - 1 : index;
+        const clamped = Math.max(0, Math.min(adjusted, this.seenFiles.length));
+        this.seenFiles.splice(clamped, 0, idToMove);
+    }
 }
