@@ -44,6 +44,12 @@ export function buildSpanningGrid(
     seenFileOrder: string[],
     existingAllocations: { [id: string]: number } = {},
     savedGridRows: number | null = null,
+    // Drag-and-drop size-aware swap only: forces the named file to start a fresh column
+    // even if it would otherwise fit in the current column's remaining rows. Ordinary
+    // rescans always pass undefined/null here and are unaffected — see
+    // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 4 for why a plain array-position swap
+    // alone doesn't reliably anchor a size-mismatched drop at the target's old column.
+    forceBreakBeforeId: string | null = null,
     targetAspect = 1.777,
     baseLinesPerCell = 60,
     compressionPct = 0.10
@@ -98,8 +104,14 @@ export function buildSpanningGrid(
     const placements: SpanningPlacement[] = [];
 
     for (const item of fileInfo) {
-        // Start a new column if this file's cells don't fit in the current column
-        if (currRow > 0 && currRow + item.nCells > gridRows) {
+        // Start a new column if this file's cells don't fit in the current column, or if
+        // this is the drag-and-drop-forced file and it isn't already at the top of a
+        // column (forcing it again when it's already fresh would waste an empty column).
+        const mustBreak = item.id === forceBreakBeforeId
+            ? currRow > 0
+            : currRow > 0 && currRow + item.nCells > gridRows;
+
+        if (mustBreak) {
             currCol++;
             currRow = 0;
         }

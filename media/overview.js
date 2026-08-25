@@ -23,6 +23,12 @@ let cursorLocations = {}; // Map of file URIs to current cursor line numbers
 
 const CLOSE_BUTTON_PADDING = 4; // px
 
+// Canvas layout margins for the root/subfolder grid — reserve space above the tiles
+// for the breadcrumb bar, below for bottom padding, and on the sides for edge padding.
+const GRID_TOP_MARGIN = 64;
+const GRID_BOTTOM_MARGIN = 40;
+const GRID_SIDE_MARGIN = 16;
+
 const DRAG_THRESHOLD = 5; // px
 let candidateFile = null;
 let candidateFolder = null;
@@ -31,8 +37,11 @@ let dragGrabOffset = null;
 let cursorPos = null;
 let dragRafId = null;
 let dragTargetFile = null;
+let dragTarget = null;
 
 let hoveredFile = null;
+
+const slotOccupancy = new Map();
 
 let matchCase = false;
 let matchWholeWord = false;
@@ -70,36 +79,39 @@ function findFileAt(px, py) {
     return null;
 }
 
-/** Finds the file whose _cell contains (px, py); if none does, falls back to the file with the closest cell-center distance (used for drag drop-target resolution). */
-function findNearestFile(px, py) {
-    const filteredFiles = getFilteredFiles();
-    let closestDist = Infinity;
-    let closestFile = null;
-
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
-
-        if (pointInRect(c, px, py)) {
-            return file;
-        }
-
-        const dist = Math.hypot(px - (c.x + c.w / 2), py - (c.y + c.h / 2));
-        if (dist < closestDist) {
-            closestDist = dist;
-            closestFile = file;
-        }
-    }
-
-    return closestFile;
+function clamp(num, min, max) {
+    return Math.min(Math.max(num, min), max);
 }
 
+function findNearestSlot(px, py) {
+    const rectW = canvas.clientWidth || window.innerWidth;
+    const rectH = canvas.clientHeight || window.innerHeight;
+    const availableW = rectW - (GRID_SIDE_MARGIN * 2);
+    const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
+    const cellW = availableW / data.layout.cols;
+    const cellH = availableH / data.layout.rows;
+    const col = Math.floor((px - GRID_SIDE_MARGIN) / cellW);
+    const row = Math.floor((py - GRID_TOP_MARGIN) / cellH);
+
+    const col_clamped = clamp(col, 0, data.layout.cols - 1);
+    const row_clamped = clamp(row, 0, data.layout.rows - 1);
+    const file = slotOccupancy.get(`${col_clamped},${row_clamped}`) ?? null;
+
+    return {
+        cellW: cellW,
+        cellH: cellH,
+        col: col_clamped,
+        row: row_clamped,
+        file: file,
+    };
+}
 
 /** Recomputes dragTargetFile from the live drag cursor position (cursorPos); called on every throttled mousemove while dragging. */
 function updateDragTarget() {
     if (!draggingFile || !cursorPos) return;
 
-    dragTargetFile = findNearestFile(cursorPos.px, cursorPos.py);
+    dragTarget = findNearestSlot(cursorPos.px, cursorPos.py);
+    dragTargetFile = dragTarget?.file ?? null;
 }
 
 /** Resets all drag-related module state and cancels any pending drag animation frame. */
@@ -107,6 +119,7 @@ function clearDragState() {
     candidateFile = null;
     draggingFile = null;
     dragGrabOffset = null;
+    dragTarget = null;
     dragTargetFile = null;
 
     if (dragRafId !== null) {
@@ -389,6 +402,7 @@ window.addEventListener("message", event => {
         data = msg;
         statusText = "";
         hoverLineCache = {};
+        slotOccupancy.clear();
         if (data && data.files) {
             for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
                 const f = data.files[fIdx];
@@ -417,7 +431,11 @@ window.addEventListener("message", event => {
                 }
                 f._combinedText = textArr.join("\n");                 // lowercased (existing)
                 f._combinedTextOriginal = textArrOriginal.join("\n"); // add: same loop, no .toLowerCase()
-
+                if (f.slots) {
+                    for (const [col, row] of f.slots) {
+                        slotOccupancy.set(`${col},${row}`, f);
+                    }
+                }
             }
         }
         if (msg.openKeybinding) {
@@ -1414,12 +1432,8 @@ function render() {
     const gridCols = data.layout.cols;
     const gridRows = data.layout.rows;
 
-    const topMargin = 64;
-    const bottomMargin = 40;
-    const sideMargin = 16;
-
-    const availableW = rectW - (sideMargin * 2);
-    const availableH = rectH - topMargin - bottomMargin;
+    const availableW = rectW - (GRID_SIDE_MARGIN * 2);
+    const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
 
     const rootCellW = availableW / gridCols;
     const rootCellH = availableH / gridRows;
@@ -1483,8 +1497,8 @@ function render() {
         for (const group of folders) {
             if (slotIdx >= localGrid.slots.length) break;
             const slot = localGrid.slots[slotIdx++];
-            const x = sideMargin + slot[0] * localCellW;
-            const y = topMargin + slot[1] * localCellH;
+            const x = GRID_SIDE_MARGIN + slot[0] * localCellW;
+            const y = GRID_TOP_MARGIN + slot[1] * localCellH;
 
             if (y + localCellH < -50 || y > rectH + 50) continue;
 
@@ -1553,8 +1567,8 @@ function render() {
             const col = slot[0];
             const row = slot[1];
 
-            const x = sideMargin + col * localCellW;
-            const y = topMargin + row * localCellH;
+            const x = GRID_SIDE_MARGIN + col * localCellW;
+            const y = GRID_TOP_MARGIN + row * localCellH;
             const fileH = localCellH;
 
             file._cell = { x, y, w: localCellW, h: fileH };
@@ -1581,8 +1595,8 @@ function render() {
             const row = slot[1];
             const nCells = file.nCells || 1;
 
-            const x = sideMargin + col * cellW;
-            const y = topMargin + row * cellH;
+            const x = GRID_SIDE_MARGIN + col * cellW;
+            const y = GRID_TOP_MARGIN + row * cellH;
             const fileH = cellH * nCells;
 
             file._cell = { x, y, w: cellW, h: fileH };
@@ -1608,8 +1622,8 @@ function render() {
             const row = slot[1];
             const nCells = file.nCells || 1;
 
-            const x = sideMargin + col * cellW;
-            const y = topMargin + row * cellH;
+            const x = GRID_SIDE_MARGIN + col * cellW;
+            const y = GRID_TOP_MARGIN + row * cellH;
             const fileH = cellH * nCells;
 
             file._cell = {
@@ -1644,13 +1658,20 @@ function render() {
         ctx.fillText(draggingFile._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
 
         // drop-target outline
-        if (dragTargetFile) {
+        if (dragTarget.file) {
             ctx.strokeRect(
-                dragTargetFile._cell.x,
-                dragTargetFile._cell.y,
-                dragTargetFile._cell.w,
-                dragTargetFile._cell.h
+                dragTarget.file._cell.x,
+                dragTarget.file._cell.y,
+                dragTarget.file._cell.w,
+                dragTarget.file._cell.h
             );  
+        } else {
+            ctx.strokeRect(
+                GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
+                GRID_TOP_MARGIN + dragTarget.row * dragTarget.cellH,
+                dragTarget.cellW,
+                dragTarget.cellH
+            );
         }
     }
 }
@@ -1921,6 +1942,7 @@ window.addEventListener("mouseenter", checkWindowFocus);
 
 // MARK: mousedown
 canvas.addEventListener("mousedown", event => {
+    if (event.button !== 0) return; // only fire on left-click
     if (!data) return;
     cursorPos = getCanvasPos(event);
 
@@ -1996,24 +2018,28 @@ canvas.addEventListener("mousemove", event => {
 
 // MARK: mouseup
 canvas.addEventListener("mouseup", event => {
+    if (event.button !== 0) return; // only fire on left-click
     if (!data) return;
     cursorPos = getCanvasPos(event);
 
     if (draggingFile) {
         updateDragTarget();
-    
-        // dropping on/near the last tile means "append to the end"
-        const filteredFiles = getFilteredFiles();
-        if (dragTargetFile === filteredFiles[filteredFiles.length - 1]) {
-            dragTargetFile = null; 
-        }
-    
+
+        // Grid-slot targeting — targetId is the occupied slot's file id, or null when
+        // targetIsEmpty; targetCol/targetRow/targetGridCols let the host compute an
+        // array index for empty-slot drops without recomputing (and risking disagreeing
+        // with) the exact cols value this payload was rendered against. See the
+        // "reorderFile" handler in extension.ts (keep both ends in sync).
         vscode.postMessage({
             command: "reorderFile",
             sourceId: draggingFile.id,
-            targetId: dragTargetFile ? dragTargetFile.id : null
+            targetId: dragTarget.file ? dragTarget.file.id : null,
+            targetIsEmpty: !dragTarget.file,
+            targetCol: dragTarget.col,
+            targetRow: dragTarget.row,
+            targetGridCols: data.layout.cols
         });
-    
+
         clearDragState();
         render();
         return;
