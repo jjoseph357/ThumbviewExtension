@@ -17,6 +17,7 @@ let statusText = "Loading Thumbview...";
 let activeFileUri = null;
 let focusedFolder = ""; // empty means root
 
+let currentIgnorePatterns = [];
 let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
@@ -400,6 +401,7 @@ window.addEventListener("message", event => {
 
     if (msg.command === "data") {
         data = msg;
+        currentIgnorePatterns = msg.ignorePatterns || [];
         statusText = "";
         hoverLineCache = {};
         slotOccupancy.clear();
@@ -420,6 +422,16 @@ window.addEventListener("message", event => {
                         textArr.push(lower);
                         textArrOriginal.push(l.text || "");
                     }
+                    let totalChars = 0;
+                    let validCount = 0;
+                    for (let k = 0; k < Math.min(f.lines.length, 50); k++) {
+                        const len = f.lines[k]?.text?.length || 0;
+                        if (len > 0) {
+                            totalChars += len;
+                            validCount++;
+                        }
+                    }
+                    f._avgLineChars = validCount > 0 ? Math.min(100, Math.max(45, Math.round(totalChars / validCount))) : 65;
                 }
                 if (f.fullLines) {
                     f._lowerFullLines = f.fullLines.map(str => {
@@ -443,7 +455,14 @@ window.addEventListener("message", event => {
             if (kbdLabel) {
                 kbdLabel.textContent = msg.openKeybinding;
             }
+            const kbdLabel2 = document.getElementById("open-shortcut-label-2");
+            if (kbdLabel2) {
+                kbdLabel2.textContent = msg.openKeybinding;
+            }
         }
+        updateSettingsModalState();
+        updateIgnoresPopover();
+        updateFoldersPopover();
         render();
     }
 
@@ -478,9 +497,12 @@ window.addEventListener("message", event => {
             for (let idx = 0; idx < msg.lines.length; idx++) {
                 hoverLineCache[msg.uri][msg.start + idx] = msg.lines[idx];
             }
+            if (data && data.files) {
+                const f = data.files.find(file => file.uri === msg.uri);
+                if (f) delete f._widestLineWidth;
+            }
         }
-        // Force hover re-evaluation to update tooltip with newly fetched lines
-        if (lastMousePos) {
+        if (lastMousePos && isCtrlDown) {
             updateHoverTooltip();
         }
     }
@@ -1003,13 +1025,66 @@ function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
 }
 
+const THUMBNAIL_MAX_LINE_PITCH = 16;
+const THUMBNAIL_MAX_LINE_CHARS = 100;
+const THUMBNAIL_MIN_AVG_CHARS = 45;
+const THUMBNAIL_DEFAULT_AVG_CHARS = 65;
+const THUMBNAIL_SAMPLE_LINE_LIMIT = 50;
+const THUMBNAIL_WIDTH_BUDGET_FACTOR = 0.92;
+const THUMBNAIL_CHAR_ASPECT_RATIO = 0.58;
+const THUMBNAIL_LINE_HEIGHT_RATIO = 0.88;
+const THUMBNAIL_MAX_FONT_SIZE = 13;
+const THUMBNAIL_MIN_FONT_SIZE = 3.2;
+const THUMBNAIL_MIN_TEXT_PITCH = 1.5;
+const THUMBNAIL_INDENT_MAX_RATIO = 0.4;
+const THUMBNAIL_LINE_WIDTH_RATIO = 0.7;
+const THUMBNAIL_TEXT_VERTICAL_RATIO = 0.85;
+const THUMBNAIL_TEXT_FONT_RATIO = 0.95;
+const THUMBNAIL_BLOCK_MIN_HEIGHT = 0.7;
+const THUMBNAIL_SEARCH_MATCH_HEIGHT = 2.0;
+const THUMBNAIL_GIT_LINE_MIN_HEIGHT = 1.5;
+const THUMBNAIL_GIT_GUTTER_WIDTH = 2.5;
+const THUMBNAIL_GIT_DELETED_HEIGHT = 2.0;
+const THUMBNAIL_VIEWPORT_MIN_HEIGHT = 4.0;
+
+const GIT_STYLES = {
+    modifiedBg: "rgba(59, 130, 246, 0.14)",
+    modifiedGutter: "rgba(59, 130, 246, 0.75)",
+    addedBg: "rgba(34, 197, 94, 0.14)",
+    addedGutter: "rgba(34, 197, 94, 0.75)",
+    deletedLine: "rgba(239, 68, 68, 0.65)",
+    badgeModified: "#3b82f6",
+    badgeAdded: "#22c55e",
+};
+
+const THEME_COLORS = {
+    tileBackground: "#1e1e24",
+    imageTileBackground: "#252526",
+    imageTilePlaceholderText: "#858585",
+    pdfHeaderBar: "#e11d48",
+    pdfPlaceholderLine: "rgba(255, 255, 255, 0.25)",
+    searchMatchHighlight: "#ec4899",
+    activeFocusHighlight: "#a855f7",
+    viewportBandOverlay: "rgba(255, 255, 255, 0.22)",
+};
+
+const PDF_PREVIEW = {
+    barHeight: 14,
+    labelFont: "9px system-ui, sans-serif",
+    labelOffsetX: 6,
+    labelOffsetY: 10,
+    mockLinePitch: 4,
+    mockLineHeight: 2,
+    mockLineStartOffsetY: 18,
+    mockLinePaddingX: 12,
+    mockLineContentOffset: 6,
+    maxMockLines: 12,
+};
+
 // MARK: drawThumbnail
 /**
  * Draws one file's thumbnail into the given cell rect, one row per source line scaled to
- * fit the cell height (stepY). Below a ~2.5px-per-line threshold there isn't room to
- * render real glyphs, so each token is drawn as a flat colored rect proportional to its
- * character length instead ("useText" branch below) — this is what makes small tiles
- * still readable as a rough shape/density map rather than unreadable tiny text.
+ * fit the cell height (stepY).
  */
 function drawThumbnail(file, x, y, w, h) {
     ctx.save();
@@ -1029,15 +1104,14 @@ function drawThumbnail(file, x, y, w, h) {
             }
             const img = imageCache[file.mediaUri];
             if (img.complete && img.naturalWidth > 0) {
-                // Compressed/scaled image thumbnail tile maintaining aspect ratio
                 drawAspectFit(ctx, img, x, y, w, h);
                 ctx.restore();
                 return;
             }
         }
-        ctx.fillStyle = "#252526";
+        ctx.fillStyle = THEME_COLORS.imageTileBackground;
         ctx.fillRect(x, y, w, h);
-        ctx.fillStyle = "#858585";
+        ctx.fillStyle = THEME_COLORS.imageTilePlaceholderText;
         ctx.font = "10px system-ui";
         ctx.fillText("[Image]", x + 6, y + h / 2);
         ctx.restore();
@@ -1088,26 +1162,27 @@ function drawThumbnail(file, x, y, w, h) {
             }
             const cachedPdfImg = imageCache[file.mediaUri];
             if (cachedPdfImg && cachedPdfImg !== "error" && cachedPdfImg !== "loading" && cachedPdfImg.complete && cachedPdfImg.naturalWidth > 0) {
-                // Draw actual visual PDF Page 1 snapshot image maintaining aspect ratio
                 drawAspectFit(ctx, cachedPdfImg, x, y, w, h);
                 ctx.restore();
                 return;
             }
         }
 
-        ctx.fillStyle = "#1e1e24";
+        ctx.fillStyle = THEME_COLORS.tileBackground;
         ctx.fillRect(x, y, w, h);
 
-        ctx.fillStyle = "#e11d48"; // Crimson PDF header bar
-        ctx.fillRect(x, y, w, 14);
+        ctx.fillStyle = THEME_COLORS.pdfHeaderBar;
+        ctx.fillRect(x, y, w, PDF_PREVIEW.barHeight);
         ctx.fillStyle = "#ffffff";
-        ctx.font = "9px system-ui, sans-serif";
-        ctx.fillText("PDF - Page 1", x + 6, y + 10);
+        ctx.font = PDF_PREVIEW.labelFont;
+        ctx.fillText("PDF - Page 1", x + PDF_PREVIEW.labelOffsetX, y + PDF_PREVIEW.labelOffsetY);
 
-        ctx.fillStyle = "rgba(255, 255, 255, 0.25)";
-        for (let pLine = 0; pLine < Math.min(12, Math.floor((h - 20) / 4)); pLine++) {
-            const lineW = ((pLine * 37) % 60 + 35) / 100 * (w - 12);
-            ctx.fillRect(x + 6, y + 18 + pLine * 4, lineW, 2);
+        ctx.fillStyle = THEME_COLORS.pdfPlaceholderLine;
+        const availableMockHeight = h - PDF_PREVIEW.barHeight - PDF_PREVIEW.labelOffsetX;
+        const maxMockLines = Math.min(PDF_PREVIEW.maxMockLines, Math.floor(availableMockHeight / PDF_PREVIEW.mockLinePitch));
+        for (let pLine = 0; pLine < maxMockLines; pLine++) {
+            const lineW = ((pLine * 37) % 60 + 35) / 100 * (w - PDF_PREVIEW.mockLinePaddingX);
+            ctx.fillRect(x + PDF_PREVIEW.mockLineContentOffset, y + PDF_PREVIEW.mockLineStartOffsetY + pLine * PDF_PREVIEW.mockLinePitch, lineW, PDF_PREVIEW.mockLineHeight);
         }
 
         ctx.restore();
@@ -1116,28 +1191,26 @@ function drawThumbnail(file, x, y, w, h) {
 
     const lines = file.lines || [];
     const lineCount = Math.max(lines.length, 1);
-    const stepY = Math.min(h / lineCount, 6);
-    const maxLineChars = 120;
+    const stepY = Math.min(h / lineCount, THUMBNAIL_MAX_LINE_PITCH);
+    const maxLineChars = THUMBNAIL_MAX_LINE_CHARS;
+
+    const targetLineChars = Math.min(maxLineChars, Math.max(THUMBNAIL_MIN_AVG_CHARS, file._avgLineChars || THUMBNAIL_DEFAULT_AVG_CHARS));
+    const fontForWidth = (w * THUMBNAIL_WIDTH_BUDGET_FACTOR) / (targetLineChars * THUMBNAIL_CHAR_ASPECT_RATIO);
+    const fontForHeight = stepY * THUMBNAIL_LINE_HEIGHT_RATIO;
+    const rawFontSize = Math.min(fontForHeight, fontForWidth, THUMBNAIL_MAX_FONT_SIZE);
+    const fontSize = Math.max(THUMBNAIL_MIN_FONT_SIZE, Math.floor(rawFontSize * 10) / 10);
+    const useText = fontSize >= THUMBNAIL_MIN_FONT_SIZE && stepY >= THUMBNAIL_MIN_TEXT_PITCH;
+
+    if (useText) {
+        ctx.font = `${fontSize}px Consolas, "Courier New", monospace`;
+    }
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        if (!line || !line.text) {
-            continue;
-        }
-
-        const indent = line.indent;
-        const startX = x + Math.min(indent / maxLineChars, 0.4) * w;
-
-        const trimmedText = line.text.trimStart();
-        const lineTextLength = trimmedText.length;
-        if (lineTextLength === 0) {
-            continue;
-        }
-
-        const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * 0.7;
+        const lineText = line?.text || "";
 
         let isMatchedLine = false;
-        if (rawSearchQuery && !searchInvalid) {
+        if (rawSearchQuery && !searchInvalid && lineText) {
             if (file.fullLines && file.lineCount > lines.length) {
                 const step = file.lineCount / lines.length;
                 const startLineIdx = Math.floor(i * step);
@@ -1151,52 +1224,73 @@ function drawThumbnail(file, x, y, w, h) {
                     }
                 }
             } else {
-                const orig = line.text;
-                const lower = line._lowerText !== undefined ? line._lowerText : orig.toLowerCase();
-                isMatchedLine = textMatches(orig, lower);
+                const lower = line._lowerText !== undefined ? line._lowerText : lineText.toLowerCase();
+                isMatchedLine = textMatches(lineText, lower);
             }
         }
 
+        const gitType = (file.gitStatus === "untracked" || file.gitStatus === "added")
+            ? "added"
+            : (file.gitChanges ? file.gitChanges[i] : undefined);
+
         if (isMatchedLine) {
-            ctx.fillStyle = "#ec4899"; // Highlight pink for search match
+            ctx.fillStyle = THEME_COLORS.searchMatchHighlight;
             ctx.fillRect(
                 x,
                 y + i * stepY,
                 w,
-                Math.max(stepY, 2.0)
+                Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
             );
-        } else {
-            const tokens = line._tokens || tokenizeLine(trimmedText, detectLang(file.path));
-            const totalTextChars = Math.max(lineTextLength, 1);
+        } else if (gitType === "modified") {
+            ctx.fillStyle = GIT_STYLES.modifiedBg;
+            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            ctx.fillStyle = GIT_STYLES.modifiedGutter;
+            ctx.fillRect(x, y + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+        } else if (gitType === "added") {
+            ctx.fillStyle = GIT_STYLES.addedBg;
+            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            ctx.fillStyle = GIT_STYLES.addedGutter;
+            ctx.fillRect(x, y + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+        } else if (gitType === "removed") {
+            ctx.fillStyle = GIT_STYLES.deletedLine;
+            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_DELETED_HEIGHT));
+        }
 
-            const useText = stepY >= 3;
+        if (!line || !lineText || isMatchedLine) {
+            continue;
+        }
+
+        const indent = line.indent || 0;
+        const startX = x + Math.min(indent / maxLineChars, THUMBNAIL_INDENT_MAX_RATIO) * w;
+        const trimmedText = lineText.trimStart();
+        const lineTextLength = trimmedText.length;
+        if (lineTextLength === 0) {
+            continue;
+        }
+
+        const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * THUMBNAIL_LINE_WIDTH_RATIO;
+        const tokens = line._tokens || tokenizeLine(trimmedText, detectLang(file.path));
+        const totalTextChars = Math.max(lineTextLength, 1);
+
+        let currentX = startX;
+        for (const tok of tokens) {
+            if (currentX >= x + w) break;
+
+            ctx.fillStyle = colorForCategory(tok.category, tok.isKey);
             if (useText) {
-                // For small files (few lines), keep font size small (5px) so much more line width is visible
-                const isSmallFile = lines.length <= 50 || stepY > 4;
-                const fontSize = isSmallFile ? 5 : Math.min(10, Math.max(4, Math.floor(stepY * 0.85)));
-                ctx.font = `${fontSize}px Consolas, monospace`;
-            }
+                ctx.fillText(tok.text, currentX, y + i * stepY + Math.min(stepY * THUMBNAIL_TEXT_VERTICAL_RATIO, fontSize * THUMBNAIL_TEXT_FONT_RATIO));
+                currentX += ctx.measureText(tok.text).width;
+            } else {
+                const tokLen = tok.text.length;
+                const tokW = (tokLen / totalTextChars) * lineW;
 
-            let currentX = startX;
-            for (const tok of tokens) {
-                if (currentX >= x + w) break;
-
-                ctx.fillStyle = colorForCategory(tok.category, tok.isKey);
-                if (useText) {
-                    ctx.fillText(tok.text, currentX, y + i * stepY + Math.min(stepY * 0.8, 8));
-                    currentX += ctx.measureText(tok.text).width;
-                } else {
-                    const tokLen = tok.text.length;
-                    const tokW = (tokLen / totalTextChars) * lineW;
-
-                    ctx.fillRect(
-                        currentX,
-                        y + i * stepY,
-                        Math.min(tokW, x + w - currentX),
-                        Math.max(stepY, 0.7)
-                    );
-                    currentX += tokW;
-                }
+                ctx.fillRect(
+                    currentX,
+                    y + i * stepY,
+                    Math.min(tokW, x + w - currentX),
+                    Math.max(stepY, THUMBNAIL_BLOCK_MIN_HEIGHT)
+                );
+                currentX += tokW;
             }
         }
     }
@@ -1216,7 +1310,7 @@ function drawThumbnail(file, x, y, w, h) {
         const thumbnailH = h;
 
         const bandY = thumbnailY + startRatio * thumbnailH;
-        const bandH = Math.max((endRatio - startRatio) * thumbnailH, 4.0);
+        const bandH = Math.max((endRatio - startRatio) * thumbnailH, THUMBNAIL_VIEWPORT_MIN_HEIGHT);
 
         // Store bounding rect of view band on cell for click detection
         file._cell._viewBand = {
@@ -1224,7 +1318,7 @@ function drawThumbnail(file, x, y, w, h) {
             h: bandH
         };
 
-        ctx.fillStyle = "rgba(255, 255, 255, 0.22)"; // Transparent gray viewport overlay
+        ctx.fillStyle = THEME_COLORS.viewportBandOverlay;
         ctx.fillRect(
             x,
             bandY,
@@ -1357,6 +1451,18 @@ function drawFileTile(file, x, y, w, h, dimForFocus) {
         file._fittedLabel = fitPathText(file.path, w - TILE_LABEL_WIDTH_MARGIN);
     }
     ctx.fillText(file._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
+
+    if (file.gitStatus) {
+        ctx.font = "bold 9px system-ui, sans-serif";
+        const badgeX = x + w - (isOpen ? TILE_LABEL_WIDTH_MARGIN : 22);
+        if (file.gitStatus === "modified") {
+            ctx.fillStyle = GIT_STYLES.badgeModified;
+            ctx.fillText("M", badgeX, y + TILE_LABEL_OFFSET_Y);
+        } else if (file.gitStatus === "added" || file.gitStatus === "untracked") {
+            ctx.fillStyle = GIT_STYLES.badgeAdded;
+            ctx.fillText(file.gitStatus === "untracked" ? "U" : "A", badgeX, y + TILE_LABEL_OFFSET_Y);
+        }
+    }
 
     if (isOpen) {
         drawCloseBtn(file, x, y, w);
@@ -1707,39 +1813,68 @@ canvas.addEventListener("auxclick", event => {
     }
 });
 
-let isCtrlDown = false;
-let hoverRafId = null;
+function isControlModifier(event) {
+    if (!event) return false;
+    return !!(
+        event.ctrlKey || event.metaKey ||
+        event.key === "Control" || event.key === "Meta" ||
+        event.code === "ControlLeft" || event.code === "ControlRight" ||
+        event.code === "MetaLeft" || event.code === "MetaRight"
+    );
+}
 
 window.addEventListener("keydown", event => {
-    if (event.key === "Escape") {
+    if (event.key === "Escape" || event.code === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
         clearDragState();
-        render();
-    } else if (event.key === "Control") {
-        isCtrlDown = true;
-        if (lastMousePos) {
-            updateHoverTooltip();
+        closeAllPopovers();
+        if (typeof hideContextMenu === "function") {
+            hideContextMenu();
         }
-    } else if (event.ctrlKey) {
         isCtrlDown = false;
         tooltip.style.display = "none";
+        render();
+        return;
     }
-});
+    if (isControlModifier(event)) {
+        isCtrlDown = true;
+        updateHoverTooltip();
+    }
+}, true);
 
 window.addEventListener("keyup", event => {
-    if (event.key === "Control" || !event.ctrlKey) {
+    if (event.key === "Escape" || event.code === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        return;
+    }
+    if (!event.ctrlKey && !event.metaKey) {
         isCtrlDown = false;
         tooltip.style.display = "none";
     }
-});
+}, true);
 
 window.addEventListener("blur", () => {
     isCtrlDown = false;
     tooltip.style.display = "none";
 });
 
+const TOOLTIP_CONFIG = {
+    minWidth: 220,
+    lineRadius: 12,
+    gap: 12,
+    viewportMargin: 16,
+};
+
 /** Estimates the pixel width the CTRL-hover tooltip needs to fit the widest line/path in file, so its width doesn't jitter as the cursor moves between lines. */
 function getFileWidestLineWidth(file) {
     if (!file) return 300;
+    if (file._widestLineWidth !== undefined) {
+        return file._widestLineWidth;
+    }
     let maxCharLen = 0;
     if (file.lines && file.lines.length > 0) {
         for (let i = 0; i < file.lines.length; i++) {
@@ -1775,155 +1910,171 @@ function getFileWidestLineWidth(file) {
     const maxLineWidth = Math.max(textWidthPx, headerWidthPx);
     const maxAllowedWidth = Math.min(750, Math.max(300, window.innerWidth - 32));
 
-    return Math.max(220, Math.min(maxAllowedWidth, maxLineWidth));
+    const width = Math.max(TOOLTIP_CONFIG.minWidth, Math.min(maxAllowedWidth, maxLineWidth));
+    file._widestLineWidth = width;
+    return width;
 }
 
 // MARK: updateHoverTooltip
 /** Finds the file/line under the cursor during a CTRL-hover and rebuilds the tooltip's HTML, size, and position to show it. */
 function updateHoverTooltip() {
-    if (!data) return;
-
-    if (!isCtrlDown) {
+    if (!data || !isCtrlDown) {
         tooltip.style.display = "none";
         return;
     }
 
-    let hoveredLineIdx = -1;
-    if (hoveredFile && hoveredFile._cell) {
-        const c = hoveredFile._cell;
-        const thumbnailTop = c.y + 24;
-        const thumbnailHeight = Math.max(1, c.h - 34);
-        const relativeY = Math.max(0, Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight));
-        hoveredLineIdx = Math.floor(relativeY * hoveredFile.lineCount);
+    if (!cursorPos && lastMousePos) {
+        const rect = canvas.getBoundingClientRect();
+        cursorPos = { px: lastMousePos.x - rect.left, py: lastMousePos.y - rect.top };
     }
 
-    if (hoveredFile && (hoveredFile.isImage || hoveredFile.isPdf)) {
+    if (!cursorPos) {
         tooltip.style.display = "none";
         return;
     }
 
-    if (hoveredFile && hoveredLineIdx >= 0 && hoveredLineIdx < hoveredFile.lineCount) {
-        const radius = 12;
-        let start = hoveredLineIdx - radius;
-        let end = hoveredLineIdx + radius;
+    if (!hoveredFile) {
+        hoveredFile = findFileAt(cursorPos.px, cursorPos.py);
+    }
 
-        if (start < 0) {
-            end = Math.min(hoveredFile.lineCount - 1, end + (-start));
-            start = 0;
+    if (!hoveredFile || !hoveredFile._cell || hoveredFile.isImage || hoveredFile.isPdf) {
+        tooltip.style.display = "none";
+        return;
+    }
+
+    const c = hoveredFile._cell;
+    const thumbnailTop = c.y + TILE_THUMBNAIL_OFFSET_Y;
+    const thumbnailHeight = Math.max(1, c.h - TILE_THUMBNAIL_HEIGHT_MARGIN);
+    const totalLines = Math.max(hoveredFile.lineCount || (hoveredFile.lines ? hoveredFile.lines.length : 1), 1);
+    const relativeY = Math.max(0, Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight));
+    const hoveredLineIdx = Math.max(0, Math.min(totalLines - 1, Math.floor(relativeY * totalLines)));
+
+    const radius = TOOLTIP_CONFIG.lineRadius;
+    let start = Math.max(0, hoveredLineIdx - radius);
+    let end = Math.min(totalLines - 1, hoveredLineIdx + radius);
+
+    if (start === 0) {
+        end = Math.min(totalLines - 1, start + radius * 2);
+    }
+    if (end === totalLines - 1) {
+        start = Math.max(0, end - radius * 2);
+    }
+
+    // Check if any required lines are missing from scan results and cache
+    let missingLines = false;
+    const uriCache = hoverLineCache[hoveredFile.uri] || {};
+
+    for (let i = start; i <= end; i++) {
+        if ((!hoveredFile.lines || !hoveredFile.lines[i]) && !uriCache[i]) {
+            missingLines = true;
+            break;
         }
-        if (end >= hoveredFile.lineCount) {
-            start = Math.max(0, start - (end - (hoveredFile.lineCount - 1)));
-            end = hoveredFile.lineCount - 1;
+    }
+
+    if (missingLines) {
+        const reqKey = `${hoveredFile.uri}:${start}:${end}`;
+        if (pendingHoverRequest !== reqKey) {
+            pendingHoverRequest = reqKey;
+            vscode.postMessage({
+                command: "getHoverLines",
+                uri: hoveredFile.uri,
+                start,
+                end,
+                requestId: reqKey
+            });
         }
+    }
 
-        // Check if any required lines are missing from scan results and cache
-        let missingLines = false;
-        const uriCache = hoverLineCache[hoveredFile.uri] || {};
+    const isOpen = openFilesSet.has(hoveredFile.uri);
+    const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
+    let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
 
-        for (let i = start; i <= end; i++) {
-            if (!hoveredFile.lines[i] && !uriCache[i]) {
-                missingLines = true;
-                break;
-            }
-        }
+    for (let i = start; i <= end; i++) {
+        const line = (hoveredFile.lines && hoveredFile.lines[i]) ? hoveredFile.lines[i] : uriCache[i];
+        const isHoveredLine = i === hoveredLineIdx;
+        const lineText = line ? line.text : "Loading line...";
+        const lang = detectLang(hoveredFile.path);
 
-        if (missingLines) {
-            const reqKey = `${hoveredFile.uri}:${start}:${end}`;
-            if (pendingHoverRequest !== reqKey) {
-                pendingHoverRequest = reqKey;
-                vscode.postMessage({
-                    command: "getHoverLines",
-                    uri: hoveredFile.uri,
-                    start,
-                    end,
-                    requestId: reqKey
-                });
-            }
-        }
-
-        const isOpen = openFilesSet.has(hoveredFile.uri);
-        const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
-        let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
-
-        for (let i = start; i <= end; i++) {
-            const line = hoveredFile.lines[i] || uriCache[i];
-            const isHoveredLine = i === hoveredLineIdx;
-            const lineText = line ? line.text : "Loading line...";
-            const lang = detectLang(hoveredFile.path);
-
-            if (line && !line._htmlCache) {
-                const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
-                line._htmlCache = buildLineHtml(tokens, null);
-            }
-
-            let lineHtml;
-            if (rawSearchQuery && !searchInvalid && line) {
-                const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
-                const hl = searchRegex
-                    ? new RegExp(searchRegex.source, searchRegex.flags.includes("g") ? searchRegex.flags : searchRegex.flags + "g")
-                    : new RegExp(escapeRegExp(rawSearchQuery), matchCase ? "g" : "gi");
-                lineHtml = buildLineHtml(tokens, hl);
-            } else {
-                lineHtml = (line && line._htmlCache) ? line._htmlCache : lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            }
-
-            const isMatchLine = rawSearchQuery && !searchInvalid &&
-                textMatches(lineText, line && line._lowerText !== undefined ? line._lowerText : lineText.toLowerCase());
-
-            let bgStyle = "";
-            let prefix = "  ";
-
-            if (isHoveredLine) {
-                prefix = `<span style="color: #a855f7; font-weight: bold;">&gt; </span>`;
-                if (isMatchLine) {
-                    bgStyle = "background: rgba(236, 72, 153, 0.28); display: inline-block; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px;";
-                } else {
-                    bgStyle = "background: rgba(168, 85, 247, 0.18); display: inline-block; width: 100%; border-left: 3px solid #a855f7; padding-left: 2px;";
-                }
-            } else if (isMatchLine) {
-                bgStyle = "background: rgba(236, 72, 153, 0.2); display: inline-block; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px;";
-            }
-
-            tooltipHtml += `<div style="${bgStyle}">${prefix}${lineHtml}</div>`;
+        if (line && !line._htmlCache) {
+            const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
+            line._htmlCache = buildLineHtml(tokens, null);
         }
 
-        tooltip.innerHTML = tooltipHtml;
-        const overlayWidth = getFileWidestLineWidth(hoveredFile);
-        tooltip.style.width = `${overlayWidth}px`;
-        tooltip.style.display = "block";
-
-        const c = hoveredFile._cell;
-        const gap = 12;
-        const cellCenterX = c.x + c.w / 2;
-        let tx;
-
-        if (cellCenterX > window.innerWidth / 2) {
-            // Right half of screen -> place to the left of the tile
-            tx = c.x - gap - tooltip.offsetWidth;
-            if (tx < 16) {
-                // If overflowing left edge, clamp to viewport margin
-                tx = 16;
-            }
+        let lineHtml;
+        if (rawSearchQuery && !searchInvalid && line) {
+            const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
+            const hl = searchRegex
+                ? new RegExp(searchRegex.source, searchRegex.flags.includes("g") ? searchRegex.flags : searchRegex.flags + "g")
+                : new RegExp(escapeRegExp(rawSearchQuery), matchCase ? "g" : "gi");
+            lineHtml = buildLineHtml(tokens, hl);
         } else {
-            // Left half of screen -> place to the right of the tile
-            tx = c.x + c.w + gap;
-            if (tx + tooltip.offsetWidth > window.innerWidth - 16) {
-                // If overflowing right edge, clamp to viewport margin
-                tx = window.innerWidth - tooltip.offsetWidth - 16;
+            lineHtml = (line && line._htmlCache) ? line._htmlCache : lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+
+        const isMatchLine = rawSearchQuery && !searchInvalid &&
+            textMatches(lineText, line && line._lowerText !== undefined ? line._lowerText : lineText.toLowerCase());
+
+        const gitType = (hoveredFile.gitStatus === "untracked" || hoveredFile.gitStatus === "added")
+            ? "added"
+            : (hoveredFile.gitChanges ? hoveredFile.gitChanges[i] : undefined);
+
+        let bgStyle = "display: block; box-sizing: border-box; width: 100%; min-height: 1.4em;";
+        let prefix = "  ";
+
+        if (isHoveredLine) {
+            prefix = `<span style="color: #a855f7; font-weight: bold;">&gt; </span>`;
+            if (isMatchLine) {
+                bgStyle = "background: rgba(236, 72, 153, 0.28); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px; min-height: 1.4em;";
+            } else if (gitType === "modified") {
+                bgStyle = "background: rgba(59, 130, 246, 0.22); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #3b82f6; padding-left: 2px; min-height: 1.4em;";
+            } else if (gitType === "added") {
+                bgStyle = "background: rgba(34, 197, 94, 0.22); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #22c55e; padding-left: 2px; min-height: 1.4em;";
+            } else if (gitType === "removed") {
+                bgStyle = "background: rgba(239, 68, 68, 0.25); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ef4444; padding-left: 2px; min-height: 1.4em;";
+            } else {
+                bgStyle = "background: rgba(168, 85, 247, 0.18); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #a855f7; padding-left: 2px; min-height: 1.4em;";
             }
+        } else if (isMatchLine) {
+            bgStyle = "background: rgba(236, 72, 153, 0.2); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px; min-height: 1.4em;";
+        } else if (gitType === "modified") {
+            bgStyle = "background: rgba(59, 130, 246, 0.14); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(59, 130, 246, 0.85); padding-left: 2px; min-height: 1.4em;";
+        } else if (gitType === "added") {
+            bgStyle = "background: rgba(34, 197, 94, 0.14); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(34, 197, 94, 0.85); padding-left: 2px; min-height: 1.4em;";
+        } else if (gitType === "removed") {
+            bgStyle = "background: rgba(239, 68, 68, 0.18); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(239, 68, 68, 0.85); padding-left: 2px; min-height: 1.4em;";
         }
 
-        let ty = lastMousePos.y + 16;
-        if (ty + tooltip.offsetHeight > window.innerHeight - 16) {
-            ty = window.innerHeight - tooltip.offsetHeight - 16;
-        }
-        ty = Math.max(16, ty);
-
-        tooltip.style.left = `${tx}px`;
-        tooltip.style.top = `${ty}px`;
-    } else {
-        tooltip.style.display = "none";
+        tooltipHtml += `<div style="${bgStyle}">${prefix}${lineHtml}</div>`;
     }
+
+    tooltip.innerHTML = tooltipHtml;
+    const overlayWidth = getFileWidestLineWidth(hoveredFile);
+    tooltip.style.width = `${overlayWidth}px`;
+    tooltip.style.display = "block";
+
+    const gap = TOOLTIP_CONFIG.gap;
+    const cellCenterX = c.x + c.w / 2;
+    let tx;
+
+    if (cellCenterX > window.innerWidth / 2) {
+        tx = c.x - gap - overlayWidth;
+        if (tx < TOOLTIP_CONFIG.viewportMargin) {
+            tx = TOOLTIP_CONFIG.viewportMargin;
+        }
+    } else {
+        tx = c.x + c.w + gap;
+        if (tx + overlayWidth > window.innerWidth - TOOLTIP_CONFIG.viewportMargin) {
+            tx = window.innerWidth - overlayWidth - TOOLTIP_CONFIG.viewportMargin;
+        }
+    }
+
+    const ty = Math.max(
+        TOOLTIP_CONFIG.viewportMargin,
+        Math.min(window.innerHeight - 320 - TOOLTIP_CONFIG.viewportMargin, c.y)
+    );
+
+    tooltip.style.left = `${tx}px`;
+    tooltip.style.top = `${ty}px`;
 }
 
 let lastFocusRequestTime = 0;
@@ -1983,7 +2134,7 @@ canvas.addEventListener("mousemove", event => {
         const dy = Math.abs(candidateFile.startY - cursorPos.py);
 
         // only start dragging if cursor has moved more than the threshold
-        if ( dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
+        if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
             draggingFile = candidateFile.file;
             candidateFile = null;
         }
@@ -2002,17 +2153,12 @@ canvas.addEventListener("mousemove", event => {
         return;
     }
 
-    if (!event.ctrlKey) {
+    if (isControlModifier(event)) {
+        isCtrlDown = true;
+        updateHoverTooltip();
+    } else {
         isCtrlDown = false;
         tooltip.style.display = "none";
-        return;
-    }
-
-    if (!hoverRafId) {
-        hoverRafId = requestAnimationFrame(() => {
-            hoverRafId = null;
-            updateHoverTooltip();
-        });
     }
 });
 
@@ -2155,14 +2301,12 @@ canvas.addEventListener("mouseup", event => {
 canvas.addEventListener("mouseleave", () => {
     clearDragState();
     hoveredFile = null;
-    cursorPos = null;
     render();
-    isCtrlDown = false;
-    tooltip.style.display = "none";
 });
 
 document.addEventListener("mouseleave", () => {
     isCtrlDown = false;
+    cursorPos = null;
     tooltip.style.display = "none";
 });
 
@@ -2330,30 +2474,334 @@ const themeObserver = new MutationObserver(() => {
 });
 themeObserver.observe(document.body, { attributes: true, attributeFilter: ["style", "class"] });
 
-// Actions & Shortcuts Modal Toggle
+// Functions for Settings Modal, Folder Navigation, and Ignored Items Popovers
+function updateSettingsModalState() {
+    if (!data) return;
+    const isSpanning = data.mode === "spanning_grid";
+    const spanBtn = document.getElementById("layout-spanning-btn");
+    const uniformBtn = document.getElementById("layout-uniform-btn");
+    if (spanBtn && uniformBtn) {
+        spanBtn.classList.toggle("active", isSpanning);
+        uniformBtn.classList.toggle("active", !isSpanning);
+    }
+
+    const isSwap = (data.dragReorderMode || "swap") === "swap";
+    const swapBtn = document.getElementById("drag-swap-btn");
+    const shiftBtn = document.getElementById("drag-shift-btn");
+    if (swapBtn && shiftBtn) {
+        swapBtn.classList.toggle("active", isSwap);
+        shiftBtn.classList.toggle("active", !isSwap);
+    }
+
+    const mediaToggle = document.getElementById("media-thumbnails-toggle");
+    if (mediaToggle) {
+        mediaToggle.checked = data.renderMediaThumbnails !== false;
+    }
+}
+
+function updateIgnoresPopover() {
+    const badge = document.getElementById("ignores-badge");
+    if (badge) {
+        badge.textContent = currentIgnorePatterns.length;
+    }
+
+    const list = document.getElementById("ignores-list");
+    if (!list) return;
+    list.innerHTML = "";
+
+    if (currentIgnorePatterns.length === 0) {
+        const empty = document.createElement("div");
+        empty.style.padding = "16px";
+        empty.style.textAlign = "center";
+        empty.style.color = "#707075";
+        empty.style.fontSize = "12px";
+        empty.textContent = "No active ignore patterns";
+        list.appendChild(empty);
+        return;
+    }
+
+    for (const pat of currentIgnorePatterns) {
+        const item = document.createElement("div");
+        item.className = "popover-item";
+        
+        const label = document.createElement("span");
+        label.textContent = pat;
+        item.appendChild(label);
+
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "remove-pattern-btn";
+        removeBtn.title = "Unignore";
+        removeBtn.innerHTML = "&times;";
+        removeBtn.onclick = (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: "removeIgnorePattern", pattern: pat });
+        };
+        item.appendChild(removeBtn);
+
+        list.appendChild(item);
+    }
+}
+
+function updateFoldersPopover() {
+    const list = document.getElementById("folders-list");
+    if (!list || !data || !data.files) return;
+    list.innerHTML = "";
+
+    // 1. All Workspace Files (Root)
+    const allItem = document.createElement("div");
+    allItem.className = "popover-item" + (!focusedFolder ? " active" : "");
+    allItem.innerHTML = `<span>🌐 All Workspace Files (Root)</span><span class="popover-item-count">${data.files.length} files</span>`;
+    allItem.onclick = () => {
+        focusedFolder = "";
+        updateBreadcrumbs();
+        render();
+        closeAllPopovers();
+    };
+    list.appendChild(allItem);
+
+    // 2. Root Directory Files Only
+    const rootOnlyFiles = data.files.filter(f => f.path && !f.path.includes("/"));
+    if (rootOnlyFiles.length > 0) {
+        const rootOnlyItem = document.createElement("div");
+        rootOnlyItem.className = "popover-item" + (focusedFolder === "(root files)/" ? " active" : "");
+        rootOnlyItem.innerHTML = `<span>📄 Root Directory Files Only</span><span class="popover-item-count">${rootOnlyFiles.length} file${rootOnlyFiles.length === 1 ? "" : "s"}</span>`;
+        rootOnlyItem.onclick = () => {
+            focusedFolder = "(root files)/";
+            updateBreadcrumbs();
+            render();
+            closeAllPopovers();
+        };
+        list.appendChild(rootOnlyItem);
+    }
+
+    // 3. Collect directory paths and counts
+    const folderCounts = new Map();
+    for (const f of data.files) {
+        if (!f.path) continue;
+        const parts = f.path.split("/");
+        if (parts.length > 1) {
+            let currentPath = "";
+            for (let i = 0; i < parts.length - 1; i++) {
+                currentPath += parts[i] + "/";
+                folderCounts.set(currentPath, (folderCounts.get(currentPath) || 0) + 1);
+            }
+        }
+    }
+
+    const sortedFolders = Array.from(folderCounts.keys()).sort();
+    for (const folderPath of sortedFolders) {
+        const count = folderCounts.get(folderPath);
+        const item = document.createElement("div");
+        item.className = "popover-item" + (focusedFolder === folderPath ? " active" : "");
+        
+        const indent = Math.max(0, (folderPath.split("/").length - 2) * 12);
+        item.style.paddingLeft = `${10 + indent}px`;
+        
+        const titleDiv = document.createElement("div");
+        titleDiv.style.display = "flex";
+        titleDiv.style.alignItems = "center";
+        titleDiv.style.gap = "6px";
+        titleDiv.style.flex = "1";
+        titleDiv.style.minWidth = "0";
+        titleDiv.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📁 ${folderPath}</span><span class="popover-item-count">${count} file${count === 1 ? "" : "s"}</span>`;
+        item.appendChild(titleDiv);
+
+        const ignoreBtn = document.createElement("button");
+        ignoreBtn.className = "popover-action-btn";
+        ignoreBtn.title = `Ignore folder '${folderPath}' in Thumbview`;
+        ignoreBtn.textContent = "Ignore";
+        ignoreBtn.onclick = (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: "addIgnorePattern", pattern: folderPath });
+        };
+        item.appendChild(ignoreBtn);
+
+        item.onclick = () => {
+            focusedFolder = folderPath;
+            updateBreadcrumbs();
+            render();
+            closeAllPopovers();
+        };
+        list.appendChild(item);
+    }
+}
+
+// Popover and Modal Elements & Handlers
+const foldersBtn = document.getElementById("folders-btn");
+const foldersPopover = document.getElementById("folders-popover");
+const closeFoldersPopover = document.getElementById("close-folders-popover");
+
+const ignoresBtn = document.getElementById("ignores-btn");
+const ignoresPopover = document.getElementById("ignores-popover");
+const closeIgnoresPopover = document.getElementById("close-ignores-popover");
+const addIgnoreInput = document.getElementById("add-ignore-input");
+const addIgnoreBtn = document.getElementById("add-ignore-btn");
+
 const actionsBtn = document.getElementById("actions-btn");
 const actionsModal = document.getElementById("actions-modal");
 const closeModal = document.getElementById("close-modal");
 
+function closeAllPopovers() {
+    if (foldersPopover) foldersPopover.style.display = "none";
+    if (ignoresPopover) ignoresPopover.style.display = "none";
+    if (actionsModal) actionsModal.style.display = "none";
+    if (foldersBtn) foldersBtn.classList.remove("active");
+    if (ignoresBtn) ignoresBtn.classList.remove("active");
+    if (actionsBtn) actionsBtn.classList.remove("active");
+}
+
+if (foldersBtn && foldersPopover) {
+    foldersBtn.onclick = (e) => {
+        e.stopPropagation();
+        const isOpen = foldersPopover.style.display === "flex";
+        closeAllPopovers();
+        if (!isOpen) {
+            updateFoldersPopover();
+            foldersPopover.style.display = "flex";
+            foldersBtn.classList.add("active");
+        }
+    };
+}
+if (closeFoldersPopover && foldersPopover) {
+    closeFoldersPopover.onclick = () => {
+        foldersPopover.style.display = "none";
+        if (foldersBtn) foldersBtn.classList.remove("active");
+    };
+}
+
+if (ignoresBtn && ignoresPopover) {
+    ignoresBtn.onclick = (e) => {
+        e.stopPropagation();
+        const isOpen = ignoresPopover.style.display === "flex";
+        closeAllPopovers();
+        if (!isOpen) {
+            updateIgnoresPopover();
+            ignoresPopover.style.display = "flex";
+            ignoresBtn.classList.add("active");
+        }
+    };
+}
+if (closeIgnoresPopover && ignoresPopover) {
+    closeIgnoresPopover.onclick = () => {
+        ignoresPopover.style.display = "none";
+        if (ignoresBtn) ignoresBtn.classList.remove("active");
+    };
+}
+
+function handleAddIgnore() {
+    if (!addIgnoreInput) return;
+    const val = addIgnoreInput.value.trim();
+    if (val) {
+        vscode.postMessage({ command: "addIgnorePattern", pattern: val });
+        addIgnoreInput.value = "";
+    }
+}
+if (addIgnoreBtn) {
+    addIgnoreBtn.onclick = handleAddIgnore;
+}
+if (addIgnoreInput) {
+    addIgnoreInput.onkeydown = (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            handleAddIgnore();
+        }
+    };
+}
+
 if (actionsBtn && actionsModal) {
     actionsBtn.onclick = (e) => {
         e.stopPropagation();
-        actionsModal.style.display = actionsModal.style.display === "block" ? "none" : "block";
+        const isOpen = actionsModal.style.display === "block";
+        closeAllPopovers();
+        if (!isOpen) {
+            updateSettingsModalState();
+            actionsModal.style.display = "block";
+            actionsBtn.classList.add("active");
+        }
     };
 }
 if (closeModal && actionsModal) {
     closeModal.onclick = () => {
         actionsModal.style.display = "none";
+        if (actionsBtn) actionsBtn.classList.remove("active");
     };
 }
+
+// Settings modal buttons
+const layoutSpanningBtn = document.getElementById("layout-spanning-btn");
+const layoutUniformBtn = document.getElementById("layout-uniform-btn");
+if (layoutSpanningBtn) {
+    layoutSpanningBtn.onclick = () => {
+        vscode.postMessage({ command: "setLayoutMode", mode: "spanning_grid" });
+    };
+}
+if (layoutUniformBtn) {
+    layoutUniformBtn.onclick = () => {
+        vscode.postMessage({ command: "setLayoutMode", mode: "uniform_grid" });
+    };
+}
+
+const dragSwapBtn = document.getElementById("drag-swap-btn");
+const dragShiftBtn = document.getElementById("drag-shift-btn");
+if (dragSwapBtn) {
+    dragSwapBtn.onclick = () => {
+        vscode.postMessage({ command: "setDragReorderMode", mode: "swap" });
+    };
+}
+if (dragShiftBtn) {
+    dragShiftBtn.onclick = () => {
+        vscode.postMessage({ command: "setDragReorderMode", mode: "shift" });
+    };
+}
+
+const mediaThumbnailsToggle = document.getElementById("media-thumbnails-toggle");
+if (mediaThumbnailsToggle) {
+    mediaThumbnailsToggle.onchange = () => {
+        vscode.postMessage({ command: "setRenderMediaThumbnails", enabled: mediaThumbnailsToggle.checked });
+    };
+}
+
+const reflowLayoutBtn = document.getElementById("reflow-layout-btn");
+if (reflowLayoutBtn) {
+    reflowLayoutBtn.onclick = () => {
+        vscode.postMessage({ command: "reflow" });
+    };
+}
+
+const changeHotkeyBtn = document.getElementById("change-hotkey-btn");
+if (changeHotkeyBtn) {
+    changeHotkeyBtn.onclick = () => {
+        vscode.postMessage({ command: "configureHotkey" });
+    };
+}
+
 document.addEventListener("click", event => {
-    if (actionsModal && actionsModal.style.display === "block" && !actionsModal.contains(event.target) && event.target !== actionsBtn) {
-        actionsModal.style.display = "none";
+    const clickedInside =
+        (actionsModal && actionsModal.contains(event.target)) ||
+        (foldersPopover && foldersPopover.contains(event.target)) ||
+        (ignoresPopover && ignoresPopover.contains(event.target)) ||
+        event.target === actionsBtn ||
+        event.target === foldersBtn ||
+        event.target === ignoresBtn;
+
+    if (!clickedInside) {
+        closeAllPopovers();
     }
 });
 
 resize();
 window.focus();
+
+function checkAndRequestZenMode() {
+    const heightDiff = window.outerHeight - window.innerHeight;
+    const isAlreadyZen = heightDiff < 30 && window.innerHeight > 300;
+    if (!isAlreadyZen) {
+        vscode.postMessage({
+            command: "ensureZenMode"
+        });
+    }
+}
+checkAndRequestZenMode();
 
 vscode.postMessage({
     command: "ready"

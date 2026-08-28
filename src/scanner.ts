@@ -22,6 +22,8 @@ export interface RepoFile {
     isImage?: boolean;
     isPdf?: boolean;
     mediaUri?: string;
+    gitChanges?: { [lineIndex0: number]: "added" | "modified" | "removed" };
+    gitStatus?: "modified" | "added" | "untracked" | "deleted";
 }
 
 // Coarse per-line category guess from leading/contained keywords, not a real parser.

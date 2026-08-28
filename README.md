@@ -23,25 +23,26 @@ Tune behavior later via **File → Preferences → Settings → Thumbview** (see
 
 ## Reading the Grid
 
-- **Layouts**: `thumbview.layoutMode` selects `"spanning_grid"` (default - tall files span multiple vertical cells, so file length is visible at a glance) or `"uniform_grid"` (one equal cell per file). Switch any time from the Command Palette (`Thumbview: Use Uniform/Spanning Grid Layout`) or the **Actions & Settings** sidebar.
+- **Layouts**: `thumbview.layoutMode` selects `"spanning_grid"` (default - tall files span multiple vertical cells, so file length is visible at a glance) or `"uniform_grid"` (one equal cell per file). Switch any time from the top toolbar **⚙ Settings** modal, Command Palette (`Thumbview: Use Uniform/Spanning Grid Layout`), or the sidebar.
 - **Folder cards**: when tiles would shrink below the minimum cell size (`thumbview.minCellWidth: 32` / `thumbview.minCellHeight: 28` px), files group into clickable folder cards. Click a card to drill into that subfolder; use the breadcrumbs at the top to navigate back.
-- **Reflow**: run `Thumbview: Reflow Layout` to re-fit the grid after resizing the panel or window.
+- **Directory Navigation**: click the **📁 Folders** button in the top toolbar to focus any subdirectory, isolate root files, or reset to root without leaving the canvas.
+- **Reflow**: run `Thumbview: Reflow Layout` or click **Reflow Grid** in the **⚙ Settings** modal to re-fit the grid after resizing the panel or window.
 
 ## Ignoring & Unignoring Files
 
 Keep the grid fast and relevant by hiding noise (`dist/`, generated code, vendored assets):
 
+- **Manage ignores from the top bar**: click **👁 Ignored** in the top toolbar to see all active ignore patterns, add custom globs with `+ Add`, or remove patterns instantly with `×`.
 - **Ignore a directory**: right-click it in **Directory Navigation** → **Ignore Directory** (or click its inline eye-closed icon).
 - **Ignore a file**: right-click its tile in the grid → **Ignore in Thumbview**.
-- **Unignore**: click the 👁 icon next to any `(hidden)` folder in **Directory Navigation**, or right-click an entry in the **Ignored Files & Directories** panel → **Unignore Directory**.
-- **Custom glob patterns**: click `+` at the top of the **Ignored Files & Directories** panel and enter a pattern such as `*.log`, `build/`, or `src/generated/`. Right-click a pattern later to remove it.
+- **Unignore**: click the 👁 icon next to any `(hidden)` folder in **Directory Navigation**, or click `×` in the top **👁 Ignored** popover.
 - **Auto-ignore**: any subfolder with more than `thumbview.autoIgnoreThreshold` files (default 30) is hidden automatically to keep rendering fast. Set it to `0` to disable, or unhide individual folders via 👁. Manual unhides are remembered as exclusions.
 - Ignores live in workspace state, so each project keeps its own view.
 
 ## More Features
 
-- **Isolate a folder**: click a folder in **Directory Navigation** or a tile's header strip to dim everything else (opacity 0.15). Click **All Workspace Files (Root)** or the clear-all icon at the top of the panel to reset. This is the fastest way to scope search and scanning to one area of the codebase.
-- **Root files only**: select **Root Directory Files Only** in the sidebar to spotlight top-level files (`package.json`, `README.md`, configs) for orienting yourself in an unfamiliar repo.
+- **Isolate a folder**: click a folder in **📁 Folders** popover or a tile's header strip to dim everything else (opacity 0.15). Click **All Workspace Files (Root)** or the breadcrumb root to reset. This is the fastest way to scope search and scanning to one area of the codebase.
+- **Root files only**: select **Root Directory Files Only** in the **📁 Folders** popover to spotlight top-level files (`package.json`, `README.md`, configs) for orienting yourself in an unfamiliar repo.
 - **Full file operations from the grid**: right-click any tile for Open, Open to the Side, Open Preview, Select for Compare / Compare with Selected, Reveal in Explorer, Open Containing Folder, Cut/Copy/Paste paths, Rename, and Delete — no need to switch to the Explorer.
 
 ## Shortcuts Reference
@@ -55,7 +56,7 @@ Keep the grid fast and relevant by hiding noise (`dist/`, generated code, vendor
 | **Isolate Folder** | Left-click folder or tile header strip |
 | **Context Menu** | Right-click a tile |
 
-All shortcuts are also listed in the in-app **⚙ Actions & Shortcuts** modal (top-right of the grid).
+All shortcuts and interactive settings are available in the in-app **⚙ Settings** modal (top-right of the grid).
 
 ## Settings Reference
 

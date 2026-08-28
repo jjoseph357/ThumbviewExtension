@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
@@ -129,74 +129,13 @@
         "command": "thumbview.revealInExplorer",
         "title": "Thumbview: Reveal File in Explorer",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "thumbview.configureHotkey",
+        "title": "Thumbview: Configure Hotkey (Keyboard Shortcuts)",
+        "icon": "$(keyboard)"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "thumbview.addIgnorePattern",
-          "when": "view == thumbview-ignores",
-          "group": "navigation@1"
-        },
-        {
-          "command": "thumbview.showAllFolders",
-          "when": "view == thumbview-directories",
-          "group": "navigation"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "thumbview.removeIgnorePattern",
-          "when": "view == thumbview-ignores && viewItem == ignoreItem",
-          "group": "inline@1"
-        },
-        {
-          "command": "thumbview.removeIgnorePattern",
-          "when": "view == thumbview-ignores && viewItem == ignoreItem",
-          "group": "1_modification@1"
-        },
-        {
-          "command": "thumbview.ignoreDirectory",
-          "when": "view == thumbview-directories && viewItem == directoryItem",
-          "group": "inline@1"
-        },
-        {
-          "command": "thumbview.ignoreDirectory",
-          "when": "view == thumbview-directories && viewItem == directoryItem",
-          "group": "1_modification@1"
-        },
-        {
-          "command": "thumbview.removeIgnorePattern",
-          "when": "view == thumbview-directories && viewItem == ignoredDirectoryItem",
-          "group": "inline@1"
-        },
-        {
-          "command": "thumbview.removeIgnorePattern",
-          "when": "view == thumbview-directories && viewItem == ignoredDirectoryItem",
-          "group": "1_modification@1"
-        },
-        {
-          "command": "thumbview.revealInExplorer",
-          "when": "view == thumbview-directories && (viewItem == directoryItem || viewItem == ignoredDirectoryItem)",
-          "group": "0_navigation@1"
-        },
-        {
-          "command": "thumbview.deleteDirectory",
-          "when": "view == thumbview-directories && (viewItem == directoryItem || viewItem == ignoredDirectoryItem)",
-          "group": "7_modification@1"
-        },
-        {
-          "command": "thumbview.revealInExplorer",
-          "when": "view == thumbview-ignores && viewItem == ignoreItem",
-          "group": "0_navigation@1"
-        },
-        {
-          "command": "thumbview.deleteIgnoredItem",
-          "when": "view == thumbview-ignores && viewItem == ignoreItem",
-          "group": "7_modification@1"
-        }
-      ]
-    },
     "keybindings": [
       {
         "command": "thumbview.open",
@@ -216,28 +155,14 @@
       "thumbview-container": [
         {
           "id": "thumbview-sidebar",
-          "name": "Actions & Settings",
-          "icon": "media/icon.svg",
-          "size": 3
-        },
-        {
-          "id": "thumbview-directories",
-          "name": "Directory Navigation",
-          "icon": "media/icon.svg",
-          "size": 6
-        },
-        {
-          "id": "thumbview-ignores",
-          "name": "Ignored Files & Directories",
-          "icon": "media/icon.svg",
-          "size": 1
+          "name": "Thumbview"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "thumbview-sidebar",
-        "contents": "[Open Thumbview (F4)](command:thumbview.open)\n\nLayout Settings\n\n[Uniform Grid](command:thumbview.setUniformGrid)\n\n[Spanning Grid](command:thumbview.setSpanningGrid)\n\nDrag-and-Drop Settings\n\n[Swap Reorder](command:thumbview.setSwapReorderMode)\n\n[Shift Reorder](command:thumbview.setShiftReorderMode)\n\nAdditional Settings\n\n[Reflow Layout](command:thumbview.reflow)\n\nRight-click files or folders to ignore them, or add ignore patterns.\n\n[Add Ignore Pattern](command:thumbview.addIgnorePattern)\n\nMore: ⚙ Actions & Shortcuts button in the grid, or the README."
+        "contents": "Thumbview is a full-workspace visual minimap grid.\n\n[Open Thumbview](command:thumbview.open)\n\n[Configure Hotkey](command:thumbview.configureHotkey)"
       }
     ]
   },

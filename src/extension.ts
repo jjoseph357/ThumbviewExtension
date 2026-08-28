@@ -3,8 +3,9 @@ import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile } from "./scann
 import { buildStableGrid, slotToIndex } from "./layout";
 import { buildSpanningGrid } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
-import { IgnoreTreeDataProvider, IgnoreTreeItem } from "./ignoreProvider";
-import { DirectoryTreeDataProvider, DirectoryTreeItem } from "./directoryProvider";
+import { IgnoreTreeItem } from "./ignoreProvider";
+import { DirectoryTreeItem } from "./directoryProvider";
+import { fetchWorkspaceGitDiff, getCachedGitDiff } from "./git";
 
 import * as fs from "fs";
 import * as path from "path";
@@ -118,8 +119,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
-    let directoryTreeView: vscode.TreeView<any> | undefined;
-    let initialTabGroupCount = 1;
 
     // Reads the user setting fresh each call (rather than caching) so a config change
     // picked up by the onDidChangeConfiguration listener below is always honored.
@@ -201,16 +200,167 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
-    const getOpenKeybindingLabel = (): string => {
-        try {
-            // Check package.json default or fallback
-            return "F4";
-        } catch {
-            return "F4";
-        }
+    const formatKeybindingString = (key: string): string => {
+        return key
+            .split("+")
+            .map((part: string) => {
+                const trimmed = part.trim();
+                if (/^f\d+$/i.test(trimmed)) {
+                    return trimmed.toUpperCase();
+                }
+                const lower = trimmed.toLowerCase();
+                if (lower === "ctrl") return "Ctrl";
+                if (lower === "shift") return "Shift";
+                if (lower === "alt") return "Alt";
+                if (lower === "cmd" || lower === "meta" || lower === "win") return "Cmd";
+                return trimmed.length === 1 ? trimmed.toUpperCase() : trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+            })
+            .join("+");
     };
 
+    const detectOpenKeybinding = (): string => {
+        try {
+            const home = process.env.HOME || process.env.USERPROFILE || "";
+            const candidates: string[] = [];
+
+            if (context.globalStorageUri && context.globalStorageUri.fsPath) {
+                candidates.push(path.resolve(context.globalStorageUri.fsPath, "..", "..", "keybindings.json"));
+                candidates.push(path.resolve(context.globalStorageUri.fsPath, "..", "keybindings.json"));
+            }
+            if (context.logUri && context.logUri.fsPath) {
+                candidates.push(path.resolve(context.logUri.fsPath, "..", "..", "keybindings.json"));
+                candidates.push(path.resolve(context.logUri.fsPath, "..", "..", "..", "keybindings.json"));
+            }
+
+            if (process.platform === "win32") {
+                const appData = process.env.APPDATA || "";
+                candidates.push(path.join(appData, "Code", "User", "keybindings.json"));
+                candidates.push(path.join(appData, "Code - Insiders", "User", "keybindings.json"));
+                candidates.push(path.join(appData, "Code - OSS", "User", "keybindings.json"));
+                candidates.push(path.join(appData, "VSCodium", "User", "keybindings.json"));
+            } else if (process.platform === "darwin") {
+                candidates.push(path.join(home, "Library", "Application Support", "Code", "User", "keybindings.json"));
+                candidates.push(path.join(home, "Library", "Application Support", "Code - Insiders", "User", "keybindings.json"));
+                candidates.push(path.join(home, "Library", "Application Support", "Code - OSS", "User", "keybindings.json"));
+                candidates.push(path.join(home, "Library", "Application Support", "VSCodium", "User", "keybindings.json"));
+            } else {
+                candidates.push(path.join(home, ".config", "Code", "User", "keybindings.json"));
+                candidates.push(path.join(home, ".config", "Code - OSS", "User", "keybindings.json"));
+                candidates.push(path.join(home, ".config", "Code - Insiders", "User", "keybindings.json"));
+                candidates.push(path.join(home, ".config", "VSCodium", "User", "keybindings.json"));
+                candidates.push(path.join(home, ".vscode-oss-dev", "User", "keybindings.json"));
+                candidates.push(path.join(home, ".vscode-insiders", "User", "keybindings.json"));
+            }
+
+            for (const keybindingsPath of candidates) {
+                if (keybindingsPath && fs.existsSync(keybindingsPath)) {
+                    const raw = fs.readFileSync(keybindingsPath, "utf-8");
+                    
+                    let foundPositiveBinding: string | null = null;
+                    let hasUnassigned = false;
+
+                    try {
+                        const stripped = raw
+                            .replace(/\/\/.*$/gm, "")
+                            .replace(/\/\*[\s\S]*?\*\//g, "")
+                            .replace(/,\s*([}\]])/g, "$1");
+                        const parsed = JSON.parse(stripped);
+                        if (Array.isArray(parsed)) {
+                            for (let i = parsed.length - 1; i >= 0; i--) {
+                                const entry = parsed[i];
+                                if (entry && entry.command === "thumbview.open" && typeof entry.key === "string" && !foundPositiveBinding) {
+                                    foundPositiveBinding = formatKeybindingString(entry.key);
+                                }
+                                if (entry && entry.command === "-thumbview.open") {
+                                    hasUnassigned = true;
+                                }
+                            }
+                        }
+                    } catch {
+                    }
+
+                    if (foundPositiveBinding) {
+                        return foundPositiveBinding;
+                    }
+
+                    // Robust Regex extraction for positive binding
+                    const positiveMatches = Array.from(raw.matchAll(/\{[^{}]*?"command"\s*:\s*"thumbview\.open"[^{}]*?\}/gi));
+                    if (positiveMatches.length > 0) {
+                        const lastPosMatch = positiveMatches[positiveMatches.length - 1][0];
+                        const keyMatch = /"key"\s*:\s*"([^"]+)"/i.exec(lastPosMatch);
+                        if (keyMatch && keyMatch[1]) {
+                            return formatKeybindingString(keyMatch[1]);
+                        }
+                    }
+
+                    if (hasUnassigned || /"command"\s*:\s*"-thumbview\.open"/i.test(raw)) {
+                        return "Unassigned";
+                    }
+                }
+            }
+        } catch {
+        }
+        return "F4";
+    };
+
+    const getOpenKeybindingLabel = (): string => detectOpenKeybinding();
+
     let cachedScannedFiles: RepoFile[] | null = null;
+
+    const updateDocumentInCache = (doc: vscode.TextDocument) => {
+        if (doc.uri.scheme !== "file" || doc.lineCount === 0 || !cachedScannedFiles) {
+            return;
+        }
+        const fsPath = doc.uri.fsPath;
+        const index = cachedScannedFiles.findIndex(f => f.id === fsPath);
+        if (index === -1) {
+            return;
+        }
+
+        const MAX_LINES = 2000;
+        const MAX_LINE_LENGTH = 300;
+        const step = doc.lineCount > MAX_LINES ? doc.lineCount / MAX_LINES : 1;
+
+        const rawLines = [];
+        for (let idx = 0; idx < Math.min(doc.lineCount, MAX_LINES); idx++) {
+            const i = Math.floor(idx * step);
+            if (i >= doc.lineCount) break;
+
+            let textLine = doc.lineAt(i).text;
+            if (textLine.length > MAX_LINE_LENGTH) {
+                textLine = textLine.substring(0, MAX_LINE_LENGTH);
+            }
+            const trimmedRight = textLine.trimEnd();
+            const indent = textLine.length - textLine.trimStart().length;
+            const len = trimmedRight.length;
+
+            rawLines.push({
+                text: textLine,
+                indent,
+                length: len,
+                category: "normal" as const
+            });
+        }
+
+        let fullLines: string[] | undefined = undefined;
+        if (doc.lineCount > MAX_LINES) {
+            fullLines = [];
+            for (let i = 0; i < doc.lineCount; i++) {
+                let text = doc.lineAt(i).text;
+                if (text.length > MAX_LINE_LENGTH) {
+                    text = text.substring(0, MAX_LINE_LENGTH);
+                }
+                fullLines.push(text);
+            }
+        }
+
+        cachedScannedFiles[index] = {
+            ...cachedScannedFiles[index],
+            lines: rawLines,
+            lineCount: doc.lineCount,
+            fullLines
+        };
+    };
 
     const updateLayoutFromCache = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
         if (!cachedScannedFiles) {
@@ -233,16 +383,28 @@ export async function activate(context: vscode.ExtensionContext) {
             const minCellWidth = config.get<number>("minCellWidth") ?? 32;
             const minCellHeight = config.get<number>("minCellHeight") ?? 28;
             const openKeybinding = getOpenKeybindingLabel();
+            let gitDiff = getCachedGitDiff();
+            if (gitDiff.size === 0) {
+                gitDiff = await fetchWorkspaceGitDiff();
+            } else {
+                fetchWorkspaceGitDiff().catch(() => {});
+            }
+
             const filesWithWebviewUris = activeFiles.map(file => {
+                const normalizedId = file.id.replace(/\\/g, "/");
+                const gitInfo = gitDiff.get(normalizedId);
+                let mediaUri = file.mediaUri;
                 if ((file.isImage || file.isPdf) && file.mediaUri) {
                     try {
-                        const webviewUri = panel.webview.asWebviewUri(vscode.Uri.parse(file.uri)).toString();
-                        return { ...file, mediaUri: webviewUri };
-                    } catch {
-                        return file;
-                    }
+                        mediaUri = panel.webview.asWebviewUri(vscode.Uri.parse(file.uri)).toString();
+                    } catch { }
                 }
-                return file;
+                return {
+                    ...file,
+                    mediaUri,
+                    gitStatus: gitInfo?.status,
+                    gitChanges: gitInfo?.lines
+                };
             });
 
             if (mode === "spanning_grid") {
@@ -277,6 +439,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     minCellWidth,
                     minCellHeight,
                     openKeybinding,
+                    ignorePatterns,
                     files: filesWithSlots,
                     layout: {
                         cols: Math.max(1, spMaxCol + 1),
@@ -313,6 +476,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     minCellWidth,
                     minCellHeight,
                     openKeybinding,
+                    ignorePatterns,
                     files: filesWithSlots,
                     layout: {
                         cols: Math.max(1, ugMaxCol + 1),
@@ -365,149 +529,79 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Fullscreen = Zen Mode (natively hides AND restores sidebar/panel/aux bar —
     // extensions cannot read workbench visibility state, so VS Code must do the
-    // snapshotting) + a symmetric editor-group maximize for splits. All layout ops
-    // are serialized through layoutQueue; concurrent enter/exit calls from the
-    // command path and onDidChangeViewState must not stack blind toggles.
+    // snapshotting). All layout ops are serialized through layoutQueue; concurrent
+    // enter/exit calls from the command path and onDidChangeViewState must not stack blind toggles.
     let fullscreenActive = false;
+    let thumbviewEnteredZenMode = false;
     let groupMaximizedByUs = false;
-    let layoutQueue: Promise<void> = Promise.resolve();
 
-    const ZEN_SETTINGS_KEY = "thumbview.zenSettingsBackup";
-    interface ZenSettingsBackup {
-        centerLayout: boolean | undefined;
-        fullScreen: boolean | undefined;
-        hideActivityBar: boolean | undefined;
-        hideLineNumbers: boolean | undefined;
-        showTabs: string | undefined;
-    }
-
-    // Zen Mode defaults squeeze the editor into a narrow centered column, take
-    // over the OS screen, hide the activity bar, and show tabs; force all to
-    // Thumbview-preferred values while we own the layout. The sidebar is re-shown
-    // after entering zen (no setting prevents zen from hiding it). Original values
-    // are backed up to workspaceState so a reload mid-fullscreen can still restore
-    // them on the next activation.
-    const forceZenSettings = async (): Promise<void> => {
-        const config = vscode.workspace.getConfiguration();
-        if (config.inspect<boolean>("zenMode.centerLayout")?.workspaceValue !== undefined ||
-            config.inspect<boolean>("zenMode.fullScreen")?.workspaceValue !== undefined ||
-            config.inspect<boolean>("zenMode.hideActivityBar")?.workspaceValue !== undefined ||
-            config.inspect<boolean>("zenMode.hideLineNumbers")?.workspaceValue !== undefined ||
-            config.inspect<string>("zenMode.showTabs")?.workspaceValue !== undefined) {
-            return;
+    const initZenSettings = () => {
+        try {
+            const config = vscode.workspace.getConfiguration();
+            if (config.get<boolean>("zenMode.centerLayout") !== false) {
+                config.update("zenMode.centerLayout", false, vscode.ConfigurationTarget.Global);
+            }
+            if (config.get<boolean>("zenMode.fullScreen") !== false) {
+                config.update("zenMode.fullScreen", false, vscode.ConfigurationTarget.Global);
+            }
+            if (config.get<boolean>("zenMode.hideActivityBar") !== false) {
+                config.update("zenMode.hideActivityBar", false, vscode.ConfigurationTarget.Global);
+            }
+            if (config.get<boolean>("zenMode.hideLineNumbers") !== false) {
+                config.update("zenMode.hideLineNumbers", false, vscode.ConfigurationTarget.Global);
+            }
+            if (config.get<string>("zenMode.showTabs") !== "none") {
+                config.update("zenMode.showTabs", "none", vscode.ConfigurationTarget.Global);
+            }
+            if (config.get<boolean>("zenMode.singleTabGroup") !== true) {
+                config.update("zenMode.singleTabGroup", true, vscode.ConfigurationTarget.Global);
+            }
+        } catch {
         }
-        const backup: ZenSettingsBackup = {
-            centerLayout: config.get<boolean>("zenMode.centerLayout"),
-            fullScreen: config.get<boolean>("zenMode.fullScreen"),
-            hideActivityBar: config.get<boolean>("zenMode.hideActivityBar"),
-            hideLineNumbers: config.get<boolean>("zenMode.hideLineNumbers"),
-            showTabs: config.get<string>("zenMode.showTabs")
-        };
-        await context.workspaceState.update(ZEN_SETTINGS_KEY, backup);
-        await config.update("zenMode.centerLayout", false, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.fullScreen", false, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.hideActivityBar", false, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.hideLineNumbers", false, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.showTabs", "none", vscode.ConfigurationTarget.Global);
     };
+    initZenSettings();
 
-    const restoreZenSettings = async (): Promise<void> => {
-        const backup = context.workspaceState.get<ZenSettingsBackup>(ZEN_SETTINGS_KEY);
-        if (!backup) {
-            return;
-        }
-        await context.workspaceState.update(ZEN_SETTINGS_KEY, undefined);
-        const config = vscode.workspace.getConfiguration();
-        await config.update("zenMode.centerLayout", backup.centerLayout, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.fullScreen", backup.fullScreen, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.hideActivityBar", backup.hideActivityBar, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.hideLineNumbers", backup.hideLineNumbers, vscode.ConfigurationTarget.Global);
-        await config.update("zenMode.showTabs", backup.showTabs, vscode.ConfigurationTarget.Global);
-    };
+    // Background pre-scan and git diff fetch so opening Thumbview is instant O(1)
+    scanRepository(getIgnoreState(), persistIgnoreState).then(files => {
+        cachedScannedFiles = files;
+    }).catch(() => {});
+    fetchWorkspaceGitDiff().catch(() => {});
 
-    // A leftover backup means the previous session died while fullscreen — put the
-    // user's zenMode settings back before doing anything else, and exit the
-    // stale zen mode that VS Code persisted across the session boundary.
-    const leftoverBackup = context.workspaceState.get<ZenSettingsBackup>(ZEN_SETTINGS_KEY);
-    if (leftoverBackup) {
-        const config = vscode.workspace.getConfiguration();
-        config.update("zenMode.centerLayout", leftoverBackup.centerLayout, vscode.ConfigurationTarget.Global);
-        config.update("zenMode.fullScreen", leftoverBackup.fullScreen, vscode.ConfigurationTarget.Global);
-        config.update("zenMode.hideActivityBar", leftoverBackup.hideActivityBar, vscode.ConfigurationTarget.Global);
-        config.update("zenMode.hideLineNumbers", leftoverBackup.hideLineNumbers, vscode.ConfigurationTarget.Global);
-        config.update("zenMode.showTabs", leftoverBackup.showTabs, vscode.ConfigurationTarget.Global);
-        context.workspaceState.update(ZEN_SETTINGS_KEY, undefined);
-        vscode.commands.executeCommand("workbench.action.toggleZenMode");
-    }
-
-    // Count of layout ops in flight (plus a short grace window). Zen/maximize
-    // shuffles focus, making the panel's active flag flicker — onDidChangeViewState
-    // must ignore that churn or it queues exits that undo the enter.
-    let layoutOpsInFlight = 0;
-
-    const runLayoutOp = (op: () => Promise<void>): Promise<void> => {
-        layoutOpsInFlight++;
-        layoutQueue = layoutQueue.then(op, op).then(() => {
-            setTimeout(() => { layoutOpsInFlight--; }, 300);
-        });
-        return layoutQueue;
-    };
-
-    const enterFullscreen = (): Promise<void> => runLayoutOp(async () => {
+    const enterFullscreen = async (): Promise<void> => {
         if (fullscreenActive) {
             return;
         }
         fullscreenActive = true;
         try {
-            await forceZenSettings();
             await vscode.commands.executeCommand("workbench.action.toggleZenMode");
-            // Zen mode always hides the sidebar (no setting prevents it) — toggle
-            // it back on so the user can access ignore/directory tree views
-            await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
         } catch {
         }
-    });
+    };
 
-    // toggleMaximizeEditorGroup acts on the ACTIVE editor group, so it must only
-    // ever fire while the thumbview's group is active — toggling with different
-    // groups active on enter vs. exit skews split widths instead of restoring them.
-    const maximizeThumbviewGroup = (): Promise<void> => runLayoutOp(async () => {
-        if (!fullscreenActive || groupMaximizedByUs) {
-            return;
-        }
-        try {
-            initialTabGroupCount = vscode.window.tabGroups.all.length;
-            if (initialTabGroupCount > 1) {
-                groupMaximizedByUs = true;
-                await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
-            }
-        } catch {
-        }
-    });
-
-    const exitFullscreen = (): Promise<void> => runLayoutOp(async () => {
+    const exitFullscreen = async (): Promise<void> => {
         if (!fullscreenActive) {
             return;
         }
         fullscreenActive = false;
         try {
-            if (groupMaximizedByUs) {
-                groupMaximizedByUs = false;
-                // Bring the thumbview forward first so the unmaximize lands on
-                // the same group the maximize was applied to
-                if (activePanel && !activePanel.active) {
-                    try {
-                        activePanel.reveal(vscode.ViewColumn.Active, false);
-                    } catch {
-                    }
-                }
-                await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
-            }
-            await vscode.commands.executeCommand("workbench.action.toggleZenMode");
-            await restoreZenSettings();
+            await vscode.commands.executeCommand("workbench.action.exitZenMode");
         } catch {
         }
-    });
+    };
+
+    const unmaximizeIfSplits = async (): Promise<void> => {
+        if (groupMaximizedByUs) {
+            groupMaximizedByUs = false;
+            try {
+                await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
+            } catch { }
+        }
+        if (vscode.window.tabGroups.all.length > 1) {
+            try {
+                await vscode.commands.executeCommand("workbench.action.evenEditorWidths");
+            } catch { }
+        }
+    };
 
     const disposable = vscode.commands.registerCommand(
         "thumbview.open",
@@ -515,68 +609,86 @@ export async function activate(context: vscode.ExtensionContext) {
             console.log("THUMBVIEW COMMAND EXECUTED");
 
             if (activePanel) {
-                if (activePanel.active) {
-                    // Hide webview content so the user doesn't see the zen exit
-                    // resize on Thumbview, then exit zen before switching tabs
-                    // (switching tabs first causes a race where zen exit can
-                    // re-activate the Thumbview tab via layout restoration)
-                    activePanel.webview.postMessage({ command: "hideForTransition" });
-                    await exitFullscreen();
-                    if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
-                        try {
-                            await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
-                        } catch {
-                            try {
-                                await vscode.commands.executeCommand("workbench.action.previousEditor");
-                            } catch { }
-                        }
-                    } else {
+                const panelToDispose = activePanel;
+                activePanel = undefined;
+                try {
+                    panelToDispose.dispose();
+                } catch { }
+
+                if (thumbviewEnteredZenMode) {
+                    thumbviewEnteredZenMode = false;
+                    exitFullscreen();
+                }
+                if (groupMaximizedByUs) {
+                    unmaximizeIfSplits();
+                }
+
+                if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
+                    try {
+                        await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
+                    } catch {
                         try {
                             await vscode.commands.executeCommand("workbench.action.previousEditor");
                         } catch { }
                     }
-                    return;
                 } else {
-                    await enterFullscreen();
-                    activePanel.reveal(vscode.ViewColumn.Active, false);
-                    sendOpenState();
-                    activePanel.webview.postMessage({ command: "focusWebview" });
-                    await maximizeThumbviewGroup();
-                    activePanel.webview.postMessage({ command: "showAfterTransition" });
-                    return;
+                    try {
+                        await vscode.commands.executeCommand("workbench.action.previousEditor");
+                    } catch { }
                 }
+                return;
             }
 
-            vscode.window.showInformationMessage("Thumbview opening...");
+            // Sync currently open modified documents into memory cache
+            for (const doc of vscode.workspace.textDocuments) {
+                updateDocumentInCache(doc);
+            }
+            fetchWorkspaceGitDiff().catch(() => {});
 
-            // Enter fullscreen BEFORE creating the panel so Thumbview renders
-            // directly at full size instead of snapping through layouts
-            await enterFullscreen();
+            let panel: vscode.WebviewPanel;
+            try {
+                panel = vscode.window.createWebviewPanel(
+                    "thumbview",
+                    "Thumbview",
+                    vscode.ViewColumn.Active,
+                    {
+                        enableScripts: true,
+                        retainContextWhenHidden: false,
+                        localResourceRoots: [
+                            vscode.Uri.joinPath(context.extensionUri, "media"),
+                            ...(vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders.map(f => f.uri) : [])
+                        ]
+                    }
+                );
 
-            const panel = vscode.window.createWebviewPanel(
-                "thumbview",
-                "Thumbview",
-                vscode.ViewColumn.Active,
-                {
-                    enableScripts: true,
-                    retainContextWhenHidden: true,
-                    localResourceRoots: [
-                        vscode.Uri.joinPath(context.extensionUri, "media"),
-                        ...(vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders.map(f => f.uri) : [])
-                    ]
+                activePanel = panel;
+                if (vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
+                    groupMaximizedByUs = true;
+                    try {
+                        await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
+                    } catch { }
                 }
-            );
 
-            activePanel = panel;
-            await maximizeThumbviewGroup();
-
-            panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
+                panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
+            } catch (err) {
+                console.error("Failed to open Thumbview panel:", err);
+                return;
+            }
 
             panel.webview.onDidReceiveMessage(async msg => {
                 console.log("THUMBVIEW WEBVIEW MESSAGE:", msg);
 
+                if (msg.command === "ensureZenMode") {
+                    thumbviewEnteredZenMode = true;
+                    await enterFullscreen();
+                }
+
                 if (msg.command === "ready") {
-                    refreshThumbview(panel);
+                    if (cachedScannedFiles && cachedScannedFiles.length > 0) {
+                        updateLayoutFromCache(panel);
+                    } else {
+                        refreshThumbview(panel);
+                    }
                 }
 
                 if (msg.command === "focusWindow") {
@@ -588,11 +700,18 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "switchTab") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
-                        // Hide webview content, exit zen, THEN switch tab — exiting
-                        // zen first avoids the race where zen layout restoration
-                        // re-activates the Thumbview tab after showTextDocument
-                        panel.webview.postMessage({ command: "hideForTransition" });
-                        await exitFullscreen();
+                        if (activePanel) {
+                            const p = activePanel;
+                            activePanel = undefined;
+                            try { p.dispose(); } catch { }
+                        }
+                        if (thumbviewEnteredZenMode) {
+                            thumbviewEnteredZenMode = false;
+                            exitFullscreen();
+                        }
+                        if (groupMaximizedByUs) {
+                            unmaximizeIfSplits();
+                        }
                         if (msg.uri.toLowerCase().endsWith(".pdf")) {
                             await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
                         } else {
@@ -611,10 +730,19 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "jump") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
-                        // Hide webview content, exit zen, THEN switch tab (same
-                        // rationale as switchTab — see comment there)
-                        panel.webview.postMessage({ command: "hideForTransition" });
-                        await exitFullscreen();
+                        if (activePanel) {
+                            const p = activePanel;
+                            activePanel = undefined;
+                            try { p.dispose(); } catch { }
+                        }
+                        if (thumbviewEnteredZenMode) {
+                            thumbviewEnteredZenMode = false;
+                            exitFullscreen();
+                        }
+                        if (groupMaximizedByUs) {
+                            unmaximizeIfSplits();
+                        }
+
                         let doc: vscode.TextDocument;
                         try {
                             doc = await vscode.workspace.openTextDocument(uri);
@@ -624,14 +752,17 @@ export async function activate(context: vscode.ExtensionContext) {
                             return;
                         }
 
-                        const editor = await vscode.window.showTextDocument(doc, { preview: false });
-
                         const safeLine = Math.max(
                             0,
                             Math.min(Number(msg.line) || 0, doc.lineCount - 1)
                         );
                         const pos = new vscode.Position(safeLine, 0);
-                        editor.selection = new vscode.Selection(pos, pos);
+
+                        const editor = await vscode.window.showTextDocument(doc, {
+                            preview: false,
+                            selection: new vscode.Range(pos, pos)
+                        });
+
                         editor.revealRange(
                             new vscode.Range(pos, pos),
                             vscode.TextEditorRevealType.InCenter
@@ -1004,15 +1135,88 @@ export async function activate(context: vscode.ExtensionContext) {
                         vscode.window.showErrorMessage(`Failed to set drag reorder mode: ${err?.message ?? String(err)}`);
                     }
                 }
+
+                if (msg.command === "setLayoutMode") {
+                    try {
+                        const config = vscode.workspace.getConfiguration("thumbview");
+                        await config.update("layoutMode", msg.mode, vscode.ConfigurationTarget.Global);
+                        if (activePanel) {
+                            refreshThumbview(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to set layout mode: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "setRenderMediaThumbnails") {
+                    try {
+                        const config = vscode.workspace.getConfiguration("thumbview");
+                        await config.update("renderMediaThumbnails", !!msg.enabled, vscode.ConfigurationTarget.Global);
+                        if (activePanel) {
+                            refreshThumbview(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to set media thumbnails: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "reflow") {
+                    try {
+                        await vscode.commands.executeCommand("thumbview.reflow");
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to reflow layout: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "addIgnorePattern") {
+                    try {
+                        const pattern = (msg.pattern || "").trim();
+                        if (pattern) {
+                            const state = getIgnoreState();
+                            if (!state.ignorePatterns.includes(pattern)) {
+                                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, pattern] });
+                                vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
+                                refreshProviders();
+                                if (activePanel) {
+                                    updateLayoutFromCache(activePanel);
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to add ignore pattern: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "removeIgnorePattern") {
+                    try {
+                        const pattern = (msg.pattern || "").trim();
+                        if (pattern) {
+                            const state = getIgnoreState();
+                            const updatedPatterns = state.ignorePatterns.filter(p => p !== pattern);
+                            const updatedExclusions = [...state.autoIgnoreExclusions];
+                            if (!updatedExclusions.includes(pattern)) {
+                                updatedExclusions.push(pattern);
+                            }
+                            await persistIgnoreState({ ignorePatterns: updatedPatterns, autoIgnoreExclusions: updatedExclusions });
+                            vscode.window.showInformationMessage(`Unignored '${pattern}'.`);
+                            refreshProviders();
+                            if (activePanel) {
+                                updateLayoutFromCache(activePanel);
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to remove ignore pattern: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "configureHotkey") {
+                    vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "thumbview.open");
+                }
             });
 
             panel.onDidChangeViewState(async e => {
-                // Ignore the active-flag flicker caused by our own zen/maximize ops
-                if (layoutOpsInFlight > 0) {
-                    return;
-                }
                 if (e.webviewPanel.visible && e.webviewPanel.active) {
-                    if (fullscreenActive && vscode.window.tabGroups.all.length > initialTabGroupCount) {
+                    if (fullscreenActive && vscode.window.tabGroups.all.length > 1) {
                         // User dragged the tab into a new split, breaking zen mode layout. Close gracefully.
                         panel.dispose();
                         return;
@@ -1023,13 +1227,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         uri: activeUri
                     });
                     sendOpenState();
-                    // Hide webview content while zen/maximize transitions run so
-                    // the user doesn't see Thumbview at the wrong size
-                    panel.webview.postMessage({ command: "hideForTransition" });
-                    await enterFullscreen();
-                    await maximizeThumbviewGroup();
-                    panel.webview.postMessage({ command: "showAfterTransition" });
-                } else if (!e.webviewPanel.visible) {
+                } else if (!e.webviewPanel.visible && fullscreenActive) {
                     // Exit only when Thumbview is truly backgrounded — an inactive
                     // but still visible panel is just a focus shift, not leaving
                     exitFullscreen();
@@ -1040,7 +1238,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (activePanel === panel) {
                     activePanel = undefined;
                 }
-                await exitFullscreen();
+                await unmaximizeIfSplits();
+                if (thumbviewEnteredZenMode) {
+                    thumbviewEnteredZenMode = false;
+                    await exitFullscreen();
+                }
             });
         }
     );
@@ -1103,27 +1305,28 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(setShiftReorderModeDisposable);
 
-    const directoryProvider = new DirectoryTreeDataProvider(context);
-    directoryTreeView = vscode.window.createTreeView("thumbview-directories", {
-        treeDataProvider: directoryProvider
+    const configureHotkeyDisposable = vscode.commands.registerCommand("thumbview.configureHotkey", async () => {
+        vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "thumbview.open");
     });
-    context.subscriptions.push(directoryTreeView);
+    context.subscriptions.push(configureHotkeyDisposable);
 
-    const ignoreProvider = new IgnoreTreeDataProvider(context, () => {
+    try {
+        const keybindingWatcher = vscode.workspace.createFileSystemWatcher("**/keybindings.json");
+        const onKbChange = () => {
+            if (activePanel) {
+                updateLayoutFromCache(activePanel);
+            }
+        };
+        keybindingWatcher.onDidChange(onKbChange);
+        keybindingWatcher.onDidCreate(onKbChange);
+        context.subscriptions.push(keybindingWatcher);
+    } catch {
+    }
+
+    const refreshProviders = () => {
         if (activePanel) {
             updateLayoutFromCache(activePanel);
         }
-        directoryProvider.refresh();
-    });
-    const ignoreTreeView = vscode.window.createTreeView("thumbview-ignores", {
-        treeDataProvider: ignoreProvider,
-        canSelectMany: true
-    });
-    context.subscriptions.push(ignoreTreeView);
-
-    const refreshProviders = () => {
-        ignoreProvider.refresh();
-        directoryProvider.refresh();
     };
 
     const ignoreDirectoryDisposable = vscode.commands.registerCommand("thumbview.ignoreDirectory", async (item?: DirectoryTreeItem) => {
@@ -1397,7 +1600,25 @@ export async function activate(context: vscode.ExtensionContext) {
     watcher.onDidCreate(() => triggerUpdate());
     watcher.onDidDelete(() => triggerUpdate());
     watcher.onDidChange(() => triggerUpdate());
-    context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(() => triggerUpdate()));
+
+    const docChangeDisposable = vscode.workspace.onDidChangeTextDocument(e => {
+        updateDocumentInCache(e.document);
+        if (activePanel) {
+            updateLayoutFromCache(activePanel);
+        }
+    });
+    context.subscriptions.push(docChangeDisposable);
+
+    const docSaveDisposable = vscode.workspace.onDidSaveTextDocument(doc => {
+        updateDocumentInCache(doc);
+        fetchWorkspaceGitDiff().then(() => {
+            if (activePanel) {
+                updateLayoutFromCache(activePanel);
+            }
+        }).catch(() => {});
+        triggerUpdate();
+    });
+    context.subscriptions.push(docSaveDisposable);
 
     context.subscriptions.push(watcher);
 }
@@ -1628,7 +1849,15 @@ function getHtml(
             color: #ffffff;
         }
 
-        .actions-btn {
+        .top-bar-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+            pointer-events: auto;
+        }
+
+        .toolbar-btn {
             background: rgba(30, 30, 34, 0.85);
             backdrop-filter: blur(8px);
             border: 1px solid rgba(255, 255, 255, 0.12);
@@ -1638,22 +1867,183 @@ function getHtml(
             font-size: 12px;
             font-weight: 500;
             cursor: pointer;
-            pointer-events: auto;
             display: flex;
             align-items: center;
             gap: 6px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
             transition: all 0.15s ease;
-            margin-left: auto;
         }
 
-        .actions-btn:hover {
+        .toolbar-btn:hover, .toolbar-btn.active {
             background: rgba(168, 85, 247, 0.25);
             border-color: rgba(168, 85, 247, 0.6);
             color: #ffffff;
         }
 
-        /* Glassmorphic Actions & Settings Modal */
+        .badge {
+            background: rgba(168, 85, 247, 0.3);
+            border: 1px solid rgba(168, 85, 247, 0.5);
+            border-radius: 10px;
+            padding: 1px 6px;
+            font-size: 10px;
+            font-weight: 600;
+            color: #f472b6;
+        }
+
+        /* Glassmorphic Dropdown Popovers */
+        .glass-popover {
+            position: absolute;
+            top: 56px;
+            right: 16px;
+            width: 360px;
+            max-width: 90vw;
+            max-height: 70vh;
+            background: rgba(20, 20, 26, 0.96);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(168, 85, 247, 0.4);
+            border-radius: 12px;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85);
+            z-index: 3000;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            font-size: 13px;
+            color: #d4d4d8;
+            pointer-events: auto;
+        }
+
+        .popover-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: #ffffff;
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(25, 25, 32, 0.9);
+        }
+
+        .popover-close {
+            background: transparent;
+            border: none;
+            color: #a0a0a5;
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        .popover-close:hover { color: #ffffff; }
+
+        .popover-body {
+            padding: 8px;
+            overflow-y: auto;
+            max-height: 52vh;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .popover-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.1s ease;
+            font-size: 12px;
+            color: #d4d4d8;
+        }
+
+        .popover-item:hover {
+            background: rgba(255, 255, 255, 0.08);
+            color: #ffffff;
+        }
+
+        .popover-item.active {
+            background: rgba(168, 85, 247, 0.2);
+            border: 1px solid rgba(168, 85, 247, 0.4);
+            color: #ffffff;
+        }
+
+        .popover-item-count {
+            color: #8a8a93;
+            font-size: 11px;
+            margin-left: auto;
+            padding-left: 8px;
+        }
+
+        .popover-add-bar {
+            display: flex;
+            gap: 6px;
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .popover-input {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 6px;
+            color: #ffffff;
+            padding: 5px 8px;
+            font-size: 12px;
+            outline: none;
+        }
+
+        .popover-input:focus {
+            border-color: rgba(168, 85, 247, 0.6);
+        }
+
+        .popover-btn-action {
+            background: rgba(168, 85, 247, 0.3);
+            border: 1px solid rgba(168, 85, 247, 0.5);
+            border-radius: 6px;
+            color: #ffffff;
+            padding: 4px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .popover-btn-action:hover {
+            background: rgba(168, 85, 247, 0.5);
+        }
+
+        .remove-pattern-btn {
+            background: transparent;
+            border: none;
+            color: #ef4444;
+            font-size: 14px;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        .remove-pattern-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+        }
+
+        .popover-action-btn {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+            color: #b0b0b8;
+            padding: 2px 7px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+
+        .popover-action-btn:hover {
+            background: rgba(239, 68, 68, 0.25);
+            border-color: rgba(239, 68, 68, 0.5);
+            color: #ff8888;
+        }
+
+        /* Glassmorphic Settings Modal */
         #actions-modal {
             position: absolute;
             top: 50%;
@@ -1713,6 +2103,118 @@ function getHtml(
             padding-bottom: 4px;
         }
 
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .setting-name {
+            font-weight: 500;
+            color: #ffffff;
+            font-size: 13px;
+        }
+
+        .setting-desc {
+            font-size: 11px;
+            color: #8a8a93;
+            margin-top: 2px;
+        }
+
+        .segmented-control {
+            display: flex;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 6px;
+            padding: 2px;
+            gap: 2px;
+        }
+
+        .seg-btn {
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: #a0a0a5;
+            padding: 4px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .seg-btn:hover {
+            color: #ffffff;
+        }
+
+        .seg-btn.active {
+            background: rgba(168, 85, 247, 0.4);
+            color: #ffffff;
+            font-weight: 600;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .action-trigger-btn {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            color: #ffffff;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .action-trigger-btn:hover {
+            background: rgba(168, 85, 247, 0.3);
+            border-color: rgba(168, 85, 247, 0.6);
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 38px;
+            height: 20px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.15);
+            transition: .2s;
+            border-radius: 20px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 14px;
+            width: 14px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .2s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: #a855f7;
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(18px);
+        }
+
         .shortcut-row {
             display: flex;
             justify-content: space-between;
@@ -1730,14 +2232,6 @@ function getHtml(
             font-size: 11px;
             color: #f472b6;
         }
-
-        .modal-guide-list {
-            font-size: 12px;
-            line-height: 1.6;
-            color: #cccccc;
-            padding-left: 18px;
-            margin: 4px 0 8px 0;
-        }
     </style>
 </head>
 <body>
@@ -1745,11 +2239,73 @@ function getHtml(
         <canvas id="map"></canvas>
         <div id="hover-tooltip"></div>
         <div id="context-menu"></div>
+        
+        <div id="folders-popover" class="glass-popover" style="display: none;">
+            <div class="popover-header">
+                <span>📁 Directory Navigation</span>
+                <button class="popover-close" id="close-folders-popover">&times;</button>
+            </div>
+            <div class="popover-body" id="folders-list"></div>
+        </div>
+
+        <div id="ignores-popover" class="glass-popover" style="display: none;">
+            <div class="popover-header">
+                <span>👁 Ignored Patterns</span>
+                <button class="popover-close" id="close-ignores-popover">&times;</button>
+            </div>
+            <div class="popover-add-bar">
+                <input type="text" id="add-ignore-input" class="popover-input" placeholder="e.g. src/temp/ or *.log">
+                <button id="add-ignore-btn" class="popover-btn-action">+ Add</button>
+            </div>
+            <div class="popover-body" id="ignores-list"></div>
+        </div>
+
         <div id="actions-modal">
             <div class="modal-header">
-                <span>⚙ Actions &amp; Setup</span>
+                <span>⚙ Settings &amp; Actions</span>
                 <button class="modal-close" id="close-modal">&times;</button>
             </div>
+            <div class="modal-section">
+                <div class="modal-section-title">Layout &amp; Grid</div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-name">Layout Mode</div>
+                        <div class="setting-desc">Spanning grid scales tall files across multiple slots</div>
+                    </div>
+                    <div class="segmented-control">
+                        <button id="layout-spanning-btn" class="seg-btn">Spanning</button>
+                        <button id="layout-uniform-btn" class="seg-btn">Uniform</button>
+                    </div>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-name">Drag-to-Reorder Mode</div>
+                        <div class="setting-desc">Choose swap positions or shift reflow when dropping tiles</div>
+                    </div>
+                    <div class="segmented-control">
+                        <button id="drag-swap-btn" class="seg-btn">Swap</button>
+                        <button id="drag-shift-btn" class="seg-btn">Shift</button>
+                    </div>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-name">Media Thumbnails</div>
+                        <div class="setting-desc">Render images and PDF page 1 previews inside tiles</div>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="media-thumbnails-toggle" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="setting-row" style="border-bottom: none; margin-top: 6px;">
+                    <div>
+                        <div class="setting-name">Reflow Layout</div>
+                        <div class="setting-desc">Reset grid slot ordering to repository order</div>
+                    </div>
+                    <button id="reflow-layout-btn" class="action-trigger-btn">Reflow Grid</button>
+                </div>
+            </div>
+
             <div class="modal-section">
                 <div class="modal-section-title">Shortcuts</div>
                 <div class="shortcut-row">
@@ -1776,34 +2332,13 @@ function getHtml(
                     <span>Context Menu</span>
                     <span><span class="kbd">Right Click</span> Tile</span>
                 </div>
-            </div>
-
-            <div class="modal-section">
-                <div class="modal-section-title">Setup &amp; Settings</div>
-                <ul class="modal-guide-list">
-                    <li><b>Layout</b>: <code>spanning_grid</code> (tall files span cells) or <code>uniform_grid</code>.</li>
-                    <li><b>Drag-to-Reorder</b>: <code>swap</code> to swap the location of two files (if possible) or <code>shift</code> to shift all remaining thumbnails in column order.</li>
-                    <li><b>Small tiles</b> group into folder cards (<code>minCellWidth/Height</code>); use breadcrumbs to go back.</li>
-                    <li><b>Auto-Ignore</b>: folders with &gt;30 files are hidden (<code>thumbview.autoIgnoreThreshold</code>).</li>
-                </ul>
-            </div>
-
-            <div class="modal-section">
-                <div class="modal-section-title">Ignoring &amp; Unignoring</div>
-                <ul class="modal-guide-list">
-                    <li><b>Ignore</b>: right-click folder → <b>Ignore Directory</b>, or tile → <b>Ignore in Thumbview</b>.</li>
-                    <li><b>Unignore</b>: click 👁 on <code>(hidden)</code> folders, or right-click in <b>Ignored Files</b> panel.</li>
-                    <li><b>Globs</b>: <code>+</code> in <b>Ignored Files</b> panel (e.g. <code>*.log</code>, <code>build/</code>). Saved per workspace.</li>
-                </ul>
-            </div>
-
-            <div class="modal-section">
-                <div class="modal-section-title">More Features</div>
-                <ul class="modal-guide-list">
-                    <li><b>Isolate Folder</b>: click a folder or tile header to dim the rest; <b>All Workspace Files (Root)</b> resets.</li>
-                    <li><b>Root Files Only</b>: sidebar item to spotlight top-level files.</li>
-                    <li><b>Instant Search</b>: top search bar highlights tokens across all tiles.</li>
-                </ul>
+                <div class="shortcut-row" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div>
+                        <div style="font-weight: 500; color: #ffffff;">Toggle Hotkey</div>
+                        <div style="font-size: 11px; color: #8a8a93; margin-top: 2px;">Shortcut: <span class="kbd" id="open-shortcut-label-2">${openKeybindingLabel}</span></div>
+                    </div>
+                    <button id="change-hotkey-btn" class="action-trigger-btn" style="padding: 4px 10px; font-size: 11px;">Change Hotkey</button>
+                </div>
             </div>
         </div>
         <div class="controls-overlay">
@@ -1817,7 +2352,11 @@ function getHtml(
             <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
                 <span class="breadcrumb-item" id="breadcrumb-root">root</span>
             </div>
-            <button id="actions-btn" class="actions-btn">⚙ Actions &amp; Shortcuts</button>
+            <div class="top-bar-actions">
+                <button id="folders-btn" class="toolbar-btn" title="Directory Navigation">📁 Folders</button>
+                <button id="ignores-btn" class="toolbar-btn" title="Ignored Patterns">👁 Ignored <span id="ignores-badge" class="badge">0</span></button>
+                <button id="actions-btn" class="toolbar-btn" title="Settings &amp; Shortcuts">⚙ Settings</button>
+            </div>
         </div>
     </div>
     <script nonce="${nonce}">

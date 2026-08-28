@@ -21,12 +21,11 @@ export interface SpanningLayoutResult {
 
 // Files at or under baseLinesPerCell get exactly 1 cell. Above that, growth is
 // compressed to compressionPct of the real line count (never below baseLinesPerCell)
-// before dividing into cells — so a single huge file can't dominate the whole grid;
-// e.g. with the defaults, a 6000-line file gets 10 cells, not 100.
+// before dividing into cells — so a single huge file can't dominate the whole grid.
 export function cellsNeeded(
     lineCount: number,
     baseLinesPerCell = 60,
-    compressionPct = 0.10
+    compressionPct = 0.05
 ): number {
     if (lineCount <= baseLinesPerCell) {
         return 1;
@@ -44,15 +43,10 @@ export function buildSpanningGrid(
     seenFileOrder: string[],
     existingAllocations: { [id: string]: number } = {},
     savedGridRows: number | null = null,
-    // Drag-and-drop size-aware swap only: forces the named file to start a fresh column
-    // even if it would otherwise fit in the current column's remaining rows. Ordinary
-    // rescans always pass undefined/null here and are unaffected — see
-    // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 4 for why a plain array-position swap
-    // alone doesn't reliably anchor a size-mismatched drop at the target's old column.
     forceBreakBeforeId: string | null = null,
     targetAspect = 1.777,
     baseLinesPerCell = 60,
-    compressionPct = 0.10
+    compressionPct = 0.05
 ): SpanningLayoutResult {
     const allocations: { [id: string]: number } = { ...existingAllocations };
     const filesById = new Map<string, RepoFile>();
@@ -60,85 +54,57 @@ export function buildSpanningGrid(
         filesById.set(f.id, f);
     }
 
-    // Build per-file info in seen_files order
-    const fileInfo: Array<{
-        id: string;
-        nCells: number;
-        file?: RepoFile;
-    }> = [];
-
+    let totalCells = 0;
     for (const fid of seenFileOrder) {
-        let n = allocations[fid];
-        if (!n) {
+        if (!allocations[fid]) {
             const f = filesById.get(fid);
-            n = f ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1;
-            allocations[fid] = n;
+            allocations[fid] = f ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1;
         }
-
-        const f = filesById.get(fid);
-        fileInfo.push({
-            id: fid,
-            nCells: n,
-            file: f
-        });
+        totalCells += allocations[fid];
     }
 
-    // Determine grid rows to approximate target aspect ratio if not set
-    let gridRows = savedGridRows;
-    if (!gridRows || gridRows < 1) {
-        let totalCellsEstimate = 0;
-        for (const fid of Object.keys(allocations)) {
-            totalCellsEstimate += allocations[fid];
-        }
-        if (totalCellsEstimate === 0) {
-            totalCellsEstimate = files.length || 1;
-        }
-        gridRows = Math.max(1, Math.round(Math.sqrt(totalCellsEstimate / targetAspect)));
-    }
+    const gridRows = savedGridRows && savedGridRows > 0
+        ? savedGridRows
+        : Math.max(1, Math.round(Math.sqrt((totalCells || files.length || 1) / targetAspect)));
 
-    // Column-major placement: walk files in seenFileOrder, stacking each one's cells
-    // down the current column; once a file wouldn't fully fit before gridRows, start
-    // a fresh column instead of splitting it across two columns.
     let currCol = 0;
     let currRow = 0;
     const placements: SpanningPlacement[] = [];
 
-    for (const item of fileInfo) {
-        // Start a new column if this file's cells don't fit in the current column, or if
-        // this is the drag-and-drop-forced file and it isn't already at the top of a
-        // column (forcing it again when it's already fresh would waste an empty column).
-        const mustBreak = item.id === forceBreakBeforeId
+    for (const fid of seenFileOrder) {
+        const file = filesById.get(fid);
+        const nCells = allocations[fid] || 1;
+
+        const mustBreak = fid === forceBreakBeforeId
             ? currRow > 0
-            : currRow > 0 && currRow + item.nCells > gridRows;
+            : currRow > 0 && currRow + nCells > gridRows;
 
         if (mustBreak) {
             currCol++;
             currRow = 0;
         }
 
-        if (item.file) {
+        if (file) {
             const slots: Array<[number, number]> = [];
-            for (let i = 0; i < item.nCells; i++) {
+            for (let i = 0; i < nCells; i++) {
                 slots.push([currCol, currRow + i]);
             }
 
             placements.push({
-                file: item.file,
+                file,
                 col: currCol,
                 row: currRow,
-                nCells: item.nCells,
+                nCells,
                 slots
             });
         }
 
-        currRow += item.nCells;
+        currRow += nCells;
     }
-
-    const actualCols = currCol + 1;
 
     return {
         rows: gridRows,
-        cols: actualCols,
+        cols: currCol + 1,
         placements,
         allocations
     };
