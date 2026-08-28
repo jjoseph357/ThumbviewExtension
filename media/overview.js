@@ -12,6 +12,29 @@ const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 const tooltip = document.getElementById("hover-tooltip");
 
+/** Reads a VS Code theme CSS variable off body, falling back to fallbackHex if unset. */
+function getThemeColor(varName, fallbackHex) {
+    const val = getComputedStyle(document.body).getPropertyValue(varName).trim();
+    return val || fallbackHex;
+}
+
+// Fixed brand accents — single source of truth is src/colors.ts, injected here as
+// CSS custom properties by extension.ts. Never hardcode these hexes elsewhere.
+const ACCENT_SEARCH = getThemeColor("--tv-accent-search");
+const ACCENT_INSPECT = getThemeColor("--tv-accent-inspect");
+const ACCENT_RECENCY = getThemeColor("--tv-accent-recency");
+
+// hex -> rgba(...) at a given alpha. Duplicated from src/colors.ts (webview can't
+// import it) — keep both in sync by hand.
+function withAlpha(hex, alpha) {
+    if (!hex) return `rgba(0, 0, 0, ${alpha})`;
+    const clean = hex.replace("#", "");
+    const r = parseInt(clean.substring(0, 2), 16);
+    const g = parseInt(clean.substring(2, 4), 16);
+    const b = parseInt(clean.substring(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 let data = null;
 let statusText = "Loading Thumbview...";
 let activeFileUri = null;
@@ -164,7 +187,7 @@ function buildLineHtml(tokens, highlightRegex) {
             if (highlightRegex.test(tok.text)) {
                 highlightRegex.lastIndex = 0;
                 escapedText = escapedText.replace(highlightRegex, m =>
-                    `<span style="background: rgba(236, 72, 153, 0.35); color: #f472b6; font-weight: 600; border-radius: 2px; padding: 0 2px;">${m}</span>`
+                    `<span style="background: ${withAlpha(ACCENT_SEARCH, 0.45)}; color: #ffffff; font-weight: 600; border-radius: 2px; padding: 0 2px;">${m}</span>`
                 );
             }
         }
@@ -649,14 +672,14 @@ function getSubfolderGroups(files, basePath) {
 /** Paints the loading/error status screen shown before repository data has arrived. */
 function drawStatus() {
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-    ctx.fillStyle = "#18181c";
+    ctx.fillStyle = getThemeColor("--vscode-editor-background", "#18181c");
     ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
 
-    ctx.fillStyle = "#e1e1e6";
+    ctx.fillStyle = getThemeColor("--vscode-foreground", "#e1e1e6");
     ctx.font = "16px system-ui";
     ctx.fillText(statusText, 24, 74);
 
-    ctx.fillStyle = "#707075";
+    ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", "#707075");
     ctx.font = "12px system-ui";
     ctx.fillText("Waiting for repository data...", 24, 100);
 }
@@ -946,12 +969,6 @@ function tokenizeJS(text, lang) {
     return tokens;
 }
 
-/** Reads a VS Code theme CSS variable off body, falling back to fallbackHex if unset. */
-function getThemeColor(varName, fallbackHex) {
-    const val = getComputedStyle(document.body).getPropertyValue(varName).trim();
-    return val || fallbackHex;
-}
-
 /** Maps a token's syntax category (and isKey flag) to the hex color used to draw it. */
 function colorForCategory(category, isKey) {
     if (isKey) return "#9cdcfe";
@@ -1058,14 +1075,15 @@ const GIT_STYLES = {
 };
 
 const THEME_COLORS = {
-    tileBackground: "#1e1e24",
-    imageTileBackground: "#252526",
-    imageTilePlaceholderText: "#858585",
-    pdfHeaderBar: "#e11d48",
-    pdfPlaceholderLine: "rgba(255, 255, 255, 0.25)",
-    searchMatchHighlight: "#ec4899",
-    activeFocusHighlight: "#a855f7",
-    viewportBandOverlay: "rgba(255, 255, 255, 0.22)",
+    tileBackground: getThemeColor("--vscode-editor-background", "#1e1e24"),
+    imageTileBackground: getThemeColor("--vscode-editorWidget-background", "#252526"),
+    imageTilePlaceholderText: getThemeColor("--vscode-descriptionForeground", "#858585"),
+    pdfHeaderBar: getThemeColor("--vscode-badge-background", "#4d4d4d"),
+    pdfHeaderForeground: getThemeColor("--vscode-badge-foreground", "#ffffff"),
+    pdfPlaceholderLine: getThemeColor("--vscode-widget-border", "rgba(255, 255, 255, 0.25)"),
+    searchMatchHighlight: withAlpha(ACCENT_SEARCH, 0.28),
+    activeFocusHighlight: getThemeColor("--vscode-focusBorder", "#007fd4"),
+    viewportBandOverlay: getThemeColor("--vscode-editor-selectionBackground", "rgba(255, 255, 255, 0.22)"),
 };
 
 const PDF_PREVIEW = {
@@ -1173,7 +1191,7 @@ function drawThumbnail(file, x, y, w, h) {
 
         ctx.fillStyle = THEME_COLORS.pdfHeaderBar;
         ctx.fillRect(x, y, w, PDF_PREVIEW.barHeight);
-        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = THEME_COLORS.pdfHeaderForeground;
         ctx.font = PDF_PREVIEW.labelFont;
         ctx.fillText("PDF - Page 1", x + PDF_PREVIEW.labelOffsetX, y + PDF_PREVIEW.labelOffsetY);
 
@@ -1241,6 +1259,13 @@ function drawThumbnail(file, x, y, w, h) {
                 w,
                 Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
             );
+            ctx.fillStyle = ACCENT_SEARCH;
+            ctx.fillRect(
+                x,
+                y + i * stepY,
+                THUMBNAIL_GIT_GUTTER_WIDTH,
+                Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
+            );
         } else if (gitType === "modified") {
             ctx.fillStyle = GIT_STYLES.modifiedBg;
             ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
@@ -1256,7 +1281,7 @@ function drawThumbnail(file, x, y, w, h) {
             ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_DELETED_HEIGHT));
         }
 
-        if (!line || !lineText || isMatchedLine) {
+        if (!line || !lineText) {
             continue;
         }
 
@@ -1374,23 +1399,27 @@ function fitPathText(path, maxWidth) {
 // MARK: drawBorder
 const TILE_PADDING = 4;       // inset from cell edge to the card's fill/stroke rect
 const TILE_DIM_ALPHA = 0.15;  // opacity applied when a tile is unfocused or being dragged
-const TILE_BACKGROUND = "#1e1e24";
+const TILE_BACKGROUND = getThemeColor("--vscode-editor-background", "#1e1e24");
 const TILE_LABEL_FONT = "10px system-ui, sans-serif";
 const TILE_LABEL_OFFSET_X = 10;
 const TILE_LABEL_OFFSET_Y = 18;
 const TILE_LABEL_WIDTH_MARGIN = 36; // reserved space so the label doesn't run under the close button
-const TILE_LABEL_COLOR = { searchMatch: "#ec4899", active: "#ffffff", normal: "#a0a0a5" };
+const TILE_LABEL_COLOR = {
+    searchMatch: ACCENT_SEARCH,
+    active: getThemeColor("--vscode-foreground", "#ffffff"),
+    normal: getThemeColor("--vscode-descriptionForeground", "#a0a0a5")
+};
 const TILE_THUMBNAIL_OFFSET_X = 10;
 const TILE_THUMBNAIL_OFFSET_Y = 24;
 const TILE_THUMBNAIL_WIDTH_MARGIN = 20;
 const TILE_THUMBNAIL_HEIGHT_MARGIN = 34;
 
 const BORDER_STYLES = {
-    searchMatch: { color: "#ec4899", width: 2.5 }, // Pink
-    active:      { color: "#a855f7", width: 2.5 }, // Purple
-    open:        { color: "#f97316", width: 1.8 }, // Orange
-    dragging:        { color: "#648fff", width: 1.8 }, // Light Blue
-    default:     { color: "rgba(255, 255, 255, 0.08)", width: 1 }
+    searchMatch: { color: ACCENT_SEARCH, width: 2.5 },
+    active:      { color: getThemeColor("--vscode-focusBorder", "#007fd4"), width: 2.5 },
+    open:        { color: ACCENT_RECENCY, width: 1.8 },
+    dragging:    { color: "#648fff", width: 1.8 },
+    default:     { color: getThemeColor("--vscode-widget-border", "rgba(255, 255, 255, 0.08)"), width: 1 }
 };
 
 /** Strokes a tile's priority-ordered border: search match > active > open > default. */
@@ -1410,7 +1439,7 @@ const CLOSE_BTN_MARGIN_RIGHT = 20;
 const CLOSE_BTN_MARGIN_TOP = 10;
 const CLOSE_BTN_GLYPH_Y_OFFSET = 8;
 const CLOSE_BTN_FONT = "12px system-ui, sans-serif";
-const CLOSE_BTN_COLOR = "#707075";
+const CLOSE_BTN_COLOR = getThemeColor("--vscode-descriptionForeground", "#707075");
 
 /** Draws the '×' close button on an open tile and stores its hit-box on file._closeBtn. */
 function drawCloseBtn(file, x, y, w) {
@@ -1523,7 +1552,7 @@ function render() {
 
     const filteredFiles = getFilteredFiles();
     if (filteredFiles.length === 0) {
-        ctx.fillStyle = "#707075";
+        ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", "#707075");
         ctx.font = "14px system-ui";
         ctx.fillText("No files match the active folder or search query.", 24, 80);
         return;
@@ -1614,19 +1643,19 @@ function render() {
             if (!isFolderMatch) ctx.globalAlpha = 0.15;
 
             // Card background with folder accent
-            ctx.fillStyle = "#1e1e24";
+            ctx.fillStyle = getThemeColor("--vscode-editor-background", "#1e1e24");
             ctx.fillRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
 
-            ctx.strokeStyle = "rgba(168, 85, 247, 0.4)";
+            ctx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.4);
             ctx.lineWidth = 1.5;
             ctx.strokeRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
 
             // Folder icon accent bar
-            ctx.fillStyle = "rgba(168, 85, 247, 0.15)";
+            ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
             ctx.fillRect(x + 4, y + 4, localCellW - 8, Math.min(22, localCellH - 8));
 
             // Folder name
-            ctx.fillStyle = "#c4b5fd";
+            ctx.fillStyle = getThemeColor("--vscode-foreground", "#c4b5fd");
             const fontSize = Math.max(8, Math.min(11, localCellW / 12));
             ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
             const maxLabelW = localCellW - 24;
@@ -1640,7 +1669,7 @@ function render() {
             ctx.fillText(label, x + 10, y + 18);
 
             // File count
-            ctx.fillStyle = "#707075";
+            ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", "#707075");
             ctx.font = `${Math.max(7, fontSize - 2)}px system-ui, sans-serif`;
             const countText = `${group.fileCount} file${group.fileCount !== 1 ? "s" : ""}`;
             ctx.fillText(countText, x + 10, y + 18 + fontSize + 2);
@@ -2022,9 +2051,9 @@ function updateHoverTooltip() {
         let prefix = "  ";
 
         if (isHoveredLine) {
-            prefix = `<span style="color: #a855f7; font-weight: bold;">&gt; </span>`;
+            prefix = `<span style="color: ${ACCENT_INSPECT}; font-weight: bold;">&gt; </span>`;
             if (isMatchLine) {
-                bgStyle = "background: rgba(236, 72, 153, 0.28); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px; min-height: 1.4em;";
+                bgStyle = `background: ${withAlpha(ACCENT_SEARCH, 0.28)}; display: block; box-sizing: border-box; width: 100%; border-left: 3px solid ${ACCENT_SEARCH}; padding-left: 2px; min-height: 1.4em;`;
             } else if (gitType === "modified") {
                 bgStyle = "background: rgba(59, 130, 246, 0.22); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #3b82f6; padding-left: 2px; min-height: 1.4em;";
             } else if (gitType === "added") {
@@ -2032,10 +2061,10 @@ function updateHoverTooltip() {
             } else if (gitType === "removed") {
                 bgStyle = "background: rgba(239, 68, 68, 0.25); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ef4444; padding-left: 2px; min-height: 1.4em;";
             } else {
-                bgStyle = "background: rgba(168, 85, 247, 0.18); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #a855f7; padding-left: 2px; min-height: 1.4em;";
+                bgStyle = `background: ${withAlpha(ACCENT_INSPECT, 0.18)}; display: block; box-sizing: border-box; width: 100%; border-left: 3px solid ${ACCENT_INSPECT}; padding-left: 2px; min-height: 1.4em;`;
             }
         } else if (isMatchLine) {
-            bgStyle = "background: rgba(236, 72, 153, 0.2); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ec4899; padding-left: 2px; min-height: 1.4em;";
+            bgStyle = `background: ${withAlpha(ACCENT_SEARCH, 0.2)}; display: block; box-sizing: border-box; width: 100%; border-left: 3px solid ${ACCENT_SEARCH}; padding-left: 2px; min-height: 1.4em;`;
         } else if (gitType === "modified") {
             bgStyle = "background: rgba(59, 130, 246, 0.14); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(59, 130, 246, 0.85); padding-left: 2px; min-height: 1.4em;";
         } else if (gitType === "added") {

@@ -1,11 +1,12 @@
 import * as vscode from "vscode";
 import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile } from "./scanner";
-import { buildStableGrid, slotToIndex } from "./layout";
+import { buildStableGrid, slotToIndex, findSlotIndex } from "./layout";
 import { buildSpanningGrid } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
 import { IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeItem } from "./directoryProvider";
 import { fetchWorkspaceGitDiff, getCachedGitDiff } from "./git";
+import { ACCENT_SEARCH, ACCENT_INSPECT, ACCENT_RECENCY, withAlpha } from "./colors";
 
 import * as fs from "fs";
 import * as path from "path";
@@ -141,30 +142,30 @@ export async function activate(context: vscode.ExtensionContext) {
     const searchFlashSteps = [
         vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
-            backgroundColor: "rgba(236, 72, 153, 0.35)",
-            border: "1px dashed #ec4899",
-            overviewRulerColor: "#ec4899",
+            backgroundColor: withAlpha(ACCENT_SEARCH, 0.35),
+            border: `1px dashed ${ACCENT_SEARCH}`,
+            overviewRulerColor: ACCENT_SEARCH,
             overviewRulerLane: vscode.OverviewRulerLane.Full
         }),
         vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
-            backgroundColor: "rgba(236, 72, 153, 0.22)",
-            border: "1px dashed rgba(236, 72, 153, 0.6)",
-            overviewRulerColor: "rgba(236, 72, 153, 0.6)",
+            backgroundColor: withAlpha(ACCENT_SEARCH, 0.22),
+            border: `1px dashed ${withAlpha(ACCENT_SEARCH, 0.6)}`,
+            overviewRulerColor: withAlpha(ACCENT_SEARCH, 0.6),
             overviewRulerLane: vscode.OverviewRulerLane.Full
         }),
         vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
-            backgroundColor: "rgba(236, 72, 153, 0.12)",
-            border: "1px dashed rgba(236, 72, 153, 0.3)",
-            overviewRulerColor: "rgba(236, 72, 153, 0.3)",
+            backgroundColor: withAlpha(ACCENT_SEARCH, 0.12),
+            border: `1px dashed ${withAlpha(ACCENT_SEARCH, 0.3)}`,
+            overviewRulerColor: withAlpha(ACCENT_SEARCH, 0.3),
             overviewRulerLane: vscode.OverviewRulerLane.Full
         }),
         vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
-            backgroundColor: "rgba(236, 72, 153, 0.05)",
-            border: "1px dashed rgba(236, 72, 153, 0.15)",
-            overviewRulerColor: "rgba(236, 72, 153, 0.15)",
+            backgroundColor: withAlpha(ACCENT_SEARCH, 0.05),
+            border: `1px dashed ${withAlpha(ACCENT_SEARCH, 0.15)}`,
+            overviewRulerColor: withAlpha(ACCENT_SEARCH, 0.15),
             overviewRulerLane: vscode.OverviewRulerLane.Full
         })
     ];
@@ -408,8 +409,8 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             if (mode === "spanning_grid") {
-                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("repomap.spanningAllocations") || {};
-                const savedRows = context.workspaceState.get<number | null>("repomap.spanningRows") || null;
+                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
 
                 const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows, forceBreakBeforeId ?? null);
 
@@ -1075,12 +1076,68 @@ export async function activate(context: vscode.ExtensionContext) {
 
                         if (msg.targetIsEmpty) {
                             if (layoutMode === "spanning_grid") {
-                                // spanning_grid empty-slot placement isn't implemented yet — row-major
-                                // slotToIndex doesn't apply to its column-major packing. See
-                                // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 3 follow-up note.
+                                const { ignorePatterns } = getIgnoreState();
+                                const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
+                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+                                const currentLayout = buildSpanningGrid(activeFiles, fileOrder.getOrder(), savedAllocations, savedRows);
+                                const gridRows = currentLayout.rows;
+                                const maxCol = Math.max(currentLayout.cols - 1, msg.targetCol);
+
+                                // Build 2D column-major grid representing the current spanning layout
+                                const grid: string[][] = [];
+                                for (let c = 0; c <= maxCol; c++) {
+                                    grid.push(new Array(gridRows).fill(""));
+                                }
+                                for (const p of currentLayout.placements) {
+                                    for (let i = 0; i < p.nCells; i++) {
+                                        if (p.row + i < gridRows && p.col <= maxCol) {
+                                            grid[p.col][p.row + i] = p.file.id;
+                                        }
+                                    }
+                                }
+
+                                // Clear source file from grid (leaving empty space where it came from)
+                                for (let c = 0; c <= maxCol; c++) {
+                                    for (let r = 0; r < gridRows; r++) {
+                                        if (grid[c][r] === msg.sourceId) {
+                                            grid[c][r] = "";
+                                        }
+                                    }
+                                }
+
+                                // Place source file at target position
+                                const sourceCells = savedAllocations[msg.sourceId] || 1;
+                                for (let i = 0; i < sourceCells; i++) {
+                                    if (msg.targetRow + i < gridRows) {
+                                        grid[msg.targetCol][msg.targetRow + i] = msg.sourceId;
+                                    }
+                                }
+
+                                // Reconstruct order array from grid in column-major order
+                                const newOrder: string[] = [];
+                                for (let c = 0; c <= maxCol; c++) {
+                                    let r = 0;
+                                    while (r < gridRows) {
+                                        const cell = grid[c][r];
+                                        if (cell) {
+                                            newOrder.push(cell);
+                                            const nCells = savedAllocations[cell] || 1;
+                                            r += nCells;
+                                        } else {
+                                            newOrder.push("");
+                                            r += 1;
+                                        }
+                                    }
+                                }
+                                while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+                                    newOrder.pop();
+                                }
+
+                                fileOrder.setOrder(newOrder);
                             } else {
-                                const index = slotToIndex(msg.targetCol, msg.targetRow, msg.targetGridCols);
-                                fileOrder.placeAt(msg.sourceId, index);
+                                const targetIndex = findSlotIndex(msg.targetCol, msg.targetRow, fileOrder.getOrder().length);
+                                fileOrder.moveToEmptySlot(msg.sourceId, targetIndex);
                             }
                         } else {
                             let sizeMismatch = false;
@@ -1658,14 +1715,20 @@ function getHtml(
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <style>
+        :root {
+            --tv-accent-search: ${ACCENT_SEARCH};
+            --tv-accent-inspect: ${ACCENT_INSPECT};
+            --tv-accent-recency: ${ACCENT_RECENCY};
+        }
+
         html, body {
             margin: 0;
             padding: 0;
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background: #18181c;
-            color: #e1e1e6;
+            background: var(--vscode-editor-background, #18181c);
+            color: var(--vscode-foreground, #e1e1e6);
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             user-select: none;
         }
@@ -1698,14 +1761,14 @@ function getHtml(
         .breadcrumb-container {
             display: flex;
             align-items: center;
-            background: rgba(30, 30, 34, 0.85);
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #1e1e22) 85%, transparent);
             backdrop-filter: blur(8px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
             border-radius: 8px;
             padding: 6px 12px;
             font-size: 13px;
             pointer-events: auto;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
             max-width: 60%;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -1714,27 +1777,27 @@ function getHtml(
 
         .breadcrumb-item {
             cursor: pointer;
-            color: #a0a0a5;
+            color: var(--vscode-descriptionForeground, #a0a0a5);
             transition: color 0.15s ease;
         }
 
         .breadcrumb-item:hover {
-            color: #ffffff;
+            color: var(--vscode-foreground, #ffffff);
         }
 
         .breadcrumb-separator {
             margin: 0 8px;
-            color: #505055;
+            color: var(--vscode-descriptionForeground, #505055);
         }
 
         .search-container {
-            background: rgba(30, 30, 34, 0.85);
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #1e1e22) 85%, transparent);
             backdrop-filter: blur(8px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
             border-radius: 8px;
             padding: 2px;
             pointer-events: auto;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
             display: flex;
             align-items: center;
         }
@@ -1743,7 +1806,7 @@ function getHtml(
             background: transparent;
             border: none;
             outline: none;
-            color: #ffffff;
+            color: var(--vscode-input-foreground, #ffffff);
             font-size: 13px;
             padding: 6px 10px;
             width: 180px;
@@ -1751,7 +1814,7 @@ function getHtml(
         }
 
         .search-input.regex-error {
-            outline: 1px solid rgba(239, 68, 68, 0.8);
+            outline: 1px solid var(--vscode-inputValidation-errorBorder, rgba(239, 68, 68, 0.8));
             outline-offset: -1px;
         }
 
@@ -1760,43 +1823,43 @@ function getHtml(
         }
 
         .search-input::placeholder {
-            color: #707075;
+            color: var(--vscode-input-placeholderForeground, #707075);
         }
 
         .search-option-btn {
             background: transparent;
             border: none;
             outline: none;
-            color: #707075;
+            color: var(--vscode-descriptionForeground, #707075);
             cursor: pointer;
             font-size: 14px;
             padding: 0 8px;
         }
 
         .search-option-btn:hover {
-            color: #ffffff;
+            color: var(--vscode-foreground, #ffffff);
         }
         
         .search-option-btn.active {
-            background: rgba(168, 85, 247, 0.25);
-            border: 1px solid rgba(168, 85, 247, 0.6);
+            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 25%, transparent);
+            border: 1px solid var(--vscode-focusBorder, #007fd4);
             border-radius: 4px;
-            color: #ffffff;
+            color: var(--vscode-foreground, #ffffff);
         }
 
         /* Magnifying floating code tooltip */
         #hover-tooltip {
             position: absolute;
             display: none;
-            background: rgba(20, 20, 25, 0.98);
+            background: var(--vscode-editorHoverWidget-background, rgba(20, 20, 25, 0.98));
             backdrop-filter: blur(12px);
-            border: 1px solid rgba(168, 85, 247, 0.6);
+            border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-focusBorder, rgba(168, 85, 247, 0.6)));
             border-radius: 8px;
             padding: 12px;
-            box-shadow: 0 12px 36px rgba(0, 0, 0, 0.75);
+            box-shadow: 0 12px 36px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.75));
             font-family: Consolas, "Liberation Mono", Courier, monospace;
             font-size: 13px;
-            color: #d4d4d4;
+            color: var(--vscode-editorHoverWidget-foreground, #d4d4d4);
             pointer-events: none;
             z-index: 1000;
             max-width: 750px;
@@ -1808,9 +1871,9 @@ function getHtml(
         .tooltip-filename {
             font-family: system-ui, -apple-system, sans-serif;
             font-weight: 600;
-            color: #ffffff;
+            color: var(--vscode-foreground, #ffffff);
             margin-bottom: 8px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15));
             padding-bottom: 4px;
             font-size: 12px;
         }
@@ -1819,15 +1882,15 @@ function getHtml(
         #context-menu {
             position: absolute;
             display: none;
-            background: #252526;
-            border: 1px solid #454545;
+            background: var(--vscode-menu-background, #252526);
+            border: 1px solid var(--vscode-menu-border, #454545);
             border-radius: 6px;
             padding: 4px 0;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+            box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.5));
             z-index: 2000;
             min-width: 180px;
             font-size: 12px;
-            color: #cccccc;
+            color: var(--vscode-menu-foreground, #cccccc);
         }
 
         .menu-item {
@@ -1840,13 +1903,13 @@ function getHtml(
         }
 
         .menu-item:hover {
-            background: #04395e;
-            color: #ffffff;
+            background: var(--vscode-menu-selectionBackground, #04395e);
+            color: var(--vscode-menu-selectionForeground, #ffffff);
         }
 
         .menu-item.danger:hover {
-            background: #900c3f;
-            color: #ffffff;
+            background: var(--vscode-statusBarItem-errorBackground, #900c3f);
+            color: var(--vscode-menu-selectionForeground, #ffffff);
         }
 
         .top-bar-actions {
@@ -1858,11 +1921,11 @@ function getHtml(
         }
 
         .toolbar-btn {
-            background: rgba(30, 30, 34, 0.85);
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #1e1e22) 85%, transparent);
             backdrop-filter: blur(8px);
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
             border-radius: 8px;
-            color: #e1e1e6;
+            color: var(--vscode-foreground, #e1e1e6);
             padding: 6px 12px;
             font-size: 12px;
             font-weight: 500;
@@ -1870,24 +1933,24 @@ function getHtml(
             display: flex;
             align-items: center;
             gap: 6px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
             transition: all 0.15s ease;
         }
 
         .toolbar-btn:hover, .toolbar-btn.active {
-            background: rgba(168, 85, 247, 0.25);
-            border-color: rgba(168, 85, 247, 0.6);
-            color: #ffffff;
+            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 25%, transparent);
+            border-color: var(--vscode-focusBorder, #007fd4);
+            color: var(--vscode-foreground, #ffffff);
         }
 
         .badge {
-            background: rgba(168, 85, 247, 0.3);
-            border: 1px solid rgba(168, 85, 247, 0.5);
+            background: color-mix(in srgb, var(--vscode-badge-background, #4d4d4d) 60%, transparent);
+            border: 1px solid var(--vscode-badge-background, #4d4d4d);
             border-radius: 10px;
             padding: 1px 6px;
             font-size: 10px;
             font-weight: 600;
-            color: #f472b6;
+            color: var(--vscode-badge-foreground, #ffffff);
         }
 
         /* Glassmorphic Dropdown Popovers */
@@ -1898,17 +1961,17 @@ function getHtml(
             width: 360px;
             max-width: 90vw;
             max-height: 70vh;
-            background: rgba(20, 20, 26, 0.96);
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #14141a) 96%, transparent);
             backdrop-filter: blur(16px);
-            border: 1px solid rgba(168, 85, 247, 0.4);
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15));
             border-radius: 12px;
-            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85);
+            box-shadow: 0 16px 48px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.85));
             z-index: 3000;
             display: flex;
             flex-direction: column;
             overflow: hidden;
             font-size: 13px;
-            color: #d4d4d8;
+            color: var(--vscode-foreground, #d4d4d8);
             pointer-events: auto;
         }
 
@@ -1918,21 +1981,21 @@ function getHtml(
             align-items: center;
             font-size: 13px;
             font-weight: 600;
-            color: #ffffff;
+            color: var(--vscode-foreground, #ffffff);
             padding: 10px 14px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(25, 25, 32, 0.9);
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.1));
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #191920) 90%, transparent);
         }
 
         .popover-close {
             background: transparent;
             border: none;
-            color: #a0a0a5;
+            color: var(--vscode-descriptionForeground, #a0a0a5);
             font-size: 18px;
             cursor: pointer;
         }
 
-        .popover-close:hover { color: #ffffff; }
+        .popover-close:hover { color: var(--vscode-foreground, #ffffff); }
 
         .popover-body {
             padding: 8px;
@@ -1952,22 +2015,22 @@ function getHtml(
             cursor: pointer;
             transition: background 0.1s ease;
             font-size: 12px;
-            color: #d4d4d8;
+            color: var(--vscode-foreground, #d4d4d8);
         }
 
         .popover-item:hover {
-            background: rgba(255, 255, 255, 0.08);
-            color: #ffffff;
+            background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.08));
+            color: var(--vscode-list-hoverForeground, #ffffff);
         }
 
         .popover-item.active {
-            background: rgba(168, 85, 247, 0.2);
-            border: 1px solid rgba(168, 85, 247, 0.4);
-            color: #ffffff;
+            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 20%, transparent);
+            border: 1px solid var(--vscode-focusBorder, #007fd4);
+            color: var(--vscode-foreground, #ffffff);
         }
 
         .popover-item-count {
-            color: #8a8a93;
+            color: var(--vscode-descriptionForeground, #8a8a93);
             font-size: 11px;
             margin-left: auto;
             padding-left: 8px;
@@ -1977,29 +2040,29 @@ function getHtml(
             display: flex;
             gap: 6px;
             padding: 8px 10px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
         }
 
         .popover-input {
             flex: 1;
-            background: rgba(0, 0, 0, 0.4);
-            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: var(--vscode-input-background, rgba(0, 0, 0, 0.4));
+            border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.15));
             border-radius: 6px;
-            color: #ffffff;
+            color: var(--vscode-input-foreground, #ffffff);
             padding: 5px 8px;
             font-size: 12px;
             outline: none;
         }
 
         .popover-input:focus {
-            border-color: rgba(168, 85, 247, 0.6);
+            border-color: var(--vscode-focusBorder, #007fd4);
         }
 
         .popover-btn-action {
-            background: rgba(168, 85, 247, 0.3);
-            border: 1px solid rgba(168, 85, 247, 0.5);
+            background: color-mix(in srgb, var(--vscode-button-background, #0e639c) 80%, transparent);
+            border: 1px solid var(--vscode-button-border, var(--vscode-button-background, #0e639c));
             border-radius: 6px;
-            color: #ffffff;
+            color: var(--vscode-button-foreground, #ffffff);
             padding: 4px 10px;
             font-size: 12px;
             cursor: pointer;
@@ -2007,13 +2070,13 @@ function getHtml(
         }
 
         .popover-btn-action:hover {
-            background: rgba(168, 85, 247, 0.5);
+            background: var(--vscode-button-hoverBackground, #1177bb);
         }
 
         .remove-pattern-btn {
             background: transparent;
             border: none;
-            color: #ef4444;
+            color: var(--vscode-errorForeground, #ef4444);
             font-size: 14px;
             cursor: pointer;
             padding: 2px 6px;
@@ -2021,14 +2084,14 @@ function getHtml(
         }
 
         .remove-pattern-btn:hover {
-            background: rgba(239, 68, 68, 0.2);
+            background: color-mix(in srgb, var(--vscode-errorForeground, #ef4444) 20%, transparent);
         }
 
         .popover-action-btn {
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15));
             border-radius: 4px;
-            color: #b0b0b8;
+            color: var(--vscode-button-secondaryForeground, #b0b0b8);
             padding: 2px 7px;
             font-size: 11px;
             cursor: pointer;
@@ -2038,9 +2101,9 @@ function getHtml(
         }
 
         .popover-action-btn:hover {
-            background: rgba(239, 68, 68, 0.25);
-            border-color: rgba(239, 68, 68, 0.5);
-            color: #ff8888;
+            background: color-mix(in srgb, var(--vscode-errorForeground, #ef4444) 25%, transparent);
+            border-color: var(--vscode-errorForeground, #ef4444);
+            color: var(--vscode-errorForeground, #ff8888);
         }
 
         /* Glassmorphic Settings Modal */
@@ -2054,15 +2117,15 @@ function getHtml(
             max-width: 90vw;
             max-height: 82vh;
             overflow-y: auto;
-            background: rgba(20, 20, 26, 0.96);
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #14141a) 96%, transparent);
             backdrop-filter: blur(16px);
-            border: 1px solid rgba(168, 85, 247, 0.4);
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15));
             border-radius: 12px;
             padding: 20px 24px;
-            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85);
+            box-shadow: 0 16px 48px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.85));
             z-index: 3000;
             font-size: 13px;
-            color: #d4d4d8;
+            color: var(--vscode-foreground, #d4d4d8);
         }
 
         .modal-header {
@@ -2071,35 +2134,35 @@ function getHtml(
             align-items: center;
             font-size: 15px;
             font-weight: 600;
-            color: #ffffff;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+            color: var(--vscode-foreground, #ffffff);
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
             padding-bottom: 10px;
             margin-bottom: 16px;
             position: sticky;
             top: 0;
-            background: rgba(20, 20, 26, 0.98);
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #14141a) 98%, transparent);
             z-index: 10;
         }
 
         .modal-close {
             background: transparent;
             border: none;
-            color: #a0a0a5;
+            color: var(--vscode-descriptionForeground, #a0a0a5);
             font-size: 18px;
             cursor: pointer;
         }
 
-        .modal-close:hover { color: #ffffff; }
+        .modal-close:hover { color: var(--vscode-foreground, #ffffff); }
 
         .modal-section { margin-bottom: 20px; }
         .modal-section-title {
             font-size: 12px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            color: #a855f7;
+            color: var(--vscode-focusBorder, #007fd4);
             font-weight: 600;
             margin-bottom: 8px;
-            border-bottom: 1px solid rgba(168, 85, 247, 0.2);
+            border-bottom: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 20%, transparent);
             padding-bottom: 4px;
         }
 
@@ -2108,25 +2171,25 @@ function getHtml(
             justify-content: space-between;
             align-items: center;
             padding: 8px 0;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.06));
         }
 
         .setting-name {
             font-weight: 500;
-            color: #ffffff;
+            color: var(--vscode-foreground, #ffffff);
             font-size: 13px;
         }
 
         .setting-desc {
             font-size: 11px;
-            color: #8a8a93;
+            color: var(--vscode-descriptionForeground, #8a8a93);
             margin-top: 2px;
         }
 
         .segmented-control {
             display: flex;
-            background: rgba(0, 0, 0, 0.4);
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: var(--vscode-input-background, rgba(0, 0, 0, 0.4));
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
             border-radius: 6px;
             padding: 2px;
             gap: 2px;
@@ -2136,7 +2199,7 @@ function getHtml(
             background: transparent;
             border: none;
             border-radius: 4px;
-            color: #a0a0a5;
+            color: var(--vscode-descriptionForeground, #a0a0a5);
             padding: 4px 10px;
             font-size: 12px;
             cursor: pointer;
@@ -2144,21 +2207,21 @@ function getHtml(
         }
 
         .seg-btn:hover {
-            color: #ffffff;
+            color: var(--vscode-foreground, #ffffff);
         }
 
         .seg-btn.active {
-            background: rgba(168, 85, 247, 0.4);
-            color: #ffffff;
+            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 40%, transparent);
+            color: var(--vscode-foreground, #ffffff);
             font-weight: 600;
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 2px 6px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
         }
 
         .action-trigger-btn {
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.2));
             border-radius: 6px;
-            color: #ffffff;
+            color: var(--vscode-button-secondaryForeground, #ffffff);
             padding: 6px 12px;
             font-size: 12px;
             cursor: pointer;
@@ -2166,8 +2229,8 @@ function getHtml(
         }
 
         .action-trigger-btn:hover {
-            background: rgba(168, 85, 247, 0.3);
-            border-color: rgba(168, 85, 247, 0.6);
+            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 30%, transparent);
+            border-color: var(--vscode-focusBorder, #007fd4);
         }
 
         .switch {
@@ -2190,7 +2253,8 @@ function getHtml(
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(255, 255, 255, 0.15);
+            background-color: var(--vscode-input-background, rgba(255, 255, 255, 0.15));
+            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.2));
             transition: .2s;
             border-radius: 20px;
         }
@@ -2200,15 +2264,15 @@ function getHtml(
             content: "";
             height: 14px;
             width: 14px;
-            left: 3px;
-            bottom: 3px;
-            background-color: white;
+            left: 2px;
+            bottom: 2px;
+            background-color: var(--vscode-foreground, white);
             transition: .2s;
             border-radius: 50%;
         }
 
         input:checked + .slider {
-            background-color: #a855f7;
+            background-color: var(--vscode-focusBorder, #007fd4);
         }
 
         input:checked + .slider:before {
@@ -2224,13 +2288,14 @@ function getHtml(
         }
 
         .kbd {
-            background: rgba(255, 255, 255, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: var(--vscode-keybindingLabel-background, rgba(255, 255, 255, 0.1));
+            border: 1px solid var(--vscode-keybindingLabel-border, rgba(255, 255, 255, 0.2));
+            border-bottom-color: var(--vscode-keybindingLabel-bottomBorder, rgba(255, 255, 255, 0.2));
             border-radius: 4px;
             padding: 2px 6px;
             font-family: monospace;
             font-size: 11px;
-            color: #f472b6;
+            color: var(--vscode-keybindingLabel-foreground, #f472b6);
         }
     </style>
 </head>

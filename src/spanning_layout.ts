@@ -56,6 +56,10 @@ export function buildSpanningGrid(
 
     let totalCells = 0;
     for (const fid of seenFileOrder) {
+        if (!fid) {
+            totalCells += 1;
+            continue;
+        }
         if (!allocations[fid]) {
             const f = filesById.get(fid);
             allocations[fid] = f ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1;
@@ -72,6 +76,15 @@ export function buildSpanningGrid(
     const placements: SpanningPlacement[] = [];
 
     for (const fid of seenFileOrder) {
+        if (!fid) {
+            if (currRow > 0 && currRow + 1 > gridRows) {
+                currCol++;
+                currRow = 0;
+            }
+            currRow += 1;
+            continue;
+        }
+
         const file = filesById.get(fid);
         const nCells = allocations[fid] || 1;
 

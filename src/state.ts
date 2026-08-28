@@ -61,12 +61,30 @@ export class PersistentFileOrder {
         this.seenFiles.splice(to === -1 ? this.seenFiles.length : to, 0, idToMove);
     }
 
-    placeAt(idToMove: string, index: number) {
+    moveToEmptySlot(idToMove: string, targetIndex: number) {
         const from = this.seenFiles.indexOf(idToMove);
         if (from === -1) return;
-        this.seenFiles.splice(from, 1);
-        const adjusted = index > from ? index - 1 : index;
-        const clamped = Math.max(0, Math.min(adjusted, this.seenFiles.length));
-        this.seenFiles.splice(clamped, 0, idToMove);
+
+        // Leave an empty space where the tile came from so other tiles do not reflow
+        this.seenFiles[from] = "";
+
+        while (this.seenFiles.length <= targetIndex) {
+            this.seenFiles.push("");
+        }
+
+        this.seenFiles[targetIndex] = idToMove;
+
+        // Trim any trailing empty spaces from the end of the array
+        while (this.seenFiles.length > 0 && !this.seenFiles[this.seenFiles.length - 1]) {
+            this.seenFiles.pop();
+        }
+    }
+
+    placeAt(idToMove: string, index: number) {
+        this.moveToEmptySlot(idToMove, index);
+    }
+
+    setOrder(newOrder: string[]) {
+        this.seenFiles = [...newOrder];
     }
 }

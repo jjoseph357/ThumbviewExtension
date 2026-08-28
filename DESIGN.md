@@ -140,6 +140,22 @@ To prevent extension crashes or main thread freezes when scanning repositories w
 3. **Evenly Spaced Line Sampling & Dynamic IPC Fetching**: For files over 2,000 lines, initial scanning samples up to **2,000 lines evenly spaced across the entire file** using uniform striding (`step = doc.lineCount / 2000`). This preserves the visual shape and structure of long files from top to bottom on the minimap card without overloading memory. `doc.lineCount` remains untruncated so tile heights and scrolling positions remain accurate. Any missing lines requested during hover overlay browsing are dynamically fetched on demand via `getHoverLines` IPC.
 4. **Fixed Per-File Overlay Width**: Hover overlay tooltip width is fixed per file based on `min(maxWidthAllowed, widestLine)` across all available lines in that file. This prevents layout jitter/flashing as the cursor moves across lines of varying lengths in the same file.
 
+## Centralized UI Chrome Colors & Fixed Brand Accents
+
+Thumbview's UI chrome (webview HTML/CSS, canvas tile chrome, and editor jump-flash decoration) derives directly from the user's active VS Code theme using standard theme contribution variables (`--vscode-editor-background`, `--vscode-foreground`, `--vscode-menu-*`, `--vscode-focusBorder`, etc.). Three specific accents are intentionally fixed across all themes to preserve visual identity and accessibility:
+1. **Search Accent (`#dc267f`)**: Used for search matching borders, highlighted token text, and editor jump fade-out decorations.
+2. **Inspection Accent (`#785ef0`)**: Used for the interactive `Left CTRL` hold magnify tooltip hover marker and row border.
+3. **Recency Accent (`#fe6100`)**: Used for the open editor tab indicator.
+
+The constants are defined once in `src/colors.ts` and injected into the webview `<style>` as `:root { --tv-accent-* }` custom properties, where `media/overview.js` accesses them via `getThemeColor()`.
+
+## Drag-and-Drop Grid-Slot Targeting & Empty Space Preservation
+
+Drag-and-drop reordering resolves cursor positions to specific grid slots rather than nearest occupied tiles:
+1. **Webview-Side `slotOccupancy` Map**: On each `"data"` message payload, `media/overview.js` populates an in-memory `Map<string, RepoFile>` (`slotOccupancy`) keyed by `"${col},${row}"`. Mouse movement and drag operations convert canvas pixel coordinates directly to clamped `[col, row]` coordinates, performing an $O(1)$ hashmap lookup. This allows empty slots to be directly addressable drop targets (`file === null`) and eliminates Euclidean distance search errors across columns.
+2. **Host-Side `PersistentFileOrder` & Gap Preservation**: Tile arrangements are persisted as a `string[]` array in `workspaceState` under `"thumbview.seenFiles"`. When a user drags a file into an empty tile slot, the source slot is preserved as an empty placeholder (`""`) in the order array. In `uniform_grid`, the tile is assigned the target slot index via `findSlotIndex` without shifting intervening files. In `spanning_grid`, a 2D column-major slot grid model clears source cells and writes the file into target column/row coordinates while retaining empty placeholder cells, preventing cascading repack reflows.
+3. **Reflow Action**: When users intentionally want to pack all empty spaces and eliminate gaps (e.g. after moving multiple files or deleting files from disk), the **Reflow Grid Layout** toolbar action and command reset the array strictly to active workspace files.
+
 ## Known limitations / accepted tradeoffs
 
 - **No automated tests** (see README's "Notes" section). `layout.ts`/`state.ts` are pure functions/classes and would be straightforward to unit test; not yet done.

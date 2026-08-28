@@ -68,3 +68,15 @@ export function slotToIndex(col: number, row: number, cols: number): number {
     const index = row * cols + col;
     return index;
 }
+
+export function findSlotIndex(col: number, row: number, minCells = 0): number {
+    let count = Math.max(minCells, (row + 1) * (col + 1) * 2, 4);
+    let layout = buildStableGrid(count);
+    let idx = layout.slots.findIndex(s => s[0] === col && s[1] === row);
+    while (idx === -1) {
+        count += 16;
+        layout = buildStableGrid(count);
+        idx = layout.slots.findIndex(s => s[0] === col && s[1] === row);
+    }
+    return idx;
+}
