@@ -1,27 +1,20 @@
-// uniform_grid layout mode: packs `nCells` items into a near-`targetAspect` grid of
-// [col, row] slots. Used by extension.ts (host side, the real data) and duplicated in
-// media/overview.js (webview side, only for a focused-folder sub-grid — see the note
-// in that file's header). Keep both copies in sync if this algorithm changes.
-export interface Placement {
+export const DEFAULT_TARGET_ASPECT = 16 / 9;
+export const MIN_GRID_ROWS = 1;
+export const MIN_GRID_COLS = 2;
 
+export interface Placement {
     x: number;
     y: number;
     width: number;
     height: number;
 }
 
-// Slot i always refers to the same [col, row] position across calls with growing
-// nCells: PersistentFileOrder (state.ts) assigns each file a stable index into this
-// grid, so slots must never be renumbered once handed out — growth always appends
-// new columns to existing rows first, then new rows, rather than recomputing the
-// whole grid from scratch.
 export function buildStableGrid(
     nCells: number,
-    targetAspect = 1.777
+    targetAspect = DEFAULT_TARGET_ASPECT
 ) {
-
-    let rows = 1;
-    let cols = Math.max(2, Math.ceil(rows * targetAspect));
+    let rows = MIN_GRID_ROWS;
+    let cols = Math.max(MIN_GRID_COLS, Math.ceil(rows * targetAspect));
 
     const slots: Array<[number, number]> = [];
 
@@ -32,21 +25,18 @@ export function buildStableGrid(
     }
 
     while (slots.length < nCells) {
-
         const newRows = rows + 1;
         const newCols = Math.max(
             cols,
             Math.ceil(newRows * targetAspect)
         );
 
-        // New columns on the existing rows first...
         for (let r = 0; r < rows; r++) {
             for (let c = cols; c < newCols; c++) {
                 slots.push([c, r]);
             }
         }
 
-        // ...then the newly added row(s) across all columns.
         for (let r = rows; r < newRows; r++) {
             for (let c = 0; c < newCols; c++) {
                 slots.push([c, r]);
@@ -65,8 +55,7 @@ export function buildStableGrid(
 }
 
 export function slotToIndex(col: number, row: number, cols: number): number {
-    const index = row * cols + col;
-    return index;
+    return row * cols + col;
 }
 
 export function findSlotIndex(col: number, row: number, minCells = 0): number {

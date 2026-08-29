@@ -128,6 +128,13 @@ To improve navigation in large repositories where canvas headers are small:
 1. **Directory Navigation Tree**: Built hierarchically in `directoryProvider.ts`. Focuses the Thumbview canvas to specific folders with accurate cumulative file counts (including subdirectories). Right-clicking a folder enables deleting it from disk (via confirmation modal) or revealing it in VS Code's File Explorer.
 2. **Ignored Files & Directories Tree**: Built in `ignoreProvider.ts`. Allows adding, removing, multi-selecting (`canSelectMany`), deleting files/folders from disk (with trash or permanent options), and revealing items in VS Code's File Explorer.
 
+## Unified Folders & Ignored Side-by-Side Modal
+
+Users navigating dense workspaces needed an immediate way to inspect what folders are shown and what items are ignored without leaving the minimap canvas panel.
+1. **Side-by-Side Visibility**: The `📁 Folders & Ignored` modal renders active folders on the left (with file counts, click-to-isolate, and one-click ignore) and all ignored directories and glob patterns on the right (with one-click unignore).
+2. **Dedicated Folder Representation**: All auto-ignored and manually ignored folders are displayed with folder badges and icons in the ignored section.
+3. **Isolated Input Focus**: Text input fields within the modal operate independently of the global minimap keydown listener, allowing users to type glob patterns directly without triggering search bar hijacking.
+
 ## Webview Context Menu & Pinned Editors
 
 Right-clicking minimap file cards triggers a custom HTML context menu supporting standard VS Code Explorer actions (Open, Open to Side, Open Preview, Select for Compare, Compare with Selected, Reveal in Explorer, Open Containing Folder, Cut, Copy, Copy Path, Copy Relative Path, Rename..., Delete, Ignore in Thumbview). Jumping to files opens them with `{ preview: false }` to ensure tabs pin permanently and populate recency history.

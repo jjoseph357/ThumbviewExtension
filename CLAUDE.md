@@ -70,7 +70,7 @@ media/overview.js (webview/browser side)                                        
  ├─ Renders editor viewport bounds overlay and handles Left CTRL hold code line magnification,         │
  ├─ Posts focusWindow on mouseenter/mousemove to restore active panel focus automatically,              │
  ├─ Displays interactive ⚙ Settings & Shortcuts glassmorphic modal overlay with live toggles,          │
- ├─ Displays top toolbar popovers for Directory Navigation (📁 Folders) and Ignored Patterns (👁 Ignored), │
+ ├─ Displays top toolbar popover for Directory Navigation & Ignored Patterns (📁 Folders & Ignored),    │
  ├─ Displays custom context menu for standard VS Code Explorer operations,                              │
  └─ postMessage("ready" | "jump" | "switchTab" | "close" | "getHoverLines" | "focusWindow" | ...) ─────┘
 ```

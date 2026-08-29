@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
@@ -172,7 +172,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

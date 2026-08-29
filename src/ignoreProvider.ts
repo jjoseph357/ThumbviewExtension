@@ -5,7 +5,8 @@ export class IgnoreTreeItem extends vscode.TreeItem {
         super(pattern, vscode.TreeItemCollapsibleState.None);
         this.tooltip = `Ignored pattern: ${pattern}`;
         this.contextValue = "ignoreItem";
-        this.iconPath = pattern.endsWith("/") ? new vscode.ThemeIcon("folder") : new vscode.ThemeIcon("file");
+        const isFolder = pattern.endsWith("/") || pattern === "(root files)/" || !pattern.includes(".");
+        this.iconPath = isFolder ? new vscode.ThemeIcon("folder") : new vscode.ThemeIcon("file");
     }
 }
 

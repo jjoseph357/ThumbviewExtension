@@ -141,6 +141,7 @@ function updateDragTarget() {
 /** Resets all drag-related module state and cancels any pending drag animation frame. */
 function clearDragState() {
     candidateFile = null;
+    candidateFolder = null;
     draggingFile = null;
     dragGrabOffset = null;
     dragTarget = null;
@@ -317,16 +318,22 @@ window.addEventListener("keydown", event => {
         }
     }
 
-    if (event.ctrlKey && !event.altKey && !event.metaKey) {
-        if (event.key === 'Backspace') {
-            event.preventDefault();
-            clearSearch();
-            // NOTE: maybe this should also grab focus for searchInputFld?
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.tagName === "SELECT" || activeEl.isContentEditable)) {
+        if (activeEl !== searchInputFld) {
             return;
         }
     }
 
-    if (document.activeElement === searchInputFld) {
+    if (event.ctrlKey && !event.altKey && !event.metaKey) {
+        if (event.key === 'Backspace') {
+            event.preventDefault();
+            clearSearch();
+            return;
+        }
+    }
+
+    if (activeEl === searchInputFld) {
         return;
     }
 
@@ -1083,7 +1090,7 @@ const THEME_COLORS = {
     pdfPlaceholderLine: getThemeColor("--vscode-widget-border", "rgba(255, 255, 255, 0.25)"),
     searchMatchHighlight: withAlpha(ACCENT_SEARCH, 0.28),
     activeFocusHighlight: getThemeColor("--vscode-focusBorder", "#007fd4"),
-    viewportBandOverlay: getThemeColor("--vscode-editor-selectionBackground", "rgba(255, 255, 255, 0.22)"),
+    viewportBandOverlay: "rgba(255, 255, 255, 0.22)",
 };
 
 const PDF_PREVIEW = {
@@ -2154,6 +2161,12 @@ canvas.addEventListener("mousedown", event => {
 canvas.addEventListener("mousemove", event => {
     checkWindowFocus();
 
+    // Safety check: if no mouse button is pressed, cancel any pending candidate drag
+    if ((candidateFile || candidateFolder) && event.buttons === 0) {
+        candidateFile = null;
+        candidateFolder = null;
+    }
+
     lastMousePos = { x: event.clientX, y: event.clientY };
     cursorPos = getCanvasPos(event);
     hoveredFile = findFileAt(cursorPos.px, cursorPos.py);
@@ -2197,6 +2210,11 @@ canvas.addEventListener("mouseup", event => {
     if (!data) return;
     cursorPos = getCanvasPos(event);
 
+    const activeCandidateFile = candidateFile;
+    const activeCandidateFolder = candidateFolder;
+    candidateFile = null;
+    candidateFolder = null;
+
     if (draggingFile) {
         updateDragTarget();
 
@@ -2221,10 +2239,10 @@ canvas.addEventListener("mouseup", event => {
     }
 
     // Check folder card clicks first (subfolder card mode)
-    if (data._folderCards && candidateFolder) {
+    if (data._folderCards && activeCandidateFolder) {
         for (const card of data._folderCards) {
             if (pointInRect(card, cursorPos.px, cursorPos.py) &&
-                card.folderPath === candidateFolder.card.folderPath) {
+                card.folderPath === activeCandidateFolder.card.folderPath) {
                     focusedFolder = card.folderPath;
                     updateBreadcrumbs();
                     render();
@@ -2237,8 +2255,7 @@ canvas.addEventListener("mouseup", event => {
     // button (only present when the tab is open), the header/path-label strip (isolates
     // that file's parent folder), then the thumbnail body (jumps the real editor to the
     // clicked line — see extension.ts's "jump" handler).
-    if (!candidateFile) {
-        candidateFolder = null;
+    if (!activeCandidateFile) {
         return;
     }
     const filteredFiles = getFilteredFiles();
@@ -2246,7 +2263,7 @@ canvas.addEventListener("mouseup", event => {
         const c = file._cell;
         if (!c) continue;
 
-        if (pointInRect(c, cursorPos.px, cursorPos.py) && file === candidateFile.file) {
+        if (pointInRect(c, cursorPos.px, cursorPos.py) && file === activeCandidateFile.file) {
             // Check if click was on close '×' button
             const cb = file._closeBtn;
             if (cb && pointInRect(cb, cursorPos.px, cursorPos.py, CLOSE_BUTTON_PADDING)) {
@@ -2322,7 +2339,9 @@ canvas.addEventListener("mouseup", event => {
             return;
         }
     }
-    
+});
+
+window.addEventListener("mouseup", () => {
     candidateFile = null;
     candidateFolder = null;
 });
@@ -2528,10 +2547,19 @@ function updateSettingsModalState() {
     }
 }
 
+function escapeHtml(s) {
+    return String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
 function updateIgnoresPopover() {
-    const badge = document.getElementById("ignores-badge");
-    if (badge) {
-        badge.textContent = currentIgnorePatterns.length;
+    const countEl = document.getElementById("ignores-count");
+    if (countEl) {
+        countEl.textContent = currentIgnorePatterns.length;
     }
 
     const list = document.getElementById("ignores-list");
@@ -2542,7 +2570,7 @@ function updateIgnoresPopover() {
         const empty = document.createElement("div");
         empty.style.padding = "16px";
         empty.style.textAlign = "center";
-        empty.style.color = "#707075";
+        empty.style.color = "var(--vscode-descriptionForeground, #707075)";
         empty.style.fontSize = "12px";
         empty.textContent = "No active ignore patterns";
         list.appendChild(empty);
@@ -2550,11 +2578,18 @@ function updateIgnoresPopover() {
     }
 
     for (const pat of currentIgnorePatterns) {
+        const isFolder = pat.endsWith("/") || pat === "(root files)/" || !pat.includes(".");
         const item = document.createElement("div");
         item.className = "popover-item";
         
-        const label = document.createElement("span");
-        label.textContent = pat;
+        const label = document.createElement("div");
+        label.style.display = "flex";
+        label.style.alignItems = "center";
+        label.style.gap = "6px";
+        label.style.overflow = "hidden";
+        label.style.textOverflow = "ellipsis";
+        label.style.whiteSpace = "nowrap";
+        label.innerHTML = `<span>${isFolder ? "📁" : "📄"}</span><span style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(pat)}</span>`;
         item.appendChild(label);
 
         const removeBtn = document.createElement("button");
@@ -2618,6 +2653,11 @@ function updateFoldersPopover() {
     }
 
     const sortedFolders = Array.from(folderCounts.keys()).sort();
+    const countEl = document.getElementById("shown-folders-count");
+    if (countEl) {
+        countEl.textContent = sortedFolders.length + (rootOnlyFiles.length > 0 ? 1 : 0);
+    }
+
     for (const folderPath of sortedFolders) {
         const count = folderCounts.get(folderPath);
         const item = document.createElement("div");
@@ -2632,7 +2672,7 @@ function updateFoldersPopover() {
         titleDiv.style.gap = "6px";
         titleDiv.style.flex = "1";
         titleDiv.style.minWidth = "0";
-        titleDiv.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📁 ${folderPath}</span><span class="popover-item-count">${count} file${count === 1 ? "" : "s"}</span>`;
+        titleDiv.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📁 ${escapeHtml(folderPath)}</span><span class="popover-item-count">${count} file${count === 1 ? "" : "s"}</span>`;
         item.appendChild(titleDiv);
 
         const ignoreBtn = document.createElement("button");
@@ -2659,10 +2699,6 @@ function updateFoldersPopover() {
 const foldersBtn = document.getElementById("folders-btn");
 const foldersPopover = document.getElementById("folders-popover");
 const closeFoldersPopover = document.getElementById("close-folders-popover");
-
-const ignoresBtn = document.getElementById("ignores-btn");
-const ignoresPopover = document.getElementById("ignores-popover");
-const closeIgnoresPopover = document.getElementById("close-ignores-popover");
 const addIgnoreInput = document.getElementById("add-ignore-input");
 const addIgnoreBtn = document.getElementById("add-ignore-btn");
 
@@ -2672,21 +2708,20 @@ const closeModal = document.getElementById("close-modal");
 
 function closeAllPopovers() {
     if (foldersPopover) foldersPopover.style.display = "none";
-    if (ignoresPopover) ignoresPopover.style.display = "none";
     if (actionsModal) actionsModal.style.display = "none";
     if (foldersBtn) foldersBtn.classList.remove("active");
-    if (ignoresBtn) ignoresBtn.classList.remove("active");
     if (actionsBtn) actionsBtn.classList.remove("active");
 }
 
 if (foldersBtn && foldersPopover) {
     foldersBtn.onclick = (e) => {
         e.stopPropagation();
-        const isOpen = foldersPopover.style.display === "flex";
+        const isOpen = foldersPopover.style.display === "block";
         closeAllPopovers();
         if (!isOpen) {
             updateFoldersPopover();
-            foldersPopover.style.display = "flex";
+            updateIgnoresPopover();
+            foldersPopover.style.display = "block";
             foldersBtn.classList.add("active");
         }
     };
@@ -2695,25 +2730,6 @@ if (closeFoldersPopover && foldersPopover) {
     closeFoldersPopover.onclick = () => {
         foldersPopover.style.display = "none";
         if (foldersBtn) foldersBtn.classList.remove("active");
-    };
-}
-
-if (ignoresBtn && ignoresPopover) {
-    ignoresBtn.onclick = (e) => {
-        e.stopPropagation();
-        const isOpen = ignoresPopover.style.display === "flex";
-        closeAllPopovers();
-        if (!isOpen) {
-            updateIgnoresPopover();
-            ignoresPopover.style.display = "flex";
-            ignoresBtn.classList.add("active");
-        }
-    };
-}
-if (closeIgnoresPopover && ignoresPopover) {
-    closeIgnoresPopover.onclick = () => {
-        ignoresPopover.style.display = "none";
-        if (ignoresBtn) ignoresBtn.classList.remove("active");
     };
 }
 
@@ -2808,10 +2824,8 @@ document.addEventListener("click", event => {
     const clickedInside =
         (actionsModal && actionsModal.contains(event.target)) ||
         (foldersPopover && foldersPopover.contains(event.target)) ||
-        (ignoresPopover && ignoresPopover.contains(event.target)) ||
         event.target === actionsBtn ||
-        event.target === foldersBtn ||
-        event.target === ignoresBtn;
+        event.target === foldersBtn;
 
     if (!clickedInside) {
         closeAllPopovers();

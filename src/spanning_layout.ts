@@ -1,8 +1,10 @@
-// spanning_grid layout mode: unlike layout.ts's one-cell-per-file uniform grid, a tall
-// file here occupies several vertically-stacked cells so its thumbnail gets proportionally
-// more room. Per-file cell counts and the derived row count are persisted by the caller
-// (extension.ts) so they don't recompute — and reshuffle the grid — on every rescan.
 import { RepoFile } from "./scanner";
+
+export const DEFAULT_BASE_LINES_PER_CELL = 60;
+export const DEFAULT_COMPRESSION_PCT = 0.05;
+export const DEFAULT_TARGET_ASPECT = 16 / 9;
+export const MIN_GRID_ROWS = 1;
+export const MIN_GRID_COLS = 2;
 
 export interface SpanningPlacement {
     file: RepoFile;
@@ -17,15 +19,13 @@ export interface SpanningLayoutResult {
     cols: number;
     placements: SpanningPlacement[];
     allocations: { [id: string]: number };
+    wrapRows: number;
 }
 
-// Files at or under baseLinesPerCell get exactly 1 cell. Above that, growth is
-// compressed to compressionPct of the real line count (never below baseLinesPerCell)
-// before dividing into cells — so a single huge file can't dominate the whole grid.
 export function cellsNeeded(
     lineCount: number,
-    baseLinesPerCell = 60,
-    compressionPct = 0.05
+    baseLinesPerCell = DEFAULT_BASE_LINES_PER_CELL,
+    compressionPct = DEFAULT_COMPRESSION_PCT
 ): number {
     if (lineCount <= baseLinesPerCell) {
         return 1;
@@ -34,19 +34,15 @@ export function cellsNeeded(
     return Math.ceil(repLines / baseLinesPerCell);
 }
 
-// existingAllocations/savedGridRows let the caller persist a file's cell count and the
-// grid's row count across rescans (extension.ts does, in workspaceState) — a file's
-// allocation is only computed once, the first time it's seen, and never recomputed
-// afterward, so unrelated files don't jump around just because one file grew or shrank.
 export function buildSpanningGrid(
     files: RepoFile[],
     seenFileOrder: string[],
     existingAllocations: { [id: string]: number } = {},
     savedGridRows: number | null = null,
     forceBreakBeforeId: string | null = null,
-    targetAspect = 1.777,
-    baseLinesPerCell = 60,
-    compressionPct = 0.05
+    targetAspect = DEFAULT_TARGET_ASPECT,
+    baseLinesPerCell = DEFAULT_BASE_LINES_PER_CELL,
+    compressionPct = DEFAULT_COMPRESSION_PCT
 ): SpanningLayoutResult {
     const allocations: { [id: string]: number } = { ...existingAllocations };
     const filesById = new Map<string, RepoFile>();
@@ -55,6 +51,7 @@ export function buildSpanningGrid(
     }
 
     let totalCells = 0;
+    let maxNCells = 1;
     for (const fid of seenFileOrder) {
         if (!fid) {
             totalCells += 1;
@@ -65,32 +62,26 @@ export function buildSpanningGrid(
             allocations[fid] = f ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1;
         }
         totalCells += allocations[fid];
+        if (allocations[fid] > maxNCells) {
+            maxNCells = allocations[fid];
+        }
     }
 
-    const gridRows = savedGridRows && savedGridRows > 0
-        ? savedGridRows
-        : Math.max(1, Math.round(Math.sqrt((totalCells || files.length || 1) / targetAspect)));
+    const calculatedRows = Math.max(MIN_GRID_ROWS, Math.round(Math.sqrt(Math.max(totalCells, files.length, 1) / targetAspect)));
+    const wrapRows = savedGridRows && savedGridRows > 0 ? Math.max(savedGridRows, maxNCells) : Math.max(calculatedRows, maxNCells);
 
     let currCol = 0;
     let currRow = 0;
+    let maxRowUsed = 1;
     const placements: SpanningPlacement[] = [];
 
     for (const fid of seenFileOrder) {
-        if (!fid) {
-            if (currRow > 0 && currRow + 1 > gridRows) {
-                currCol++;
-                currRow = 0;
-            }
-            currRow += 1;
-            continue;
-        }
-
-        const file = filesById.get(fid);
-        const nCells = allocations[fid] || 1;
+        const file = fid ? filesById.get(fid) : undefined;
+        const nCells = fid ? (allocations[fid] || 1) : 1;
 
         const mustBreak = fid === forceBreakBeforeId
             ? currRow > 0
-            : currRow > 0 && currRow + nCells > gridRows;
+            : currRow > 0 && currRow + nCells > wrapRows;
 
         if (mustBreak) {
             currCol++;
@@ -113,12 +104,20 @@ export function buildSpanningGrid(
         }
 
         currRow += nCells;
+        if (currRow > maxRowUsed) {
+            maxRowUsed = currRow;
+        }
     }
 
+    const reqCols = currCol + 1;
+    const finalRows = Math.max(MIN_GRID_ROWS, maxRowUsed, Math.ceil(reqCols / targetAspect));
+    const finalCols = Math.max(MIN_GRID_COLS, reqCols, Math.ceil(finalRows * targetAspect));
+
     return {
-        rows: gridRows,
-        cols: currCol + 1,
+        rows: finalRows,
+        cols: finalCols,
         placements,
-        allocations
+        allocations,
+        wrapRows
     };
 }

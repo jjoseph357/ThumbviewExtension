@@ -5,12 +5,29 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.3] - 2026-08-29
 
 ### Added
-- **Top Toolbar Navigation & Controls**: Added `📁 Folders` directory navigator popover, `👁 Ignored` patterns manager popover, and an interactive `⚙ Settings` modal directly on the webview top toolbar. Allows switching layout modes (Spanning vs Uniform Grid), drag-to-reorder modes (Swap vs Shift), media thumbnails toggle, layout reflow, and full folder/ignore management without needing the VS Code sidebar.
+- **Unified Folders & Ignored Side-by-Side Modal**: Combined the separate `📁 Folders` and `👁 Ignored` top toolbar buttons into a single `📁 Folders & Ignored` button opening a two-column glassmorphic modal. The left column lists active folders shown in Thumbview with file counts, click-to-isolate actions, and single-click ignore buttons. The right column lists all ignored folders and glob patterns with folder icons, an inline pattern input with an Add button, and one-click unignore buttons.
+- **Automated Spanning Reordering Test Suite**: Added a comprehensive automated unit test suite in `src/test/spanning_reorder.test.ts` and `npm run test:unit` verifying intra-column, cross-column, multi-tile displacement, and empty-slot movements.
+
+### Fixed
+- **Spanning Grid Aspect-Ratio Scaling**: Grid dimensions now expand proportionally in both horizontal and vertical directions when adding space, maintaining natural code aspect ratios without shifting existing tiles.
+- **Symmetric Multi-Tile Cross-Column Drag and Drop**: Reordering spanning tiles across columns now collects and swaps all overlapping files across the full vertical span, preventing tile overwrites, lost files, or unintended canvas reflows.
+- **Self-Drop and Intra-Column Movement Protection**: Resolved tile duplication when dragging a multi-cell file down onto its own sub-cells or swapping files within the same column.
+- **Title Click Drag-State Reset**: Fixed an issue where clicking a file tile's title or header left candidate drag state active, causing subsequent mouse movement to trigger accidental file dragging.
+- **Spanning Grid Drag Teleportation with Tall Files**: Fixed an issue where dragging files to empty slots on lower rows in workspaces with tall spanning files caused tiles to drop off the 2D grid matrix and teleport to the first empty slot. `buildSpanningGrid` and `reorderFile` now dynamically accommodate all spanning file cell heights and targeted row coordinates.
+- **Opaque Blue Viewport Band on Windows**: Restored the open file editor viewport range overlay (`viewportBandOverlay`) to transparent gray (`rgba(255, 255, 255, 0.22)`), preventing solid opaque theme colors (`--vscode-editor-selectionBackground`) from covering code lines.
+- **Search Bar Input Hijacking**: Fixed the global `keydown` event listener in `media/overview.js` to ignore keystrokes when any text input, textarea, or select element is focused, allowing users to type glob patterns into the ignore input without keystrokes being redirected to the search bar.
+- **Consistent Ignored Folder Representation**: Automatically and manually ignored folders now consistently display folder items and badges in both the webview modal and sidebar tree views.
+
+## [0.4.2] - 2026-08-07
+
+### Added
+- **Top Toolbar Navigation & Controls**: Added top toolbar controls with directory navigator, pattern manager, and interactive `⚙ Settings` modal directly on the webview toolbar. Allows switching layout modes (Spanning vs Uniform Grid), drag-to-reorder modes (Swap vs Shift), media thumbnails toggle, layout reflow, and full folder/ignore management.
 - **Drag-and-Drop Tile Reordering**: Click-drag any file tile onto another to reorder the grid. Two modes — Swap (the dragged tile and the drop target trade places) and Shift (the dragged tile inserts at the drop target, everything between shifts over by one) — toggle via the Command Palette, settings modal, or sidebar links. Works in both Uniform and Spanning grid layouts, persists across rescans and reloads, and shows a live ghost of the dragged tile plus an outline on the current drop target while dragging.
 - **Empty Grid-Slot Drag Placement**: Users can drop file tiles into empty slots across both Uniform and Spanning grid modes. Dropping a tile to an empty space leaves an empty space where it came from so surrounding files do not reflow.
+- **Git Status & Diff Tracking**: Visual gutter markers and status badges for modified, added, untracked, and deleted files with real-time Git repository change detection.
 - **Theme Color Centralization & Fixed Brand Accents**: All webview HTML/CSS and canvas UI chrome colors now derive dynamically from the user's active VS Code theme (`--vscode-*`), automatically adapting across Dark+, Light+, and High Contrast themes. Three fixed brand accents are defined in `src/colors.ts`: search highlight (`#dc267f`), magnifier inspection (`#785ef0`), and open-tab recency (`#fe6100`).
 - **General Hover Outline**: Hovering any tile now outlines it in the same accent color as the drag ghost/drop-target outline, for a consistent "you're interacting with this tile" affordance.
 

@@ -415,7 +415,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows, forceBreakBeforeId ?? null);
 
                 await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
-                await context.workspaceState.update("thumbview.spanningRows", layout.rows);
+                await context.workspaceState.update("thumbview.spanningRows", layout.wrapRows);
 
                 const filesWithSlots = layout.placements.map(p => ({
                     ...p.file,
@@ -423,14 +423,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     nCells: p.nCells,
                     slots: p.slots
                 }));
-
-                let spMaxCol = 0, spMaxRow = 0;
-                for (const p of layout.placements) {
-                    spMaxCol = Math.max(spMaxCol, p.col);
-                    for (const s of p.slots) {
-                        spMaxRow = Math.max(spMaxRow, s[1]);
-                    }
-                }
 
                 panel.webview.postMessage({
                     command: "data",
@@ -443,8 +435,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     ignorePatterns,
                     files: filesWithSlots,
                     layout: {
-                        cols: Math.max(1, spMaxCol + 1),
-                        rows: Math.max(1, spMaxRow + 1)
+                        cols: layout.cols,
+                        rows: layout.rows
                     }
                 });
             } else { // uniform grid (default)
@@ -1074,17 +1066,38 @@ export async function activate(context: vscode.ExtensionContext) {
                     try {
                         let forceBreakBeforeId: string | undefined;
 
-                        if (msg.targetIsEmpty) {
-                            if (layoutMode === "spanning_grid") {
-                                const { ignorePatterns } = getIgnoreState();
-                                const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
-                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
-                                const currentLayout = buildSpanningGrid(activeFiles, fileOrder.getOrder(), savedAllocations, savedRows);
-                                const gridRows = currentLayout.rows;
-                                const maxCol = Math.max(currentLayout.cols - 1, msg.targetCol);
+                        if (layoutMode === "spanning_grid") {
+                            const { ignorePatterns } = getIgnoreState();
+                            const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
+                            const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                            const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+                            const currentLayout = buildSpanningGrid(activeFiles, fileOrder.getOrder(), savedAllocations, savedRows);
+                            const sourceCells = savedAllocations[msg.sourceId] || 1;
+                            const targetCells = msg.targetId ? (savedAllocations[msg.targetId] || 1) : 1;
 
-                                // Build 2D column-major grid representing the current spanning layout
+                            if (!msg.targetIsEmpty && mode === "shift" && sourceCells === targetCells) {
+                                fileOrder.move(msg.sourceId, msg.targetId);
+                            } else {
+                                const sourcePlacement = currentLayout.placements.find(p => p.file.id === msg.sourceId);
+                                const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
+                                const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
+
+                                // Find if the drop lands on any occupied placement (including sub-cells of spanning files)
+                                const targetPlacement = currentLayout.placements.find(p =>
+                                    p.slots.some(s => s[0] === msg.targetCol && s[1] === msg.targetRow) && p.file.id !== msg.sourceId
+                                );
+
+                                const targetCol = targetPlacement ? targetPlacement.col : msg.targetCol;
+                                const targetRow = targetPlacement ? targetPlacement.row : msg.targetRow;
+
+                                let reqRows = currentLayout.wrapRows;
+                                for (const p of currentLayout.placements) {
+                                    reqRows = Math.max(reqRows, p.row + p.nCells);
+                                }
+                                const gridRows = Math.max(reqRows, targetRow + sourceCells);
+                                const maxCol = Math.max(currentLayout.cols - 1, targetCol, sourceCol);
+
+                                // Build 2D column-major grid representing current spanning layout
                                 const grid: string[][] = [];
                                 for (let c = 0; c <= maxCol; c++) {
                                     grid.push(new Array(gridRows).fill(""));
@@ -1097,20 +1110,112 @@ export async function activate(context: vscode.ExtensionContext) {
                                     }
                                 }
 
-                                // Clear source file from grid (leaving empty space where it came from)
-                                for (let c = 0; c <= maxCol; c++) {
-                                    for (let r = 0; r < gridRows; r++) {
-                                        if (grid[c][r] === msg.sourceId) {
-                                            grid[c][r] = "";
-                                        }
-                                    }
+                                // Identify all target files overlapping the incoming file span in targetCol
+                                const targetRaw = grid[targetCol].slice(targetRow, targetRow + sourceCells).filter(id => Boolean(id) && id !== msg.sourceId);
+                                const targetFileIds = Array.from(new Set(targetRaw));
+                                if (targetPlacement && !targetFileIds.includes(targetPlacement.file.id)) {
+                                    targetFileIds.push(targetPlacement.file.id);
                                 }
 
-                                // Place source file at target position
-                                const sourceCells = savedAllocations[msg.sourceId] || 1;
-                                for (let i = 0; i < sourceCells; i++) {
-                                    if (msg.targetRow + i < gridRows) {
-                                        grid[msg.targetCol][msg.targetRow + i] = msg.sourceId;
+                                if (targetFileIds.length === 0) {
+                                    for (let c = 0; c <= maxCol; c++) {
+                                        for (let r = 0; r < gridRows; r++) {
+                                            if (grid[c][r] === msg.sourceId) {
+                                                grid[c][r] = "";
+                                            }
+                                        }
+                                    }
+                                    for (let i = 0; i < sourceCells; i++) {
+                                        if (targetRow + i < gridRows) {
+                                            grid[targetCol][targetRow + i] = msg.sourceId;
+                                        }
+                                    }
+                                } else if (sourceCol === targetCol) {
+                                    for (let r = 0; r < gridRows; r++) {
+                                        if (grid[sourceCol][r] === msg.sourceId || targetFileIds.includes(grid[sourceCol][r])) {
+                                            grid[sourceCol][r] = "";
+                                        }
+                                    }
+                                    
+                                    const minRow = Math.min(sourceRow, targetRow);
+                                    if (sourceRow < targetRow) {
+                                        let curR = minRow;
+                                        for (const tid of targetFileIds) {
+                                            const tc = savedAllocations[tid] || 1;
+                                            for (let i = 0; i < tc; i++) {
+                                                if (curR + i < gridRows) grid[sourceCol][curR + i] = tid;
+                                            }
+                                            curR += tc;
+                                        }
+                                        for (let i = 0; i < sourceCells; i++) {
+                                            if (curR + i < gridRows) grid[sourceCol][curR + i] = msg.sourceId;
+                                        }
+                                    } else {
+                                        let curR = minRow;
+                                        for (let i = 0; i < sourceCells; i++) {
+                                            if (curR + i < gridRows) grid[sourceCol][curR + i] = msg.sourceId;
+                                        }
+                                        curR += sourceCells;
+                                        for (const tid of targetFileIds) {
+                                            const tc = savedAllocations[tid] || 1;
+                                            for (let i = 0; i < tc; i++) {
+                                                if (curR + i < gridRows) grid[sourceCol][curR + i] = tid;
+                                            }
+                                            curR += tc;
+                                        }
+                                    }
+                                } else {
+                                    // Cross-column swap / displacement
+                                    const maxTargetSpan = targetFileIds.reduce((sum, tid) => sum + (savedAllocations[tid] || 1), 0);
+                                    const totalSpan = Math.max(sourceCells, maxTargetSpan);
+                                    const effectiveSourceRow = (targetRow === 0 && sourceRow < totalSpan) ? 0 : Math.min(sourceRow, targetRow);
+
+                                    const sourceRaw = grid[sourceCol].slice(effectiveSourceRow, effectiveSourceRow + totalSpan).filter(id => Boolean(id) && !targetFileIds.includes(id));
+                                    const sourceFileIds = Array.from(new Set(sourceRaw));
+                                    if (!sourceFileIds.includes(msg.sourceId)) {
+                                        sourceFileIds.unshift(msg.sourceId);
+                                    }
+
+                                    // Clear sourceFileIds from sourceCol and targetFileIds from targetCol
+                                    for (let r = 0; r < gridRows; r++) {
+                                        if (sourceFileIds.includes(grid[sourceCol][r])) {
+                                            grid[sourceCol][r] = "";
+                                        }
+                                        if (targetFileIds.includes(grid[targetCol][r])) {
+                                            grid[targetCol][r] = "";
+                                        }
+                                    }
+
+                                    // Place sourceFileIds in targetCol
+                                    let curTargetR = targetRow;
+                                    for (const sid of sourceFileIds) {
+                                        const sidPlacement = currentLayout.placements.find(p => p.file.id === sid);
+                                        const offset = sidPlacement ? Math.max(0, sidPlacement.row - effectiveSourceRow) : (curTargetR - targetRow);
+                                        const destR = (sourceFileIds.length === 1 && sourceCells === 1) ? targetRow : (targetRow + offset);
+                                        const sc = savedAllocations[sid] || 1;
+                                        for (let i = 0; i < sc; i++) {
+                                            if (destR + i < gridRows) {
+                                                grid[targetCol][destR + i] = sid;
+                                            }
+                                        }
+                                        curTargetR += sc;
+                                    }
+
+                                    // Place targetFileIds in sourceCol
+                                    let curSourceR = effectiveSourceRow;
+                                    for (const tid of targetFileIds) {
+                                        const tidPlacement = currentLayout.placements.find(p => p.file.id === tid);
+                                        const offset = tidPlacement ? Math.max(0, tidPlacement.row - targetRow) : (curSourceR - effectiveSourceRow);
+                                        const destR = (targetFileIds.length === 1 && maxTargetSpan === 1 && targetPlacement && targetPlacement.row === targetRow)
+                                            ? effectiveSourceRow
+                                            : (effectiveSourceRow + offset);
+                                        const tc = savedAllocations[tid] || 1;
+                                        for (let i = 0; i < tc; i++) {
+                                            if (destR + i < gridRows) {
+                                                grid[sourceCol][destR + i] = tid;
+                                            }
+                                        }
+                                        curSourceR += tc;
                                     }
                                 }
 
@@ -1135,38 +1240,14 @@ export async function activate(context: vscode.ExtensionContext) {
                                 }
 
                                 fileOrder.setOrder(newOrder);
-                            } else {
-                                const targetIndex = findSlotIndex(msg.targetCol, msg.targetRow, fileOrder.getOrder().length);
-                                fileOrder.moveToEmptySlot(msg.sourceId, targetIndex);
                             }
                         } else {
-                            let sizeMismatch = false;
-                            if (layoutMode === "spanning_grid") {
-                                // Read persisted cell allocations rather than trusting the
-                                // webview for this — the host already owns this data, see
-                                // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 4 (Step 8a).
-                                const allocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                                const sourceCells = allocations[msg.sourceId] ?? 1;
-                                const targetCells = allocations[msg.targetId] ?? 1;
-                                sizeMismatch = sourceCells !== targetCells;
-                            }
-
-                            if (sizeMismatch) {
-                                // Differently-sized spanning_grid files: always swap array
-                                // positions (regardless of dragReorderMode) so the dragged
-                                // file lands exactly at the target's old array index, then
-                                // force buildSpanningGrid to start a fresh column there — a
-                                // plain swap alone isn't enough, since the dragged file can
-                                // be silently absorbed into whichever column precedes it
-                                // instead of displacing the target. See
-                                // DRAG_DROP_GRID_TARGETING_STEPS.md's Phase 4 (Step 8b) for
-                                // the worked trace. Same-size spanning_grid files have no
-                                // size-aware case and fall through to the branch below.
-                                fileOrder.swap(msg.sourceId, msg.targetId);
-                                forceBreakBeforeId = msg.sourceId;
+                            if (msg.targetIsEmpty) {
+                                const targetIndex = findSlotIndex(msg.targetCol, msg.targetRow, fileOrder.getOrder().length);
+                                fileOrder.moveToEmptySlot(msg.sourceId, targetIndex);
                             } else if (mode === "shift") {
                                 fileOrder.move(msg.sourceId, msg.targetId);
-                            } else { // mode === "swap" by default
+                            } else {
                                 fileOrder.swap(msg.sourceId, msg.targetId);
                             }
                         }
@@ -2305,24 +2386,34 @@ function getHtml(
         <div id="hover-tooltip"></div>
         <div id="context-menu"></div>
         
-        <div id="folders-popover" class="glass-popover" style="display: none;">
+        <div id="folders-popover" class="glass-popover" style="display: none; width: 680px; max-width: 94vw; max-height: 80vh;">
             <div class="popover-header">
-                <span>📁 Directory Navigation</span>
+                <span>📁 Folders &amp; Ignored Items</span>
                 <button class="popover-close" id="close-folders-popover">&times;</button>
             </div>
-            <div class="popover-body" id="folders-list"></div>
-        </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 12px; overflow-y: auto; max-height: 68vh;">
+                <!-- Left column: Shown Folders -->
+                <div style="display: flex; flex-direction: column; min-width: 0;">
+                    <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--vscode-focusBorder, #007fd4); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 20%, transparent); display: flex; justify-content: space-between; align-items: center;">
+                        <span>Shown Folders</span>
+                        <span id="shown-folders-count" style="font-size: 11px; color: var(--vscode-descriptionForeground, #8a8a93);">0</span>
+                    </div>
+                    <div class="popover-body" id="folders-list" style="max-height: none; padding: 0;"></div>
+                </div>
 
-        <div id="ignores-popover" class="glass-popover" style="display: none;">
-            <div class="popover-header">
-                <span>👁 Ignored Patterns</span>
-                <button class="popover-close" id="close-ignores-popover">&times;</button>
+                <!-- Right column: Ignored Patterns & Folders -->
+                <div style="display: flex; flex-direction: column; min-width: 0;">
+                    <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--vscode-errorForeground, #ef4444); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #ef4444) 20%, transparent); display: flex; justify-content: space-between; align-items: center;">
+                        <span>Ignored Items</span>
+                        <span id="ignores-count" style="font-size: 11px; color: var(--vscode-descriptionForeground, #8a8a93);">0</span>
+                    </div>
+                    <div class="popover-add-bar" style="padding: 0 0 8px 0; border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08)); margin-bottom: 8px;">
+                        <input type="text" id="add-ignore-input" class="popover-input" placeholder="e.g. src/temp/ or *.log">
+                        <button id="add-ignore-btn" class="popover-btn-action">+ Add</button>
+                    </div>
+                    <div class="popover-body" id="ignores-list" style="max-height: none; padding: 0;"></div>
+                </div>
             </div>
-            <div class="popover-add-bar">
-                <input type="text" id="add-ignore-input" class="popover-input" placeholder="e.g. src/temp/ or *.log">
-                <button id="add-ignore-btn" class="popover-btn-action">+ Add</button>
-            </div>
-            <div class="popover-body" id="ignores-list"></div>
         </div>
 
         <div id="actions-modal">
@@ -2418,8 +2509,7 @@ function getHtml(
                 <span class="breadcrumb-item" id="breadcrumb-root">root</span>
             </div>
             <div class="top-bar-actions">
-                <button id="folders-btn" class="toolbar-btn" title="Directory Navigation">📁 Folders</button>
-                <button id="ignores-btn" class="toolbar-btn" title="Ignored Patterns">👁 Ignored <span id="ignores-badge" class="badge">0</span></button>
+                <button id="folders-btn" class="toolbar-btn" title="Folders &amp; Ignored">📁 Folders &amp; Ignored</button>
                 <button id="actions-btn" class="toolbar-btn" title="Settings &amp; Shortcuts">⚙ Settings</button>
             </div>
         </div>
