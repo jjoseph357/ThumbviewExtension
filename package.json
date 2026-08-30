@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
@@ -173,7 +173,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js"
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

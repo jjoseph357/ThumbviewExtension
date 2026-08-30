@@ -5,6 +5,16 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-08-29
+
+### Changed
+- **Git Status File Title Color Coding**: File titles are now styled directly in Yellow (modified) and Green (added / untracked) according to your VS Code theme's Git decoration colors, replacing the M and U/A badge glyphs for cleaner card headers.
+- **Drag and Drop Map Optimizations**: Replaced $O(N)$ linear scans on mouse hover and dragging with $O(1)$ spatial coordinate Map lookups (`slotOccupancy`), indexed placements into Maps in the extension host, and eliminated frame allocations in `render()`.
+
+### Fixed
+- **Spanning Grid Bottom Row Drag Placement**: Fixed an issue where dragging tiles to lower or bottom rows failed to persist the expanded row capacity, which previously caused items to wrap into adjacent columns and expand canvas dimensions.
+- **Cross-Column 1-Tall Tile Swapping**: Fixed an issue where swapping two 1-tall files at different row coordinates across columns swept up adjacent row 0 tiles and displaced them to the right. Equal-span tiles now swap exact slot positions cleanly.
+
 ## [0.4.3] - 2026-08-29
 
 ### Added

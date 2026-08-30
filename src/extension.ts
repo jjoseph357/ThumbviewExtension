@@ -1078,14 +1078,25 @@ export async function activate(context: vscode.ExtensionContext) {
                             if (!msg.targetIsEmpty && mode === "shift" && sourceCells === targetCells) {
                                 fileOrder.move(msg.sourceId, msg.targetId);
                             } else {
-                                const sourcePlacement = currentLayout.placements.find(p => p.file.id === msg.sourceId);
+                                const placementByFileId = new Map<string, (typeof currentLayout.placements)[0]>();
+                                const placementBySlot = new Map<string, (typeof currentLayout.placements)[0]>();
+
+                                for (const p of currentLayout.placements) {
+                                    placementByFileId.set(p.file.id, p);
+                                    for (const s of p.slots) {
+                                        placementBySlot.set(`${s[0]},${s[1]}`, p);
+                                    }
+                                }
+
+                                const sourcePlacement = placementByFileId.get(msg.sourceId);
                                 const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
                                 const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
 
                                 // Find if the drop lands on any occupied placement (including sub-cells of spanning files)
-                                const targetPlacement = currentLayout.placements.find(p =>
-                                    p.slots.some(s => s[0] === msg.targetCol && s[1] === msg.targetRow) && p.file.id !== msg.sourceId
-                                );
+                                let targetPlacement = placementBySlot.get(`${msg.targetCol},${msg.targetRow}`);
+                                if (targetPlacement && targetPlacement.file.id === msg.sourceId) {
+                                    targetPlacement = undefined;
+                                }
 
                                 const targetCol = targetPlacement ? targetPlacement.col : msg.targetCol;
                                 const targetRow = targetPlacement ? targetPlacement.row : msg.targetRow;
@@ -1168,7 +1179,14 @@ export async function activate(context: vscode.ExtensionContext) {
                                     // Cross-column swap / displacement
                                     const maxTargetSpan = targetFileIds.reduce((sum, tid) => sum + (savedAllocations[tid] || 1), 0);
                                     const totalSpan = Math.max(sourceCells, maxTargetSpan);
-                                    const effectiveSourceRow = (targetRow === 0 && sourceRow < totalSpan) ? 0 : Math.min(sourceRow, targetRow);
+
+                                    let effectiveSourceRow = sourceRow;
+                                    if (sourceCells < maxTargetSpan) {
+                                        effectiveSourceRow = Math.max(0, Math.min(sourceRow, gridRows - totalSpan));
+                                        if (targetRow === 0 && sourceRow < totalSpan) {
+                                            effectiveSourceRow = 0;
+                                        }
+                                    }
 
                                     const sourceRaw = grid[sourceCol].slice(effectiveSourceRow, effectiveSourceRow + totalSpan).filter(id => Boolean(id) && !targetFileIds.includes(id));
                                     const sourceFileIds = Array.from(new Set(sourceRaw));
@@ -1189,7 +1207,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                     // Place sourceFileIds in targetCol
                                     let curTargetR = targetRow;
                                     for (const sid of sourceFileIds) {
-                                        const sidPlacement = currentLayout.placements.find(p => p.file.id === sid);
+                                        const sidPlacement = placementByFileId.get(sid);
                                         const offset = sidPlacement ? Math.max(0, sidPlacement.row - effectiveSourceRow) : (curTargetR - targetRow);
                                         const destR = (sourceFileIds.length === 1 && sourceCells === 1) ? targetRow : (targetRow + offset);
                                         const sc = savedAllocations[sid] || 1;
@@ -1204,10 +1222,10 @@ export async function activate(context: vscode.ExtensionContext) {
                                     // Place targetFileIds in sourceCol
                                     let curSourceR = effectiveSourceRow;
                                     for (const tid of targetFileIds) {
-                                        const tidPlacement = currentLayout.placements.find(p => p.file.id === tid);
+                                        const tidPlacement = placementByFileId.get(tid);
                                         const offset = tidPlacement ? Math.max(0, tidPlacement.row - targetRow) : (curSourceR - effectiveSourceRow);
                                         const destR = (targetFileIds.length === 1 && maxTargetSpan === 1 && targetPlacement && targetPlacement.row === targetRow)
-                                            ? effectiveSourceRow
+                                            ? (sourceCells === 1 ? sourceRow : effectiveSourceRow)
                                             : (effectiveSourceRow + offset);
                                         const tc = savedAllocations[tid] || 1;
                                         for (let i = 0; i < tc; i++) {
@@ -1239,6 +1257,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                     newOrder.pop();
                                 }
 
+                                await context.workspaceState.update("thumbview.spanningRows", Math.max(savedRows || 0, gridRows));
                                 fileOrder.setOrder(newOrder);
                             }
                         } else {

@@ -66,6 +66,8 @@ let dragTarget = null;
 let hoveredFile = null;
 
 const slotOccupancy = new Map();
+const fileById = new Map();
+const fileByUri = new Map();
 
 let matchCase = false;
 let matchWholeWord = false;
@@ -91,12 +93,33 @@ function pointInRect(rect, px, py, pad = 0) {
 
 /** Returns the file containing px, py if it exists, else returns null. */
 function findFileAt(px, py) {
-    const filteredFiles = getFilteredFiles();
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
+    if (!data || !data.layout) return null;
 
-        if (pointInRect(c, px, py)) {
+    // Fast O(1) grid slot lookup when in standard root grid mode
+    if (!focusedFolder && data.layout.cols > 0 && data.layout.rows > 0) {
+        const rectW = canvas.clientWidth || window.innerWidth;
+        const rectH = canvas.clientHeight || window.innerHeight;
+        const availableW = rectW - (GRID_SIDE_MARGIN * 2);
+        const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
+        if (availableW > 0 && availableH > 0) {
+            const cellW = availableW / data.layout.cols;
+            const cellH = availableH / data.layout.rows;
+            const col = Math.floor((px - GRID_SIDE_MARGIN) / cellW);
+            const row = Math.floor((py - GRID_TOP_MARGIN) / cellH);
+            if (col >= 0 && col < data.layout.cols && row >= 0 && row < data.layout.rows) {
+                const file = slotOccupancy.get(`${col},${row}`);
+                if (file && file._cell && pointInRect(file._cell, px, py)) {
+                    return file;
+                }
+            }
+        }
+    }
+
+    const filteredFiles = getFilteredFiles();
+    for (let i = 0; i < filteredFiles.length; i++) {
+        const file = filteredFiles[i];
+        const c = file._cell;
+        if (c && pointInRect(c, px, py)) {
             return file;
         }
     }
@@ -435,9 +458,13 @@ window.addEventListener("message", event => {
         statusText = "";
         hoverLineCache = {};
         slotOccupancy.clear();
+        fileById.clear();
+        fileByUri.clear();
         if (data && data.files) {
             for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
                 const f = data.files[fIdx];
+                fileById.set(f.id, f);
+                fileByUri.set(f.uri, f);
                 f._lowerPath = f.path ? f.path.toLowerCase() : "";
                 const lang = detectLang(f.path);
                 const textArr = [];
@@ -477,6 +504,8 @@ window.addEventListener("message", event => {
                     for (const [col, row] of f.slots) {
                         slotOccupancy.set(`${col},${row}`, f);
                     }
+                } else if (f.slot) {
+                    slotOccupancy.set(`${f.slot[0]},${f.slot[1]}`, f);
                 }
             }
         }
@@ -527,10 +556,8 @@ window.addEventListener("message", event => {
             for (let idx = 0; idx < msg.lines.length; idx++) {
                 hoverLineCache[msg.uri][msg.start + idx] = msg.lines[idx];
             }
-            if (data && data.files) {
-                const f = data.files.find(file => file.uri === msg.uri);
-                if (f) delete f._widestLineWidth;
-            }
+            const f = fileByUri.get(msg.uri);
+            if (f) delete f._widestLineWidth;
         }
         if (lastMousePos && isCtrlDown) {
             updateHoverTooltip();
@@ -1414,7 +1441,9 @@ const TILE_LABEL_WIDTH_MARGIN = 36; // reserved space so the label doesn't run u
 const TILE_LABEL_COLOR = {
     searchMatch: ACCENT_SEARCH,
     active: getThemeColor("--vscode-foreground", "#ffffff"),
-    normal: getThemeColor("--vscode-descriptionForeground", "#a0a0a5")
+    normal: getThemeColor("--vscode-descriptionForeground", "#a0a0a5"),
+    modified: getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", "#e2c08d"),
+    added: getThemeColor("--vscode-gitDecoration-untrackedResourceForeground", "#73c991")
 };
 const TILE_THUMBNAIL_OFFSET_X = 10;
 const TILE_THUMBNAIL_OFFSET_Y = 24;
@@ -1479,26 +1508,26 @@ function drawFileTile(file, x, y, w, h, dimForFocus) {
 
     drawTileBorder(x, y, w, h, isSearchMatch, isActive, isOpen);
 
-    ctx.fillStyle = isSearchMatch ? TILE_LABEL_COLOR.searchMatch : (isActive ? TILE_LABEL_COLOR.active : TILE_LABEL_COLOR.normal);
+    let labelColor = TILE_LABEL_COLOR.normal;
+    if (isSearchMatch) {
+        labelColor = TILE_LABEL_COLOR.searchMatch;
+    } else if (file.gitStatus === "modified") {
+        labelColor = TILE_LABEL_COLOR.modified;
+    } else if (file.gitStatus === "added" || file.gitStatus === "untracked") {
+        labelColor = TILE_LABEL_COLOR.added;
+    } else if (isActive) {
+        labelColor = TILE_LABEL_COLOR.active;
+    }
+
+    ctx.fillStyle = labelColor;
     ctx.font = TILE_LABEL_FONT;
 
+    const maxLabelWidth = isOpen ? (w - TILE_LABEL_WIDTH_MARGIN) : (w - 16);
     if (file._lastCellW !== w || !file._fittedLabel) {
         file._lastCellW = w;
-        file._fittedLabel = fitPathText(file.path, w - TILE_LABEL_WIDTH_MARGIN);
+        file._fittedLabel = fitPathText(file.path, maxLabelWidth);
     }
     ctx.fillText(file._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
-
-    if (file.gitStatus) {
-        ctx.font = "bold 9px system-ui, sans-serif";
-        const badgeX = x + w - (isOpen ? TILE_LABEL_WIDTH_MARGIN : 22);
-        if (file.gitStatus === "modified") {
-            ctx.fillStyle = GIT_STYLES.badgeModified;
-            ctx.fillText("M", badgeX, y + TILE_LABEL_OFFSET_Y);
-        } else if (file.gitStatus === "added" || file.gitStatus === "untracked") {
-            ctx.fillStyle = GIT_STYLES.badgeAdded;
-            ctx.fillText(file.gitStatus === "untracked" ? "U" : "A", badgeX, y + TILE_LABEL_OFFSET_Y);
-        }
-    }
 
     if (isOpen) {
         drawCloseBtn(file, x, y, w);
@@ -1751,13 +1780,12 @@ function render() {
         }
     } else {
         // Normal file tile mode — cells are large enough to render individual thumbnails
-        const slots = filteredFiles.map(f => f.slot);
         const cellW = rootCellW;
         const cellH = rootCellH;
 
         for (let i = 0; i < filteredFiles.length; i++) {
             const file = filteredFiles[i];
-            const slot = slots[i];
+            const slot = file.slot;
             if (!slot) continue;
 
             const col = slot[0];
@@ -1825,26 +1853,14 @@ canvas.addEventListener("auxclick", event => {
     }
 
     const { px, py } = getCanvasPos(event);
-
-    const filteredFiles = getFilteredFiles();
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
-
-        if (
-            px >= c.x &&
-            px <= c.x + c.w &&
-            py >= c.y &&
-            py <= c.y + c.h
-        ) {
-            const isOpen = openFiles.includes(file.uri);
-            if (isOpen) {
-                vscode.postMessage({
-                    command: "close",
-                    uri: file.uri
-                });
-            }
-            return;
+    const targetFile = findFileAt(px, py);
+    if (targetFile) {
+        const isOpen = openFiles.includes(targetFile.uri);
+        if (isOpen) {
+            vscode.postMessage({
+                command: "close",
+                uri: targetFile.uri
+            });
         }
     }
 });
@@ -2144,16 +2160,11 @@ canvas.addEventListener("mousedown", event => {
     }
 
     // is mousedown on a file
-    const filteredFiles = getFilteredFiles();
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
-
-        if (pointInRect(c, cursorPos.px, cursorPos.py)) {
-                candidateFile = { file, startX: cursorPos.px, startY: cursorPos.py };
-                dragGrabOffset = { x: cursorPos.px - c.x, y: cursorPos.py - c.y };
-                return;
-            }
+    const hitFile = findFileAt(cursorPos.px, cursorPos.py);
+    if (hitFile && hitFile._cell) {
+        candidateFile = { file: hitFile, startX: cursorPos.px, startY: cursorPos.py };
+        dragGrabOffset = { x: cursorPos.px - hitFile._cell.x, y: cursorPos.py - hitFile._cell.y };
+        return;
     }
 });
 
@@ -2258,86 +2269,81 @@ canvas.addEventListener("mouseup", event => {
     if (!activeCandidateFile) {
         return;
     }
-    const filteredFiles = getFilteredFiles();
-    for (const file of filteredFiles) {
-        const c = file._cell;
-        if (!c) continue;
 
-        if (pointInRect(c, cursorPos.px, cursorPos.py) && file === activeCandidateFile.file) {
-            // Check if click was on close '×' button
-            const cb = file._closeBtn;
-            if (cb && pointInRect(cb, cursorPos.px, cursorPos.py, CLOSE_BUTTON_PADDING)) {
-                openFiles = openFiles.filter(u => u !== file.uri);
-                render();
-                vscode.postMessage({
-                    command: "close",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            const headerHeight = 24;
-            const isHeaderClick = cursorPos.py < c.y + headerHeight;
-
-            if (isHeaderClick) {
-                // Clicked the file path/folder header bar -> isolate parent folder (or root files if in root folder)
-                const lastSlash = file.path.lastIndexOf('/');
-                if (lastSlash !== -1) {
-                    const folder = file.path.substring(0, lastSlash + 1);
-                    focusedFolder = folder;
-                } else {
-                    focusedFolder = "(root files)/";
-                }
-                updateBreadcrumbs();
-                render();
-                return;
-            }
-
-            // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
-            if (c._viewBand && cursorPos.py >= c._viewBand.y && cursorPos.py <= c._viewBand.y + c._viewBand.h) {
-                vscode.postMessage({
-                    command: "switchTab",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            // Clicked inside media card body -> switch/open tab without line jump
-            if (file.isImage || file.isPdf) {
-                vscode.postMessage({
-                    command: "switchTab",
-                    uri: file.uri
-                });
-                return;
-            }
-
-            // Clicked inside the thumbnail body -> jump to line in document
-            const thumbnailTop = c.y + headerHeight;
-            const thumbnailHeight = Math.max(1, c.h - 34);
-
-            const relativeY = Math.max(
-                0,
-                Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight)
-            );
-
-            const line = Math.floor(relativeY * file.lineCount);
-
-            // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
-            // above so extension.ts's "jump" handler can flash the same lines this webview
-            // considers matches — see its handler for the mirrored pattern-building logic.
+    const file = activeCandidateFile.file;
+    const c = file?._cell;
+    if (file && c && pointInRect(c, cursorPos.px, cursorPos.py)) {
+        // Check if click was on close '×' button
+        const cb = file._closeBtn;
+        if (cb && pointInRect(cb, cursorPos.px, cursorPos.py, CLOSE_BUTTON_PADDING)) {
+            openFiles = openFiles.filter(u => u !== file.uri);
+            render();
             vscode.postMessage({
-                command: "jump",
-                uri: file.uri,
-                line,
-                query: rawSearchQuery,
-                matchCase,
-                matchWholeWord,
-                useRegex,
-                searchInvalid
+                command: "close",
+                uri: file.uri
             });
-
             return;
         }
+
+        const headerHeight = 24;
+        const isHeaderClick = cursorPos.py < c.y + headerHeight;
+
+        if (isHeaderClick) {
+            // Clicked the file path/folder header bar -> isolate parent folder (or root files if in root folder)
+            const lastSlash = file.path.lastIndexOf('/');
+            if (lastSlash !== -1) {
+                const folder = file.path.substring(0, lastSlash + 1);
+                focusedFolder = folder;
+            } else {
+                focusedFolder = "(root files)/";
+            }
+            updateBreadcrumbs();
+            render();
+            return;
+        }
+
+        // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
+        if (c._viewBand && cursorPos.py >= c._viewBand.y && cursorPos.py <= c._viewBand.y + c._viewBand.h) {
+            vscode.postMessage({
+                command: "switchTab",
+                uri: file.uri
+            });
+            return;
+        }
+
+        // Clicked inside media card body -> switch/open tab without line jump
+        if (file.isImage || file.isPdf) {
+            vscode.postMessage({
+                command: "switchTab",
+                uri: file.uri
+            });
+            return;
+        }
+
+        // Clicked inside the thumbnail body -> jump to line in document
+        const thumbnailTop = c.y + headerHeight;
+        const thumbnailHeight = Math.max(1, c.h - 34);
+
+        const relativeY = Math.max(
+            0,
+            Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight)
+        );
+
+        const line = Math.floor(relativeY * file.lineCount);
+
+        // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
+        // above so extension.ts's "jump" handler can flash the same lines this webview
+        // considers matches — see its handler for the mirrored pattern-building logic.
+        vscode.postMessage({
+            command: "jump",
+            uri: file.uri,
+            line,
+            query: rawSearchQuery,
+            matchCase,
+            matchWholeWord,
+            useRegex,
+            searchInvalid
+        });
     }
 });
 

@@ -28,14 +28,25 @@ export function reorderSpanningGrid(
     const currentLayout = buildSpanningGrid(activeFiles, order, savedAllocations, savedRows);
     const sourceCells = savedAllocations[msg.sourceId] || 1;
 
-    const sourcePlacement = currentLayout.placements.find(p => p.file.id === msg.sourceId);
+    const placementByFileId = new Map<string, (typeof currentLayout.placements)[0]>();
+    const placementBySlot = new Map<string, (typeof currentLayout.placements)[0]>();
+
+    for (const p of currentLayout.placements) {
+        placementByFileId.set(p.file.id, p);
+        for (const s of p.slots) {
+            placementBySlot.set(`${s[0]},${s[1]}`, p);
+        }
+    }
+
+    const sourcePlacement = placementByFileId.get(msg.sourceId);
     const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
     const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
 
     // Check if dropping onto any file's sub-cell
-    const targetPlacement = currentLayout.placements.find(p =>
-        p.slots.some(s => s[0] === msg.targetCol && s[1] === msg.targetRow) && p.file.id !== msg.sourceId
-    );
+    let targetPlacement = placementBySlot.get(`${msg.targetCol},${msg.targetRow}`);
+    if (targetPlacement && targetPlacement.file.id === msg.sourceId) {
+        targetPlacement = undefined;
+    }
 
     // If dropping directly onto an existing file, align to its top anchor
     const targetCol = targetPlacement ? targetPlacement.col : msg.targetCol;
@@ -126,7 +137,14 @@ export function reorderSpanningGrid(
         // Cross-column swap / displacement
         const maxTargetSpan = targetFileIds.reduce((sum, tid) => sum + (savedAllocations[tid] || 1), 0);
         const totalSpan = Math.max(sourceCells, maxTargetSpan);
-        const effectiveSourceRow = (targetRow === 0 && sourceRow < totalSpan) ? 0 : Math.min(sourceRow, targetRow);
+
+        let effectiveSourceRow = sourceRow;
+        if (sourceCells < maxTargetSpan) {
+            effectiveSourceRow = Math.max(0, Math.min(sourceRow, gridRows - totalSpan));
+            if (targetRow === 0 && sourceRow < totalSpan) {
+                effectiveSourceRow = 0;
+            }
+        }
 
         const sourceRaw = grid[sourceCol].slice(effectiveSourceRow, effectiveSourceRow + totalSpan).filter(id => Boolean(id) && !targetFileIds.includes(id));
         const sourceFileIds = Array.from(new Set(sourceRaw));
@@ -147,7 +165,7 @@ export function reorderSpanningGrid(
         // Place sourceFileIds in targetCol
         let curTargetR = targetRow;
         for (const sid of sourceFileIds) {
-            const sidPlacement = currentLayout.placements.find(p => p.file.id === sid);
+            const sidPlacement = placementByFileId.get(sid);
             const offset = sidPlacement ? Math.max(0, sidPlacement.row - effectiveSourceRow) : (curTargetR - targetRow);
             const destR = (sourceFileIds.length === 1 && sourceCells === 1) ? targetRow : (targetRow + offset);
             const sc = savedAllocations[sid] || 1;
@@ -162,10 +180,10 @@ export function reorderSpanningGrid(
         // Place targetFileIds in sourceCol
         let curSourceR = effectiveSourceRow;
         for (const tid of targetFileIds) {
-            const tidPlacement = currentLayout.placements.find(p => p.file.id === tid);
+            const tidPlacement = placementByFileId.get(tid);
             const offset = tidPlacement ? Math.max(0, tidPlacement.row - targetRow) : (curSourceR - effectiveSourceRow);
             const destR = (targetFileIds.length === 1 && maxTargetSpan === 1 && targetPlacement && targetPlacement.row === targetRow)
-                ? effectiveSourceRow
+                ? (sourceCells === 1 ? sourceRow : effectiveSourceRow)
                 : (effectiveSourceRow + offset);
             const tc = savedAllocations[tid] || 1;
             for (let i = 0; i < tc; i++) {
@@ -195,7 +213,7 @@ export function reorderSpanningGrid(
     while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
         newOrder.pop();
     }
-    return newOrder;
+    return Object.assign(newOrder, { newRows: gridRows });
 }
 
 const runSuite = typeof suite !== "undefined" ? suite : ((name: string, fn: () => void) => { console.log(`\n=== ${name} ===`); fn(); });
@@ -216,7 +234,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Tall2: 2 };
         const msg = { sourceId: "Tall2", targetId: "Tall2", targetIsEmpty: false, targetCol: 0, targetRow: 1 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 3, msg);
-        assert.deepStrictEqual(newOrder, ["", "Tall2"]);
+        assert.deepStrictEqual([...newOrder], ["", "Tall2"]);
     });
 
     runTest("Swapping top 1-tall and bottom 2-tall file in the same column", () => {
@@ -225,7 +243,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Top1: 1, Bottom2: 2, Other: 1 };
         const msg = { sourceId: "Top1", targetId: "Bottom2", targetIsEmpty: false, targetCol: 0, targetRow: 1 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 3, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 3);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const top = layout.placements.find(p => p.file.id === "Top1");
         const bottom = layout.placements.find(p => p.file.id === "Bottom2");
         assert.strictEqual(bottom?.row, 0);
@@ -238,7 +256,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Top1: 1, Bottom2: 2, Other: 1 };
         const msg = { sourceId: "Bottom2", targetId: "Top1", targetIsEmpty: false, targetCol: 0, targetRow: 0 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 3, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 3);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const top = layout.placements.find(p => p.file.id === "Top1");
         const bottom = layout.placements.find(p => p.file.id === "Bottom2");
         assert.strictEqual(bottom?.row, 0);
@@ -251,7 +269,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Top1: 1, Tall2: 2, Other: 1 };
         const msg = { sourceId: "Top1", targetId: "Tall2", targetIsEmpty: false, targetCol: 1, targetRow: 1 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 2);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const top = layout.placements.find(p => p.file.id === "Top1");
         const tall = layout.placements.find(p => p.file.id === "Tall2");
         assert.strictEqual(top?.col, 1);
@@ -266,7 +284,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Tall2: 2, Top1: 1, Other: 1 };
         const msg = { sourceId: "Tall2", targetId: "Top1", targetIsEmpty: false, targetCol: 1, targetRow: 0 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 2);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const top = layout.placements.find(p => p.file.id === "Top1");
         const tall = layout.placements.find(p => p.file.id === "Tall2");
         assert.strictEqual(top?.col, 0);
@@ -281,7 +299,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Tall2: 2, FileB: 1 };
         const msg = { sourceId: "Tall2", targetId: null, targetIsEmpty: true, targetCol: 1, targetRow: 0 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 2);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const tall = layout.placements.find(p => p.file.id === "Tall2");
         const fileB = layout.placements.find(p => p.file.id === "FileB");
         assert.strictEqual(tall?.col, 1);
@@ -296,7 +314,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Top1: 1, Bottom1: 1, Tall2: 2, C: 1 };
         const msg = { sourceId: "Top1", targetId: "Tall2", targetIsEmpty: false, targetCol: 1, targetRow: 0 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 2);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const tall = layout.placements.find(p => p.file.id === "Tall2");
         const top = layout.placements.find(p => p.file.id === "Top1");
         const bot = layout.placements.find(p => p.file.id === "Bottom1");
@@ -317,7 +335,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Top1: 1, Bottom1: 1, Tall2: 2, C: 1 };
         const msg = { sourceId: "Bottom1", targetId: "Tall2", targetIsEmpty: false, targetCol: 1, targetRow: 0 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 2);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const tall = layout.placements.find(p => p.file.id === "Tall2");
         const top = layout.placements.find(p => p.file.id === "Top1");
         const bot = layout.placements.find(p => p.file.id === "Bottom1");
@@ -335,7 +353,7 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Tall3: 3, F1: 1, F2: 1, F3: 1, End: 1 };
         const msg = { sourceId: "F1", targetId: "Tall3", targetIsEmpty: false, targetCol: 0, targetRow: 0 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 3, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 3);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const tall = layout.placements.find(p => p.file.id === "Tall3");
         const f1 = layout.placements.find(p => p.file.id === "F1");
         const f2 = layout.placements.find(p => p.file.id === "F2");
@@ -354,12 +372,54 @@ runSuite("Spanning Grid Drag and Drop Reordering", () => {
         const allocs = { Top1: 1, Bottom1: 1 };
         const msg = { sourceId: "Top1", targetId: null, targetIsEmpty: true, targetCol: 1, targetRow: 0 };
         const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
-        const layout = buildSpanningGrid(files, newOrder, allocs, 2);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
         const top = layout.placements.find(p => p.file.id === "Top1");
         const bot = layout.placements.find(p => p.file.id === "Bottom1");
         assert.strictEqual(top?.col, 1);
         assert.strictEqual(top?.row, 0);
         assert.strictEqual(bot?.col, 0);
         assert.strictEqual(bot?.row, 1);
+    });
+
+    runTest("Dragging 1-tall file to bottom row places it at bottom row without wrapping to adjacent column", () => {
+        const files = [mockFile("A", 50), mockFile("B", 50), mockFile("C", 50), mockFile("D", 50)];
+        const order = ["A", "B", "C", "D"];
+        const allocs = { A: 1, B: 1, C: 1, D: 1 };
+        const msg = { sourceId: "A", targetId: null, targetIsEmpty: true, targetCol: 0, targetRow: 2 };
+        const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
+        const a = layout.placements.find(p => p.file.id === "A");
+        const b = layout.placements.find(p => p.file.id === "B");
+        const c = layout.placements.find(p => p.file.id === "C");
+        const d = layout.placements.find(p => p.file.id === "D");
+        assert.strictEqual(b?.col, 0);
+        assert.strictEqual(b?.row, 1);
+        assert.strictEqual(a?.col, 0);
+        assert.strictEqual(a?.row, 2);
+        assert.strictEqual(c?.col, 1);
+        assert.strictEqual(c?.row, 0);
+        assert.strictEqual(d?.col, 1);
+        assert.strictEqual(d?.row, 1);
+    });
+
+    runTest("Swapping two 1-tall files at different rows across columns swaps exact positions without moving other tiles", () => {
+        const files = [mockFile("TopA", 50), mockFile("Source", 50), mockFile("Target", 50), mockFile("BottomB", 50)];
+        const order = ["TopA", "Source", "Target", "BottomB"];
+        const allocs = { TopA: 1, Source: 1, Target: 1, BottomB: 1 };
+        const msg = { sourceId: "Source", targetId: "Target", targetIsEmpty: false, targetCol: 1, targetRow: 0 };
+        const newOrder = reorderSpanningGrid(files, order, allocs, 2, msg);
+        const layout = buildSpanningGrid(files, newOrder, allocs, (newOrder as any).newRows);
+        const topA = layout.placements.find(p => p.file.id === "TopA");
+        const source = layout.placements.find(p => p.file.id === "Source");
+        const target = layout.placements.find(p => p.file.id === "Target");
+        const bottomB = layout.placements.find(p => p.file.id === "BottomB");
+        assert.strictEqual(topA?.col, 0);
+        assert.strictEqual(topA?.row, 0);
+        assert.strictEqual(target?.col, 0);
+        assert.strictEqual(target?.row, 1);
+        assert.strictEqual(source?.col, 1);
+        assert.strictEqual(source?.row, 0);
+        assert.strictEqual(bottomB?.col, 1);
+        assert.strictEqual(bottomB?.row, 1);
     });
 });
