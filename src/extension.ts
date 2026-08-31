@@ -363,6 +363,36 @@ export async function activate(context: vscode.ExtensionContext) {
         };
     };
 
+    const getWorkspaceDiagnostics = (): Map<string, { hasError: boolean; errorCount: number; errorLines: { [line0: number]: string } }> => {
+        const map = new Map<string, { hasError: boolean; errorCount: number; errorLines: { [line0: number]: string } }>();
+        const allDiags = vscode.languages.getDiagnostics();
+        for (const [uri, diags] of allDiags) {
+            if (uri.scheme !== "file") {
+                continue;
+            }
+            const errorDiags = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error);
+            if (errorDiags.length > 0) {
+                const errorLines: { [line0: number]: string } = {};
+                for (const d of errorDiags) {
+                    const startLine = d.range.start.line;
+                    const endLine = d.range.end.line;
+                    for (let l = startLine; l <= endLine; l++) {
+                        errorLines[l] = d.message;
+                    }
+                }
+                const normalizedPath = uri.fsPath.replace(/\\/g, "/");
+                const entry = {
+                    hasError: true,
+                    errorCount: errorDiags.length,
+                    errorLines
+                };
+                map.set(normalizedPath, entry);
+                map.set(uri.toString(), entry);
+            }
+        }
+        return map;
+    };
+
     const updateLayoutFromCache = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
         if (!cachedScannedFiles) {
             await refreshThumbview(panel);
@@ -391,9 +421,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 fetchWorkspaceGitDiff().catch(() => {});
             }
 
+            const workspaceDiagnostics = getWorkspaceDiagnostics();
             const filesWithWebviewUris = activeFiles.map(file => {
                 const normalizedId = file.id.replace(/\\/g, "/");
                 const gitInfo = gitDiff.get(normalizedId);
+                const diagInfo = workspaceDiagnostics.get(normalizedId) || workspaceDiagnostics.get(file.uri);
                 let mediaUri = file.mediaUri;
                 if ((file.isImage || file.isPdf) && file.mediaUri) {
                     try {
@@ -404,7 +436,10 @@ export async function activate(context: vscode.ExtensionContext) {
                     ...file,
                     mediaUri,
                     gitStatus: gitInfo?.status,
-                    gitChanges: gitInfo?.lines
+                    gitChanges: gitInfo?.lines,
+                    hasError: diagInfo?.hasError ?? false,
+                    errorCount: diagInfo?.errorCount ?? 0,
+                    errorLines: diagInfo?.errorLines ?? {}
                 };
             });
 
@@ -1776,6 +1811,19 @@ export async function activate(context: vscode.ExtensionContext) {
         triggerUpdate();
     });
     context.subscriptions.push(docSaveDisposable);
+
+    let diagDebounceTimer: NodeJS.Timeout | undefined;
+    const diagDisposable = vscode.languages.onDidChangeDiagnostics(() => {
+        if (diagDebounceTimer) {
+            clearTimeout(diagDebounceTimer);
+        }
+        diagDebounceTimer = setTimeout(() => {
+            if (activePanel) {
+                updateLayoutFromCache(activePanel);
+            }
+        }, 100);
+    });
+    context.subscriptions.push(diagDisposable);
 
     context.subscriptions.push(watcher);
 }

@@ -5,6 +5,15 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-08-31
+
+### Added
+- **Diagnostic Error Title and Overview Highlighting**: File titles turn red (`--vscode-list-errorForeground`) when syntax or type errors exist in the file, matching VS Code's file explorer behavior. Offending lines render red background and gutter highlights on the overview thumbnail tile, with diagnostic messages and error badges in the Left CTRL inspect tooltip.
+- **Git Deletion Gutter Carets & Diff Indicators**: Rendered Git deletions as red gutter triangle carets (`▶`) on minimap tiles instead of full-width stripes, reserving full-width row fills for active lines. In the Ctrl-magnifier inspect tooltip, deleted lines feature strikethrough text with `-` diff prefixes, while errors display `✕` indicators and diagnostic messages.
+
+### Changed
+- **Recency Viewport Band Transparency**: Adjusted the gray editor viewport range overlay (`viewportBandOverlay`) opacity from `0.22` to `0.08` so blue modified highlights and green added highlights remain clear and distinct.
+
 ## [0.4.4] - 2026-08-29
 
 ### Changed

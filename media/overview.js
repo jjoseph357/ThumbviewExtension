@@ -1103,9 +1103,15 @@ const GIT_STYLES = {
     modifiedGutter: "rgba(59, 130, 246, 0.75)",
     addedBg: "rgba(34, 197, 94, 0.14)",
     addedGutter: "rgba(34, 197, 94, 0.75)",
-    deletedLine: "rgba(239, 68, 68, 0.65)",
+    deletedLine: "rgba(239, 68, 68, 0.85)",
     badgeModified: "#3b82f6",
     badgeAdded: "#22c55e",
+};
+
+const ERROR_STYLES = {
+    errorBg: "rgba(239, 68, 68, 0.22)",
+    errorGutter: "rgba(239, 68, 68, 0.85)",
+    badgeError: "#ef4444",
 };
 
 const THEME_COLORS = {
@@ -1117,7 +1123,7 @@ const THEME_COLORS = {
     pdfPlaceholderLine: getThemeColor("--vscode-widget-border", "rgba(255, 255, 255, 0.25)"),
     searchMatchHighlight: withAlpha(ACCENT_SEARCH, 0.28),
     activeFocusHighlight: getThemeColor("--vscode-focusBorder", "#007fd4"),
-    viewportBandOverlay: "rgba(255, 255, 255, 0.22)",
+    viewportBandOverlay: "rgba(255, 255, 255, 0.08)",
 };
 
 const PDF_PREVIEW = {
@@ -1281,6 +1287,23 @@ function drawThumbnail(file, x, y, w, h) {
             }
         }
 
+        let isErrorLine = false;
+        if (file.errorLines) {
+            if (file.lineCount && file.lineCount > lines.length) {
+                const step = file.lineCount / lines.length;
+                const startLineIdx = Math.floor(i * step);
+                const endLineIdx = Math.max(startLineIdx + 1, Math.min(Math.floor((i + 1) * step), file.lineCount));
+                for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
+                    if (file.errorLines[fullI]) {
+                        isErrorLine = true;
+                        break;
+                    }
+                }
+            } else {
+                isErrorLine = !!file.errorLines[i];
+            }
+        }
+
         const gitType = (file.gitStatus === "untracked" || file.gitStatus === "added")
             ? "added"
             : (file.gitChanges ? file.gitChanges[i] : undefined);
@@ -1300,6 +1323,11 @@ function drawThumbnail(file, x, y, w, h) {
                 THUMBNAIL_GIT_GUTTER_WIDTH,
                 Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
             );
+        } else if (isErrorLine) {
+            ctx.fillStyle = ERROR_STYLES.errorBg;
+            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            ctx.fillStyle = ERROR_STYLES.errorGutter;
+            ctx.fillRect(x, y + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
         } else if (gitType === "modified") {
             ctx.fillStyle = GIT_STYLES.modifiedBg;
             ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
@@ -1312,7 +1340,15 @@ function drawThumbnail(file, x, y, w, h) {
             ctx.fillRect(x, y + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
         } else if (gitType === "removed") {
             ctx.fillStyle = GIT_STYLES.deletedLine;
-            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_DELETED_HEIGHT));
+            const triY = y + i * stepY;
+            const triH = Math.max(stepY, 3);
+            const triW = THUMBNAIL_GIT_GUTTER_WIDTH + 1.5;
+            ctx.beginPath();
+            ctx.moveTo(x, triY);
+            ctx.lineTo(x + triW, triY + triH / 2);
+            ctx.lineTo(x, triY + triH);
+            ctx.closePath();
+            ctx.fill();
         }
 
         if (!line || !lineText) {
@@ -1440,6 +1476,7 @@ const TILE_LABEL_OFFSET_Y = 18;
 const TILE_LABEL_WIDTH_MARGIN = 36; // reserved space so the label doesn't run under the close button
 const TILE_LABEL_COLOR = {
     searchMatch: ACCENT_SEARCH,
+    error: getThemeColor("--vscode-list-errorForeground", "#f14c4c"),
     active: getThemeColor("--vscode-foreground", "#ffffff"),
     normal: getThemeColor("--vscode-descriptionForeground", "#a0a0a5"),
     modified: getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", "#e2c08d"),
@@ -1511,6 +1548,8 @@ function drawFileTile(file, x, y, w, h, dimForFocus) {
     let labelColor = TILE_LABEL_COLOR.normal;
     if (isSearchMatch) {
         labelColor = TILE_LABEL_COLOR.searchMatch;
+    } else if (file.hasError) {
+        labelColor = TILE_LABEL_COLOR.error;
     } else if (file.gitStatus === "modified") {
         labelColor = TILE_LABEL_COLOR.modified;
     } else if (file.gitStatus === "added" || file.gitStatus === "untracked") {
@@ -2066,37 +2105,62 @@ function updateHoverTooltip() {
         const isMatchLine = rawSearchQuery && !searchInvalid &&
             textMatches(lineText, line && line._lowerText !== undefined ? line._lowerText : lineText.toLowerCase());
 
+        const isErrorLine = hoveredFile.errorLines ? !!hoveredFile.errorLines[i] : false;
+
         const gitType = (hoveredFile.gitStatus === "untracked" || hoveredFile.gitStatus === "added")
             ? "added"
             : (hoveredFile.gitChanges ? hoveredFile.gitChanges[i] : undefined);
 
         let bgStyle = "display: block; box-sizing: border-box; width: 100%; min-height: 1.4em;";
         let prefix = "  ";
+        let renderedLineHtml = lineHtml;
+        let suffix = "";
+
+        if (isErrorLine) {
+            const errorMsg = hoveredFile.errorLines && typeof hoveredFile.errorLines[i] === "string" ? hoveredFile.errorLines[i] : "";
+            suffix = errorMsg
+                ? ` <span style="color: #fca5a5; font-size: 10px; margin-left: 8px; font-style: italic;">[${escapeHtml(errorMsg)}]</span>`
+                : ` <span style="color: #fca5a5; font-size: 10px; margin-left: 6px; font-weight: bold;">[Error]</span>`;
+        } else if (gitType === "removed") {
+            renderedLineHtml = `<span style="text-decoration: line-through; opacity: 0.75;">${lineHtml}</span>`;
+        }
 
         if (isHoveredLine) {
             prefix = `<span style="color: ${ACCENT_INSPECT}; font-weight: bold;">&gt; </span>`;
             if (isMatchLine) {
                 bgStyle = `background: ${withAlpha(ACCENT_SEARCH, 0.28)}; display: block; box-sizing: border-box; width: 100%; border-left: 3px solid ${ACCENT_SEARCH}; padding-left: 2px; min-height: 1.4em;`;
+            } else if (isErrorLine) {
+                prefix = `<span style="color: #ef4444; font-weight: bold;">✕ </span>`;
+                bgStyle = "background: rgba(239, 68, 68, 0.28); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ef4444; padding-left: 2px; min-height: 1.4em;";
             } else if (gitType === "modified") {
+                prefix = `<span style="color: #3b82f6; font-weight: bold;">~ </span>`;
                 bgStyle = "background: rgba(59, 130, 246, 0.22); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #3b82f6; padding-left: 2px; min-height: 1.4em;";
             } else if (gitType === "added") {
+                prefix = `<span style="color: #22c55e; font-weight: bold;">+ </span>`;
                 bgStyle = "background: rgba(34, 197, 94, 0.22); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #22c55e; padding-left: 2px; min-height: 1.4em;";
             } else if (gitType === "removed") {
-                bgStyle = "background: rgba(239, 68, 68, 0.25); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ef4444; padding-left: 2px; min-height: 1.4em;";
+                prefix = `<span style="color: #ef4444; font-weight: bold;">- </span>`;
+                bgStyle = "background: rgba(239, 68, 68, 0.22); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid #ef4444; padding-left: 2px; min-height: 1.4em;";
             } else {
                 bgStyle = `background: ${withAlpha(ACCENT_INSPECT, 0.18)}; display: block; box-sizing: border-box; width: 100%; border-left: 3px solid ${ACCENT_INSPECT}; padding-left: 2px; min-height: 1.4em;`;
             }
         } else if (isMatchLine) {
             bgStyle = `background: ${withAlpha(ACCENT_SEARCH, 0.2)}; display: block; box-sizing: border-box; width: 100%; border-left: 3px solid ${ACCENT_SEARCH}; padding-left: 2px; min-height: 1.4em;`;
+        } else if (isErrorLine) {
+            prefix = `<span style="color: #ef4444; font-weight: bold; opacity: 0.85;">✕ </span>`;
+            bgStyle = "background: rgba(239, 68, 68, 0.20); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(239, 68, 68, 0.85); padding-left: 2px; min-height: 1.4em;";
         } else if (gitType === "modified") {
+            prefix = `<span style="color: #3b82f6; opacity: 0.85;">~ </span>`;
             bgStyle = "background: rgba(59, 130, 246, 0.14); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(59, 130, 246, 0.85); padding-left: 2px; min-height: 1.4em;";
         } else if (gitType === "added") {
+            prefix = `<span style="color: #22c55e; opacity: 0.85;">+ </span>`;
             bgStyle = "background: rgba(34, 197, 94, 0.14); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(34, 197, 94, 0.85); padding-left: 2px; min-height: 1.4em;";
         } else if (gitType === "removed") {
-            bgStyle = "background: rgba(239, 68, 68, 0.18); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(239, 68, 68, 0.85); padding-left: 2px; min-height: 1.4em;";
+            prefix = `<span style="color: #ef4444; opacity: 0.85;">- </span>`;
+            bgStyle = "background: rgba(239, 68, 68, 0.12); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(239, 68, 68, 0.65); padding-left: 2px; min-height: 1.4em;";
         }
 
-        tooltipHtml += `<div style="${bgStyle}">${prefix}${lineHtml}</div>`;
+        tooltipHtml += `<div style="${bgStyle}">${prefix}${renderedLineHtml}${suffix}</div>`;
     }
 
     tooltip.innerHTML = tooltipHtml;

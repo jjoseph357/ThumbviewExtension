@@ -24,6 +24,9 @@ export interface RepoFile {
     mediaUri?: string;
     gitChanges?: { [lineIndex0: number]: "added" | "modified" | "removed" };
     gitStatus?: "modified" | "added" | "untracked" | "deleted";
+    hasError?: boolean;
+    errorCount?: number;
+    errorLines?: { [lineIndex0: number]: string | boolean };
 }
 
 // Coarse per-line category guess from leading/contained keywords, not a real parser.

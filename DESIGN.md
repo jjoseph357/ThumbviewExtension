@@ -156,6 +156,13 @@ Thumbview's UI chrome (webview HTML/CSS, canvas tile chrome, and editor jump-fla
 
 The constants are defined once in `src/colors.ts` and injected into the webview `<style>` as `:root { --tv-accent-* }` custom properties, where `media/overview.js` accesses them via `getThemeColor()`.
 
+## Diagnostic Error Highlighting & Title Color Hierarchy
+
+Thumbview listens to VS Code language diagnostics (`vscode.languages.onDidChangeDiagnostics`) to detect syntax and compilation errors across the workspace in real time:
+1. **File Title Color Precedence**: Card titles resolve in priority order: Search Match (`#dc267f`) > Error (`--vscode-list-errorForeground` / `#f14c4c`) > Git Modified (`--vscode-gitDecoration-modifiedResourceForeground`) > Git Added/Untracked (`--vscode-gitDecoration-untrackedResourceForeground`) > Active Editor (`--vscode-foreground`) > Default (`--vscode-descriptionForeground`). Files containing any Error-level diagnostic immediately display red titles to draw immediate attention.
+2. **Minimap Overview Line Highlighting & Git Deletion Carets**: Lines with active errors render a full-width red background (`rgba(239, 68, 68, 0.22)`) and red gutter indicator (`rgba(239, 68, 68, 0.85)`). Git deletions render as red gutter triangle carets (`▶`) on the left margin rather than full-width stripes, keeping full-width row fills reserved for active lines. When inspecting code with Left CTRL hold, offending lines display `✕` error icons and diagnostic messages, while deleted lines display `-` prefixes and strikethrough text.
+3. **Viewport Band Transparency**: The gray viewport band overlay representing the open editor range (`viewportBandOverlay`) uses subtle `rgba(255, 255, 255, 0.08)` transparency so Git modified blue highlights and added green highlights remain visible underneath without color pollution.
+
 ## Drag-and-Drop Grid-Slot Targeting & Empty Space Preservation
 
 Drag-and-drop reordering resolves cursor positions to specific grid slots rather than nearest occupied tiles:
