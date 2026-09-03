@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Empty Space Drag and Drop with Collapsed Folders**: Enabled dropping file tiles and folder cards onto empty slots both in the overview subfolder cards mode and within folder drill-down views, preserving gaps and relative positions without unintended reflows.
 - **Strict Grid Space Bounds on Drag**: Dragging files to empty spaces now strictly stays within existing grid capacity without increasing rows or columns. Right click > Expand Grid Space is enforced as the sole mechanism for expanding grid space.
+- **Expand / Reduce Grid Buttons in Collapsed Folders**: Extended subfolder card slot generation to cover full expanded grid dimensions (`cardCols * cardRows`), fixing non-functional expand/reduce space buttons when collapsed folders are present.
+- **Folder Drag and Drop Animation**: Aligned folder card dragging visual feedback with source file cards by computing cursor grab offsets to avoid snapping and applying `BORDER_STYLES.dragging` styling.
+- **Folder Mini-Mosaic Internal Arrangement**: Enhanced collapsed folder card previews to mirror the exact internal file layout, manual position overrides, and empty gaps (`""`).
+- **File Navigator Expandable Trees & Optimistic Ignore**: Added disclosure arrows to inspect and ignore individual files from the webview navigator popover, with immediate optimistic UI updates across both navigation and ignored pattern columns.
+- **Ignored Patterns File Counts**: Displayed matching workspace file count badges and tooltips in both the sidebar TreeView and the webview ignored patterns list.
+- **Mouse Side Button Breadcrumb Navigation**: Mapped mouse buttons 3 and 4 to step backward and forward through folder drill-down history.
 - **Top Toolbar & Ignore Filter Consistency**: Added SVGs for toolbar actions and excluded compiler and test cache directories from automatic dense folder scanning.
 
 ## [0.4.5] - 2026-08-31
