@@ -182,7 +182,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js"
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

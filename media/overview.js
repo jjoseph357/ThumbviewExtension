@@ -832,7 +832,7 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     }
 
     const reqCols = currCol + 1;
-    const finalRows = Math.max(1, maxRowUsed, Math.ceil(reqCols / targetAspect), wrapRows) + extraRows;
+    const finalRows = Math.max(1, maxRowUsed, Math.ceil(reqCols / targetAspect)) + extraRows;
     const finalCols = Math.max(2, reqCols, Math.ceil(finalRows * targetAspect)) + extraCols;
 
     return {
@@ -849,7 +849,7 @@ let breadcrumbHistoryIndex = 0;
 /** Sets focusedFolder, tracks history stack, and triggers breadcrumbs & render update. */
 function setFocusedFolderWithHistory(folder, recordHistory = true) {
     const target = folder || "";
-    if (recordHistory && target !== focusedFolder) {
+    if (recordHistory && target !== breadcrumbHistory[breadcrumbHistoryIndex]) {
         breadcrumbHistory.splice(breadcrumbHistoryIndex + 1);
         breadcrumbHistory.push(target);
         breadcrumbHistoryIndex = breadcrumbHistory.length - 1;
@@ -1964,6 +1964,7 @@ function render() {
 
     const extraCols = (data && data.extraCols) || 0;
     const extraRows = (data && data.extraRows) || 0;
+    const isSpanningMode = data && data.layoutMode === "spanning_grid";
 
     if (shouldOpenFolder) {
         const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
