@@ -124,3 +124,115 @@ export function reorderCardItems(
     newOrder[toIdx] = sourceId;
     return newOrder;
 }
+
+/**
+ * Reorders items in a 2D spanning grid layout, placing sourceId at targetCol, targetRow.
+ * Preserves empty holes in the column-major grid and respects capacity constraints.
+ */
+export function reorderSpanningItems(
+    activeIds: string[],
+    currentOrder: string[],
+    allocations: { [id: string]: number },
+    sourceId: string,
+    targetCol: number,
+    targetRow: number,
+    maxAllowedCols: number,
+    maxAllowedRows: number,
+    wrapRows: number
+): { newOrder: string[]; rows: number; cols: number } {
+    let currCol = 0;
+    let currRow = 0;
+    const placements: Array<{ id: string; col: number; row: number; nCells: number }> = [];
+    const placementBySlot = new Map<string, { id: string; col: number; row: number; nCells: number }>();
+    const placementById = new Map<string, { id: string; col: number; row: number; nCells: number }>();
+
+    for (const id of currentOrder) {
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        const nCells = allocations[id] || 1;
+        if (currRow > 0 && currRow + nCells > wrapRows) {
+            currCol++;
+            currRow = 0;
+        }
+        const p = { id, col: currCol, row: currRow, nCells };
+        placements.push(p);
+        placementById.set(id, p);
+        for (let i = 0; i < nCells; i++) {
+            placementBySlot.set(`${currCol},${currRow + i}`, p);
+        }
+        currRow += nCells;
+    }
+
+    const sourcePlacement = placementById.get(sourceId);
+    const sourceCells = allocations[sourceId] || 1;
+    const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
+
+    let targetPlacement = placementBySlot.get(`${targetCol},${targetRow}`);
+    if (targetPlacement && targetPlacement.id === sourceId) {
+        targetPlacement = undefined;
+    }
+
+    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
+    const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
+    const finalTargetRow = targetPlacement ? targetPlacement.row : clamped.row;
+
+    let reqRows = wrapRows;
+    for (const p of placements) {
+        reqRows = Math.max(reqRows, p.row + p.nCells);
+    }
+    const gridRows = Math.min(maxAllowedRows, Math.max(reqRows, finalTargetRow + sourceCells));
+    const maxCol = Math.min(maxAllowedCols - 1, Math.max(currCol, finalTargetCol, sourceCol));
+
+    const grid: string[][] = [];
+    for (let c = 0; c <= maxCol; c++) {
+        grid.push(new Array(gridRows).fill(""));
+    }
+    for (const p of placements) {
+        for (let i = 0; i < p.nCells; i++) {
+            if (p.row + i < gridRows && p.col <= maxCol) {
+                grid[p.col][p.row + i] = p.id;
+            }
+        }
+    }
+
+    for (let c = 0; c <= maxCol; c++) {
+        for (let r = 0; r < gridRows; r++) {
+            if (grid[c][r] === sourceId) {
+                grid[c][r] = "";
+            }
+        }
+    }
+
+    for (let i = 0; i < sourceCells; i++) {
+        if (finalTargetCol <= maxCol && finalTargetRow + i < gridRows) {
+            grid[finalTargetCol][finalTargetRow + i] = sourceId;
+        }
+    }
+
+    const newOrder: string[] = [];
+    for (let c = 0; c <= maxCol; c++) {
+        let r = 0;
+        while (r < gridRows) {
+            const cell = grid[c][r];
+            if (cell) {
+                newOrder.push(cell);
+                const nCells = allocations[cell] || 1;
+                r += nCells;
+            } else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+
+    return {
+        newOrder,
+        rows: gridRows,
+        cols: maxCol + 1
+    };
+}

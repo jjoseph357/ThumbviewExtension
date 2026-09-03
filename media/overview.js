@@ -697,9 +697,7 @@ window.addEventListener("message", event => {
     }
 
     if (msg.command === "setFocusedFolder") {
-        focusedFolder = msg.folder || "";
-        updateBreadcrumbs();
-        render();
+        setFocusedFolderWithHistory(msg.folder || "");
     }
 
     if (msg.command === "hoverLines") {
@@ -775,32 +773,27 @@ function cellsNeeded(lineCount, baseLinesPerCell = 60, compressionPct = 0.05) {
     return Math.ceil(repLines / baseLinesPerCell);
 }
 
-function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, baseLinesPerCell = 60, compressionPct = 0.05) {
+function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, extraCols = 0, extraRows = 0, baseLinesPerCell = 60, compressionPct = 0.05) {
     const allocations = {};
-    let totalCells = 0;
+    let actualCells = 0;
     let maxNCells = 1;
 
-    const filesById = new Map(files.map(f => [f.id, f]));
-    const orderToIterate = (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0)
-        ? folderOrder
-        : files.map(f => f.id);
-
-    for (const fid of orderToIterate) {
-        if (!fid) {
-            totalCells += 1;
-            continue;
-        }
-        const f = filesById.get(fid);
-        const nCells = f ? (f.nCells || (f.lineCount ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1)) : 1;
-        allocations[fid] = nCells;
-        totalCells += nCells;
+    for (const f of files) {
+        const nCells = f.nCells || (f.lineCount ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1);
+        allocations[f.id] = nCells;
+        actualCells += nCells;
         if (nCells > maxNCells) {
             maxNCells = nCells;
         }
     }
 
-    const calculatedRows = Math.max(1, Math.round(Math.sqrt(Math.max(totalCells, files.length, 1) / targetAspect)));
+    const calculatedRows = Math.max(1, Math.round(Math.sqrt(Math.max(actualCells, files.length, 1) / targetAspect)));
     const wrapRows = Math.max(calculatedRows, maxNCells);
+
+    const filesById = new Map(files.map(f => [f.id, f]));
+    const orderToIterate = (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0)
+        ? folderOrder
+        : files.map(f => f.id);
 
     let currCol = 0;
     let currRow = 0;
@@ -839,14 +832,61 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     }
 
     const reqCols = currCol + 1;
-    const finalRows = Math.max(1, maxRowUsed, Math.ceil(reqCols / targetAspect));
-    const finalCols = Math.max(2, reqCols, Math.ceil(finalRows * targetAspect));
+    const finalRows = Math.max(1, maxRowUsed, Math.ceil(reqCols / targetAspect), wrapRows) + extraRows;
+    const finalCols = Math.max(2, reqCols, Math.ceil(finalRows * targetAspect)) + extraCols;
 
     return {
         rows: finalRows,
         cols: finalCols,
+        wrapRows: wrapRows,
         placements
     };
+}
+
+const breadcrumbHistory = [""];
+let breadcrumbHistoryIndex = 0;
+
+/** Sets focusedFolder, tracks history stack, and triggers breadcrumbs & render update. */
+function setFocusedFolderWithHistory(folder, recordHistory = true) {
+    const target = folder || "";
+    if (recordHistory && target !== focusedFolder) {
+        breadcrumbHistory.splice(breadcrumbHistoryIndex + 1);
+        breadcrumbHistory.push(target);
+        breadcrumbHistoryIndex = breadcrumbHistory.length - 1;
+    }
+    focusedFolder = target;
+    updateBreadcrumbs();
+    render();
+}
+
+/** Navigates back one step in breadcrumb history, or goes up to parent folder. */
+function handleBreadcrumbBack() {
+    if (breadcrumbHistoryIndex > 0) {
+        breadcrumbHistoryIndex--;
+        setFocusedFolderWithHistory(breadcrumbHistory[breadcrumbHistoryIndex], false);
+        return true;
+    } else if (focusedFolder) {
+        if (focusedFolder === "(root files)/") {
+            setFocusedFolderWithHistory("", false);
+        } else {
+            const segments = focusedFolder.split("/").filter(Boolean);
+            segments.pop();
+            const parent = segments.length > 0 ? segments.join("/") + "/" : "";
+            setFocusedFolderWithHistory(parent, false);
+        }
+        return true;
+    }
+    return false;
+}
+
+/** Navigates forward one step in breadcrumb history. */
+function handleBreadcrumbForward() {
+    if (breadcrumbHistoryIndex < breadcrumbHistory.length - 1) {
+        breadcrumbHistoryIndex++;
+        setFocusedFolderWithHistory(breadcrumbHistory[breadcrumbHistoryIndex], false);
+        return true;
+    }
+    return false;
 }
 
 /** Rebuilds the breadcrumb trail DOM for the current focusedFolder, each segment clickable to refocus. */
@@ -863,9 +903,7 @@ function updateBreadcrumbs() {
     rootSpan.className = "breadcrumb-item";
     rootSpan.innerText = "root";
     rootSpan.onclick = () => {
-        focusedFolder = "";
-        updateBreadcrumbs();
-        render();
+        setFocusedFolderWithHistory("");
     };
     container.appendChild(rootSpan);
 
@@ -897,9 +935,7 @@ function updateBreadcrumbs() {
         segmentSpan.className = "breadcrumb-item";
         segmentSpan.innerText = segments[i];
         segmentSpan.onclick = () => {
-            focusedFolder = pathRef;
-            updateBreadcrumbs();
-            render();
+            setFocusedFolderWithHistory(pathRef);
         };
         container.appendChild(segmentSpan);
     }
@@ -1926,20 +1962,23 @@ function render() {
     let folderCellW = rootCellW;
     let folderCellH = rootCellH;
 
-    const isSpanningMode = data && data.mode === "spanning_grid";
+    const extraCols = (data && data.extraCols) || 0;
+    const extraRows = (data && data.extraRows) || 0;
 
     if (shouldOpenFolder) {
         const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
         if (isSpanningMode) {
-            localSpanningLayout = buildSpanningGridLocal(scopedFiles, overviewAspect, folderOrder);
+            localSpanningLayout = buildSpanningGridLocal(scopedFiles, overviewAspect, folderOrder, extraCols, extraRows);
             folderCellW = availableW / Math.max(1, localSpanningLayout.cols);
             folderCellH = availableH / Math.max(1, localSpanningLayout.rows);
             cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
         } else {
             const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
             localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
-            folderCellW = availableW / Math.max(1, localFolderGrid.cols);
-            folderCellH = availableH / Math.max(1, localFolderGrid.rows);
+            const folderCols = localFolderGrid.cols + extraCols;
+            const folderRows = localFolderGrid.rows + extraRows;
+            folderCellW = availableW / Math.max(1, folderCols);
+            folderCellH = availableH / Math.max(1, folderRows);
             cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
         }
     } else {
@@ -1990,12 +2029,14 @@ function render() {
         if (totalItems === 0) return;
 
         const localGrid = buildStableGrid(totalItems, overviewAspect);
-        const localCellW = availableW / localGrid.cols;
-        const localCellH = availableH / localGrid.rows;
+        const cardCols = localGrid.cols + extraCols;
+        const cardRows = localGrid.rows + extraRows;
+        const localCellW = availableW / Math.max(1, cardCols);
+        const localCellH = availableH / Math.max(1, cardRows);
 
         activeRenderGrid = {
-            cols: localGrid.cols,
-            rows: localGrid.rows,
+            cols: cardCols,
+            rows: cardRows,
             cellW: localCellW,
             cellH: localCellH,
             isFolderCards: true,
@@ -2251,9 +2292,12 @@ function render() {
             const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
             localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
 
+            const folderCols = (localFolderGrid ? localFolderGrid.cols : 1) + extraCols;
+            const folderRows = (localFolderGrid ? localFolderGrid.rows : 1) + extraRows;
+
             activeRenderGrid = {
-                cols: localFolderGrid ? localFolderGrid.cols : 1,
-                rows: localFolderGrid ? localFolderGrid.rows : 1,
+                cols: folderCols,
+                rows: folderRows,
                 cellW: folderCellW,
                 cellH: folderCellH,
                 isFolderView: true,
@@ -3084,6 +3128,9 @@ canvas.addEventListener("mouseup", event => {
                 });
             }
         } else if (dragTarget) {
+            const slotIdx = (activeRenderGrid && activeRenderGrid.layout && activeRenderGrid.layout.slots)
+                ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
+                : -1;
             vscode.postMessage({
                 command: "reorderFile",
                 sourceId: draggingFile.id,
@@ -3091,6 +3138,7 @@ canvas.addEventListener("mouseup", event => {
                 targetIsEmpty: !dragTarget.file,
                 targetCol: dragTarget.col,
                 targetRow: dragTarget.row,
+                targetSlotIdx: slotIdx,
                 targetGridCols: dragTarget.gridCols || data.layout.cols,
                 targetGridRows: (activeRenderGrid && activeRenderGrid.rows) || data.layout.rows,
                 focusedFolder: focusedFolder || ""
@@ -3107,9 +3155,7 @@ canvas.addEventListener("mouseup", event => {
         for (const card of data._folderCards) {
             if (pointInRect(card, cursorPos.px, cursorPos.py) &&
                 card.folderPath === activeCandidateFolder.card.folderPath) {
-                    focusedFolder = card.folderPath;
-                    updateBreadcrumbs();
-                    render();
+                    setFocusedFolderWithHistory(card.folderPath);
                     return;
                 }
         }
@@ -3146,12 +3192,10 @@ canvas.addEventListener("mouseup", event => {
             const lastSlash = file.path.lastIndexOf('/');
             if (lastSlash !== -1) {
                 const folder = file.path.substring(0, lastSlash + 1);
-                focusedFolder = folder;
+                setFocusedFolderWithHistory(folder);
             } else {
-                focusedFolder = "(root files)/";
+                setFocusedFolderWithHistory("(root files)/");
             }
-            updateBreadcrumbs();
-            render();
             return;
         }
 
@@ -3408,9 +3452,7 @@ canvas.addEventListener("contextmenu", event => {
 
         document.getElementById("menu-open-folder").onclick = () => {
             hideContextMenu();
-            focusedFolder = targetFolderCard.folderPath;
-            updateBreadcrumbs();
-            render();
+            setFocusedFolderWithHistory(targetFolderCard.folderPath);
         };
         document.getElementById("menu-reveal-folder").onclick = () => {
             hideContextMenu();
@@ -3504,9 +3546,7 @@ canvas.addEventListener("contextmenu", event => {
         if (focusedFolder) {
             document.getElementById("menu-space-root").onclick = () => {
                 hideContextMenu();
-                focusedFolder = "";
-                updateBreadcrumbs();
-                render();
+                setFocusedFolderWithHistory("");
             };
         } else {
             document.getElementById("menu-space-refresh").onclick = () => {
@@ -3642,9 +3682,7 @@ function updateFoldersPopover() {
     allItem.className = "popover-item" + (!focusedFolder ? " active" : "");
     allItem.innerHTML = `<span class="item-icon-label">${ICONS.workspace} <span>All Workspace Files (Root)</span></span><span class="popover-item-count">${data.files.length} files</span>`;
     allItem.onclick = () => {
-        focusedFolder = "";
-        updateBreadcrumbs();
-        render();
+        setFocusedFolderWithHistory("");
         closeAllPopovers();
     };
     list.appendChild(allItem);
@@ -3656,9 +3694,7 @@ function updateFoldersPopover() {
         rootOnlyItem.className = "popover-item" + (focusedFolder === "(root files)/" ? " active" : "");
         rootOnlyItem.innerHTML = `<span class="item-icon-label">${ICONS.rootFiles} <span>Root Directory Files Only</span></span><span class="popover-item-count">${rootOnlyFiles.length} file${rootOnlyFiles.length === 1 ? "" : "s"}</span>`;
         rootOnlyItem.onclick = () => {
-            focusedFolder = "(root files)/";
-            updateBreadcrumbs();
-            render();
+            setFocusedFolderWithHistory("(root files)/");
             closeAllPopovers();
         };
         list.appendChild(rootOnlyItem);
@@ -3712,9 +3748,7 @@ function updateFoldersPopover() {
         item.appendChild(ignoreBtn);
 
         item.onclick = () => {
-            focusedFolder = folderPath;
-            updateBreadcrumbs();
-            render();
+            setFocusedFolderWithHistory(folderPath);
             closeAllPopovers();
         };
         list.appendChild(item);
@@ -3831,6 +3865,51 @@ if (mediaThumbnailsToggle) {
         vscode.postMessage({ command: "setRenderMediaThumbnails", enabled: mediaThumbnailsToggle.checked });
     };
 }
+
+const expandGridBtn = document.getElementById("expand-grid-btn");
+if (expandGridBtn) {
+    expandGridBtn.onclick = () => {
+        vscode.postMessage({ command: "expandSpace" });
+    };
+}
+
+const reduceGridBtn = document.getElementById("reduce-grid-btn");
+if (reduceGridBtn) {
+    reduceGridBtn.onclick = () => {
+        vscode.postMessage({ command: "reduceSpace" });
+    };
+}
+
+// Side mouse button navigation on breadcrumbs:
+// Button 3 = Browser Back, Button 4 = Browser Forward
+window.addEventListener("mouseup", event => {
+    if (event.button === 3) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleBreadcrumbBack();
+    } else if (event.button === 4) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleBreadcrumbForward();
+    }
+});
+
+window.addEventListener("mousedown", event => {
+    if (event.button === 3 || event.button === 4) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+});
+
+window.addEventListener("auxclick", event => {
+    if (event.button === 3) {
+        event.preventDefault();
+        handleBreadcrumbBack();
+    } else if (event.button === 4) {
+        event.preventDefault();
+        handleBreadcrumbForward();
+    }
+});
 
 const reflowLayoutBtn = document.getElementById("reflow-layout-btn");
 if (reflowLayoutBtn) {

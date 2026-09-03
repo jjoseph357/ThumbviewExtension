@@ -7,7 +7,7 @@ import { IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeItem } from "./directoryProvider";
 import { fetchWorkspaceGitDiff, getCachedGitDiff } from "./git";
 import { ACCENT_SEARCH, ACCENT_INSPECT, ACCENT_RECENCY, withAlpha } from "./colors";
-import { clampTargetToGridCapacity, reorderFolderItems, reorderCardItems } from "./reorder_helpers";
+import { clampTargetToGridCapacity, reorderFolderItems, reorderCardItems, reorderSpanningItems } from "./reorder_helpers";
 
 import * as fs from "fs";
 import * as path from "path";
@@ -1523,20 +1523,45 @@ export async function activate(context: vscode.ExtensionContext) {
                                 }
                             }
 
-                            const gridCols = Math.max(1, msg.targetGridCols || 1);
-                            const gridRows = Math.max(1, msg.targetGridRows || Math.ceil(currentFolderOrder.length / gridCols));
-                            const maxCapacity = gridCols * gridRows;
-                            const targetSlotIdx = Math.max(0, msg.targetRow * gridCols + msg.targetCol);
+                            if (layoutMode === "spanning_grid") {
+                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                                const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))));
+                                const wrapRows = msg.targetGridRows || baseWrapRows;
+                                const maxAllowedCols = Math.max(2, (msg.targetGridCols || 2) + extraCols);
+                                const maxAllowedRows = Math.max(1, wrapRows + extraRows);
 
-                            currentFolderOrder = reorderFolderItems(
-                                currentFolderOrder,
-                                msg.sourceId,
-                                !!msg.targetIsEmpty,
-                                msg.targetId || null,
-                                targetSlotIdx,
-                                maxCapacity,
-                                mode
-                            );
+                                const res = reorderSpanningItems(
+                                    scopedIds,
+                                    currentFolderOrder,
+                                    savedAllocations,
+                                    msg.sourceId,
+                                    msg.targetCol,
+                                    msg.targetRow,
+                                    maxAllowedCols,
+                                    maxAllowedRows,
+                                    wrapRows
+                                );
+                                currentFolderOrder = res.newOrder;
+                            } else {
+                                const gridCols = Math.max(1, msg.targetGridCols || 1);
+                                const gridRows = Math.max(1, msg.targetGridRows || Math.ceil(currentFolderOrder.length / gridCols));
+                                const maxCapacity = gridCols * gridRows;
+                                const targetSlotIdx = (typeof msg.targetSlotIdx === "number" && msg.targetSlotIdx >= 0)
+                                    ? msg.targetSlotIdx
+                                    : Math.max(0, msg.targetRow * gridCols + msg.targetCol);
+
+                                currentFolderOrder = reorderFolderItems(
+                                    currentFolderOrder,
+                                    msg.sourceId,
+                                    !!msg.targetIsEmpty,
+                                    msg.targetId || null,
+                                    targetSlotIdx,
+                                    maxCapacity,
+                                    mode
+                                );
+                            }
 
                             folderOrders[msg.focusedFolder] = currentFolderOrder;
                             await context.workspaceState.update("thumbview.folderOrders", folderOrders);
@@ -2089,6 +2114,8 @@ export async function activate(context: vscode.ExtensionContext) {
         await context.workspaceState.update("thumbview.spanningRows", undefined);
         await context.workspaceState.update("thumbview.cardOrder", undefined);
         await context.workspaceState.update("thumbview.folderOrders", undefined);
+        await context.workspaceState.update("thumbview.extraCols", undefined);
+        await context.workspaceState.update("thumbview.extraRows", undefined);
 
         if (activePanel) {
             refreshThumbview(activePanel);
@@ -2098,6 +2125,30 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage("Thumbview layout reflowed and gaps filled.");
     });
     context.subscriptions.push(reflowDisposable);
+
+    const expandSpaceDisposable = vscode.commands.registerCommand("thumbview.expandSpace", async () => {
+        const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+        const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+        await context.workspaceState.update("thumbview.extraCols", curCols + 1);
+        await context.workspaceState.update("thumbview.extraRows", curRows + 1);
+        vscode.window.showInformationMessage("Expanded grid space.");
+        if (activePanel) {
+            updateLayoutFromCache(activePanel);
+        }
+    });
+    context.subscriptions.push(expandSpaceDisposable);
+
+    const reduceSpaceDisposable = vscode.commands.registerCommand("thumbview.reduceSpace", async () => {
+        const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+        const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+        await context.workspaceState.update("thumbview.extraCols", Math.max(0, curCols - 1));
+        await context.workspaceState.update("thumbview.extraRows", Math.max(0, curRows - 1));
+        vscode.window.showInformationMessage("Reduced grid space.");
+        if (activePanel) {
+            updateLayoutFromCache(activePanel);
+        }
+    });
+    context.subscriptions.push(reduceSpaceDisposable);
 
     const setUniformGridDisposable = vscode.commands.registerCommand("thumbview.setUniformGrid", async () => {
         const config = vscode.workspace.getConfiguration("thumbview");
@@ -3448,6 +3499,16 @@ function getHtml(
                                 <span class="toggle-thumb"></span>
                             </span>
                         </label>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Grid Space</div>
+                            <div class="setting-desc">Add or remove empty margin rows and columns around the grid</div>
+                        </div>
+                        <div style="display: flex; gap: 6px;">
+                            <button id="expand-grid-btn" class="action-trigger-btn">+ Expand Space</button>
+                            <button id="reduce-grid-btn" class="action-trigger-btn">− Reduce Space</button>
+                        </div>
                     </div>
                     <div class="setting-row">
                         <div class="setting-text">

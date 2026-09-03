@@ -91,6 +91,14 @@
         "title": "Thumbview: Use Shift Reorder Mode"
       },
       {
+        "command": "thumbview.expandSpace",
+        "title": "Thumbview: Expand Grid Space"
+      },
+      {
+        "command": "thumbview.reduceSpace",
+        "title": "Thumbview: Reduce Grid Space"
+      },
+      {
         "command": "thumbview.addIgnorePattern",
         "title": "Thumbview: Add Ignore Pattern...",
         "icon": "$(add)"
