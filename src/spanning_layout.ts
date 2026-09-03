@@ -68,7 +68,13 @@ export function buildSpanningGrid(
     }
 
     const calculatedRows = Math.max(MIN_GRID_ROWS, Math.round(Math.sqrt(Math.max(totalCells, files.length, 1) / targetAspect)));
-    const wrapRows = savedGridRows && savedGridRows > 0 ? Math.max(savedGridRows, maxNCells) : Math.max(calculatedRows, maxNCells);
+    let wrapRows = savedGridRows && savedGridRows > 0 ? Math.max(savedGridRows, maxNCells) : Math.max(calculatedRows, maxNCells);
+
+    // If savedGridRows forces an extreme column count compared to target aspect ratio, adapt wrapRows to maintain reasonable proportion
+    const estCols = Math.ceil(totalCells / wrapRows);
+    if (estCols / wrapRows > targetAspect * 1.75 && wrapRows < calculatedRows) {
+        wrapRows = Math.max(calculatedRows, maxNCells);
+    }
 
     let currCol = 0;
     let currRow = 0;

@@ -193,7 +193,7 @@ export async function scanRepository(
     // Scan all files but exclude non-code, library, or build folders
     const files = await vscode.workspace.findFiles(
         "**/*",
-        "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv,env,.env,lib,vendor}/**"
+        "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv,env,.env,lib,lib64,vendor,__pycache__,.pytest_cache,.mypy_cache}/**"
     );
 
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
@@ -204,24 +204,21 @@ export async function scanRepository(
 
     // Prioritize auto-ignoring top-level dense folders & library subdirectories (>threshold files)
     const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
-    const folderCounts = new Map<string, number>();
-    const topLevelFolderCounts = new Map<string, number>();
+    const dirCounts = new Map<string, number>();
 
     for (const file of files) {
         const relative = vscode.workspace.asRelativePath(file).replace(/\\/g, "/");
         const parts = relative.split("/");
-        if (parts.length > 1) {
-            const topLevelDir = parts[0] + "/";
-            topLevelFolderCounts.set(topLevelDir, (topLevelFolderCounts.get(topLevelDir) || 0) + 1);
-
-            const folderDir = parts.slice(0, parts.length - 1).join("/") + "/";
-            folderCounts.set(folderDir, (folderCounts.get(folderDir) || 0) + 1);
+        let prefix = "";
+        for (let i = 0; i < parts.length - 1; i++) {
+            prefix += parts[i] + "/";
+            dirCounts.set(prefix, (dirCounts.get(prefix) || 0) + 1);
         }
     }
 
     const denseFolders: string[] = [];
 
-    // Helper: returns true if candidate pattern is already ignored by an existing rule or top-level parent rule
+    // Helper: returns true if candidate pattern is already ignored by an existing rule or parent rule
     const isAlreadyCovered = (dir: string, rules: string[]): boolean => {
         if (shouldIgnore(dir, rules)) return true;
         for (const rule of rules) {
@@ -240,30 +237,36 @@ export async function scanRepository(
         return exclusionSet.has(clean);
     };
 
-    // First check top-level root folders so massive virtualenvs/build dirs (like BOFS/) are ignored as a single top-level entry
-    for (const [topDir, count] of topLevelFolderCounts.entries()) {
-        const isLibFolder = /(^|\/)(lib|vendor|libraries|venv|\.venv)(\/|$)/i.test(topDir);
-        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(topDir, gitignoreRules) && !isUserExcluded(topDir)) {
-            denseFolders.push(topDir);
+    // Sort all directory paths by hierarchy depth (shallowest first)
+    const sortedDirs = Array.from(dirCounts.keys()).sort((a, b) => {
+        const depthA = a.split("/").length;
+        const depthB = b.split("/").length;
+        if (depthA !== depthB) return depthA - depthB;
+        return a.localeCompare(b);
+    });
+
+    const combinedRules = [...gitignoreRules];
+    const isLibFolderRegex = /(^|\/)(lib|lib64|vendor|libraries|venv|\.venv|env|\.env|__pycache__|\.pytest_cache|\.mypy_cache)(\/|$)/i;
+
+    for (const dir of sortedDirs) {
+        const count = dirCounts.get(dir) || 0;
+        const isLibFolder = isLibFolderRegex.test(dir);
+
+        if ((isLibFolder || (threshold > 0 && count > threshold)) &&
+            !isAlreadyCovered(dir, combinedRules) &&
+            !isUserExcluded(dir)) {
+            denseFolders.push(dir);
+            combinedRules.push(dir);
         }
     }
 
-    // Next check nested subdirectories only if their parent isn't already covered by gitignoreRules or top-level denseFolders
-    const combinedRules = [...gitignoreRules, ...denseFolders];
-    for (const [folderDir, count] of folderCounts.entries()) {
-        const isLibFolder = /(^|\/)(lib|vendor|libraries|venv|\.venv)(\/|$)/i.test(folderDir);
-        if ((isLibFolder || (threshold > 0 && count > threshold)) && !isAlreadyCovered(folderDir, combinedRules) && !isUserExcluded(folderDir)) {
-            denseFolders.push(folderDir);
-            combinedRules.push(folderDir);
-        }
-    }
-
-    // Prune pre-existing redundant child rules from gitignoreRules (e.g. if BOFS/ exists, remove BOFS/sub/ entries)
+    // Prune redundant child rules from gitignoreRules (e.g. if BOFS/ or lib64/ exists, remove deep child entries)
+    const allEffectiveRules = [...gitignoreRules, ...denseFolders];
     const cleanedRules: string[] = [];
     for (const rule of gitignoreRules) {
         const clean = rule.trim().replace(/^\/+|\/+$/g, "");
         if (!clean) continue;
-        const isChildOfOther = gitignoreRules.some(other => {
+        const isChildOfOther = allEffectiveRules.some(other => {
             const otherClean = other.trim().replace(/^\/+|\/+$/g, "");
             return otherClean && clean !== otherClean && clean.startsWith(otherClean + "/");
         });

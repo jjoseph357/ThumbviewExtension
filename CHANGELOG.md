@@ -5,6 +5,13 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-09-03
+
+### Fixed
+- **Empty Space Drag and Drop with Collapsed Folders**: Enabled dropping file tiles and folder cards onto empty slots both in the overview subfolder cards mode and within folder drill-down views, preserving gaps and relative positions without unintended reflows.
+- **Strict Grid Space Bounds on Drag**: Dragging files to empty spaces now strictly stays within existing grid capacity without increasing rows or columns. Right click > Expand Grid Space is enforced as the sole mechanism for expanding grid space.
+- **Top Toolbar & Ignore Filter Consistency**: Added SVGs for toolbar actions and excluded compiler and test cache directories from automatic dense folder scanning.
+
 ## [0.4.5] - 2026-08-31
 
 ### Added

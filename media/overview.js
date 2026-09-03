@@ -18,22 +18,123 @@ function getThemeColor(varName, fallbackHex) {
     return val || fallbackHex;
 }
 
+/** Checks whether the active VS Code color theme is a light theme. */
+function isLightTheme() {
+    if (typeof document === "undefined") return false;
+    return document.body.classList.contains("vscode-light") || document.body.classList.contains("vscode-high-contrast-light");
+}
+
 // Fixed brand accents — single source of truth is src/colors.ts, injected here as
 // CSS custom properties by extension.ts. Never hardcode these hexes elsewhere.
-const ACCENT_SEARCH = getThemeColor("--tv-accent-search");
-const ACCENT_INSPECT = getThemeColor("--tv-accent-inspect");
-const ACCENT_RECENCY = getThemeColor("--tv-accent-recency");
+let ACCENT_SEARCH = "#dc267f";
+let ACCENT_INSPECT = "#785ef0";
+let ACCENT_RECENCY = "#fe6100";
 
-// hex -> rgba(...) at a given alpha. Duplicated from src/colors.ts (webview can't
-// import it) — keep both in sync by hand.
-function withAlpha(hex, alpha) {
-    if (!hex) return `rgba(0, 0, 0, ${alpha})`;
-    const clean = hex.replace("#", "");
-    const r = parseInt(clean.substring(0, 2), 16);
-    const g = parseInt(clean.substring(2, 4), 16);
-    const b = parseInt(clean.substring(4, 6), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+// Color definitions that dynamically adapt across Dark and Light themes
+let TILE_BACKGROUND = "#1e1e24";
+let TILE_LABEL_COLOR = {
+    searchMatch: "#dc267f",
+    error: "#f14c4c",
+    active: "#ffffff",
+    normal: "#a0a0a5",
+    modified: "#e2c08d",
+    added: "#73c991"
+};
+let BORDER_STYLES = {
+    searchMatch: { color: "#dc267f", width: 2.5 },
+    active:      { color: "#007fd4", width: 2.5 },
+    open:        { color: "#fe6100", width: 1.8 },
+    dragging:    { color: "#648fff", width: 1.8 },
+    default:     { color: "rgba(255, 255, 255, 0.08)", width: 1 }
+};
+let CLOSE_BTN_COLOR = "#707075";
+
+let MEDIA_CONFIG = {
+    tileBackground: "#1e1e24",
+    imageTileBackground: "#252526",
+    imageTilePlaceholderText: "#858585",
+    pdfHeaderBar: "#4d4d4d",
+    pdfHeaderForeground: "#ffffff",
+    pdfPlaceholderLine: "rgba(255, 255, 255, 0.25)",
+    activeFocusHighlight: "#007fd4"
+};
+
+function refreshThemeTokens() {
+    const light = isLightTheme();
+    ACCENT_SEARCH = getThemeColor("--tv-accent-search", "#dc267f");
+    ACCENT_INSPECT = getThemeColor("--tv-accent-inspect", "#785ef0");
+    ACCENT_RECENCY = getThemeColor("--tv-accent-recency", "#fe6100");
+
+    TILE_BACKGROUND = getThemeColor("--vscode-editor-background", light ? "#ffffff" : "#1e1e24");
+    
+    TILE_LABEL_COLOR = {
+        searchMatch: ACCENT_SEARCH,
+        error: getThemeColor("--vscode-list-errorForeground", light ? "#e51400" : "#f14c4c"),
+        active: getThemeColor("--vscode-foreground", light ? "#000000" : "#ffffff"),
+        normal: getThemeColor("--vscode-descriptionForeground", light ? "#616161" : "#a0a0a5"),
+        modified: getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", light ? "#895503" : "#e2c08d"),
+        added: getThemeColor("--vscode-gitDecoration-untrackedResourceForeground", light ? "#22863a" : "#73c991")
+    };
+
+    BORDER_STYLES = {
+        searchMatch: { color: ACCENT_SEARCH, width: 2.5 },
+        active:      { color: getThemeColor("--vscode-focusBorder", "#007fd4"), width: 2.5 },
+        open:        { color: ACCENT_RECENCY, width: 1.8 },
+        dragging:    { color: "#648fff", width: 1.8 },
+        default:     { color: getThemeColor("--vscode-widget-border", light ? "rgba(0, 0, 0, 0.12)" : "rgba(255, 255, 255, 0.08)"), width: 1 }
+    };
+
+    CLOSE_BTN_COLOR = getThemeColor("--vscode-descriptionForeground", light ? "#616161" : "#707075");
+
+    MEDIA_CONFIG = {
+        tileBackground: getThemeColor("--vscode-editor-background", light ? "#ffffff" : "#1e1e24"),
+        imageTileBackground: getThemeColor("--vscode-editorWidget-background", light ? "#f3f3f3" : "#252526"),
+        imageTilePlaceholderText: getThemeColor("--vscode-descriptionForeground", light ? "#616161" : "#858585"),
+        pdfHeaderBar: getThemeColor("--vscode-badge-background", light ? "#e0e0e0" : "#4d4d4d"),
+        pdfHeaderForeground: getThemeColor("--vscode-badge-foreground", light ? "#333333" : "#ffffff"),
+        pdfPlaceholderLine: getThemeColor("--vscode-widget-border", light ? "rgba(0, 0, 0, 0.15)" : "rgba(255, 255, 255, 0.25)"),
+        activeFocusHighlight: getThemeColor("--vscode-focusBorder", "#007fd4")
+    };
 }
+
+// Initial theme token resolution
+refreshThemeTokens();
+
+// Robust color -> rgba(...) parser supporting hex, rgb, rgba, and hsl
+function withAlpha(color, alpha) {
+    if (!color) return `rgba(0, 0, 0, ${alpha})`;
+    const s = String(color).trim();
+    if (s.startsWith("#")) {
+        const clean = s.replace("#", "");
+        let r = 0, g = 0, b = 0;
+        if (clean.length === 3) {
+            r = parseInt(clean[0] + clean[0], 16);
+            g = parseInt(clean[1] + clean[1], 16);
+            b = parseInt(clean[2] + clean[2], 16);
+        } else {
+            r = parseInt(clean.substring(0, 2), 16) || 0;
+            g = parseInt(clean.substring(2, 4), 16) || 0;
+            b = parseInt(clean.substring(4, 6), 16) || 0;
+        }
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+    const rgbMatch = s.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (rgbMatch) {
+        return `rgba(${rgbMatch[1]}, ${rgbMatch[2]}, ${rgbMatch[3]}, ${alpha})`;
+    }
+    return s;
+}
+
+const ICONS = {
+    folder: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-foreground,#cccccc);"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z" fill="currentColor" fill-opacity="0.08"/></svg>',
+    file: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-descriptionForeground,#8a8a93);"><path d="M3.5 2C2.67 2 2 2.67 2 3.5V12.5C2 13.33 2.67 14 3.5 14H12.5C13.33 14 14 13.33 14 12.5V5.5L10.5 2H3.5Z"/><path d="M10.5 2V5.5H14"/><path d="M5 8.5H11M5 11H8.5" stroke-linecap="round"/></svg>',
+    workspace: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-foreground,#e0e0e5);"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M2 6H14M6 6V14"/></svg>',
+    rootFiles: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-descriptionForeground,#8a8a93);"><rect x="4.5" y="2" width="8.5" height="11" rx="1.5"/><path d="M2.5 5.5V13.5C2.5 14.05 2.95 14.5 3.5 14.5H10.5"/><path d="M7 6H10.5M7 8.5H9.5"/></svg>',
+    ignoreFolder: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-descriptionForeground,#8a8a93);"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z"/><path d="M3.25 13L12.75 3.25" stroke-linecap="round"/></svg>',
+    ignoreFile: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-descriptionForeground,#8a8a93);"><path d="M3.5 2C2.67 2 2 2.67 2 3.5V12.5C2 13.33 2.67 14 3.5 14H12.5C13.33 14 14 13.33 14 12.5V5.5L10.5 2H3.5Z"/><path d="M10.5 2V5.5H14"/><path d="M3.5 12.5L12.5 3.5" stroke-linecap="round"/></svg>',
+    remove: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg>',
+    empty: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.35;margin-bottom:8px;"><circle cx="12" cy="12" r="9"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>'
+};
 
 let data = null;
 let statusText = "Loading Thumbview...";
@@ -57,11 +158,16 @@ const DRAG_THRESHOLD = 5; // px
 let candidateFile = null;
 let candidateFolder = null;
 let draggingFile = null;
+let draggingFolder = null;
 let dragGrabOffset = null;
 let cursorPos = null;
 let dragRafId = null;
 let dragTargetFile = null;
 let dragTarget = null;
+let dragTargetFolder = null;
+let dragTargetBreadcrumb = null;
+let activeRenderGrid = null;
+let clipboardItem = null;
 
 let hoveredFile = null;
 
@@ -135,28 +241,73 @@ function findNearestSlot(px, py) {
     const rectH = canvas.clientHeight || window.innerHeight;
     const availableW = rectW - (GRID_SIDE_MARGIN * 2);
     const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
-    const cellW = availableW / data.layout.cols;
-    const cellH = availableH / data.layout.rows;
-    const col = Math.floor((px - GRID_SIDE_MARGIN) / cellW);
-    const row = Math.floor((py - GRID_TOP_MARGIN) / cellH);
 
-    const col_clamped = clamp(col, 0, data.layout.cols - 1);
-    const row_clamped = clamp(row, 0, data.layout.rows - 1);
-    const file = slotOccupancy.get(`${col_clamped},${row_clamped}`) ?? null;
+    const grid = activeRenderGrid || {
+        cols: data?.layout?.cols || 1,
+        rows: data?.layout?.rows || 1,
+        cellW: availableW / Math.max(1, data?.layout?.cols || 1),
+        cellH: availableH / Math.max(1, data?.layout?.rows || 1)
+    };
+
+    const col = Math.floor((px - GRID_SIDE_MARGIN) / grid.cellW);
+    const row = Math.floor((py - GRID_TOP_MARGIN) / grid.cellH);
+
+    const col_clamped = clamp(col, 0, grid.cols - 1);
+    const row_clamped = clamp(row, 0, grid.rows - 1);
+
+    let file = null;
+    let item = null;
+    if (grid.isFolderCards && grid.orderedItems && grid.layout && grid.layout.slots) {
+        const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
+        if (slotIdx !== -1 && slotIdx < grid.orderedItems.length && grid.orderedItems[slotIdx]) {
+            item = grid.orderedItems[slotIdx];
+            if (item.type === "file") file = item.file;
+        }
+    } else if (grid.isFolderView && grid.files) {
+        if (grid.layout && grid.layout.placements) {
+            for (const p of grid.layout.placements) {
+                if (p.slots && p.slots.some(s => s[0] === col_clamped && s[1] === row_clamped)) {
+                    file = p.file;
+                    break;
+                }
+            }
+        } else if (grid.layout && grid.layout.slots) {
+            if (grid.folderOrder) {
+                const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
+                if (slotIdx !== -1 && slotIdx < grid.folderOrder.length && grid.folderOrder[slotIdx]) {
+                    file = grid.files.find(f => f.id === grid.folderOrder[slotIdx]) || null;
+                }
+            } else {
+                for (let i = 0; i < grid.files.length; i++) {
+                    const s = grid.layout.slots[i];
+                    if (s && s[0] === col_clamped && s[1] === row_clamped) {
+                        file = grid.files[i];
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        file = slotOccupancy.get(`${col_clamped},${row_clamped}`) ?? null;
+    }
 
     return {
-        cellW: cellW,
-        cellH: cellH,
+        cellW: grid.cellW,
+        cellH: grid.cellH,
         col: col_clamped,
         row: row_clamped,
         file: file,
+        item: item,
+        gridCols: grid.cols
     };
 }
 
 /** Recomputes dragTargetFile from the live drag cursor position (cursorPos); called on every throttled mousemove while dragging. */
 function updateDragTarget() {
-    if (!draggingFile || !cursorPos) return;
+    if ((!draggingFile && !draggingFolder) || !cursorPos) return;
 
+    dragTargetFolder = null;
+    dragTargetBreadcrumb = null;
     dragTarget = findNearestSlot(cursorPos.px, cursorPos.py);
     dragTargetFile = dragTarget?.file ?? null;
 }
@@ -166,9 +317,12 @@ function clearDragState() {
     candidateFile = null;
     candidateFolder = null;
     draggingFile = null;
+    draggingFolder = null;
     dragGrabOffset = null;
     dragTarget = null;
     dragTargetFile = null;
+    dragTargetFolder = null;
+    dragTargetBreadcrumb = null;
 
     if (dragRafId !== null) {
         cancelAnimationFrame(dragRafId);
@@ -211,7 +365,7 @@ function buildLineHtml(tokens, highlightRegex) {
             if (highlightRegex.test(tok.text)) {
                 highlightRegex.lastIndex = 0;
                 escapedText = escapedText.replace(highlightRegex, m =>
-                    `<span style="background: ${withAlpha(ACCENT_SEARCH, 0.45)}; color: #ffffff; font-weight: 600; border-radius: 2px; padding: 0 2px;">${m}</span>`
+                    `<span style="background: ${withAlpha(ACCENT_SEARCH, 0.45)}; border-radius: 2px; padding: 0 2px;">${m}</span>`
                 );
             }
         }
@@ -348,7 +502,7 @@ window.addEventListener("keydown", event => {
         }
     }
 
-    if (event.ctrlKey && !event.altKey && !event.metaKey) {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey) {
         if (event.key === 'Backspace') {
             event.preventDefault();
             clearSearch();
@@ -613,6 +767,88 @@ function buildStableGrid(nCells, targetAspect = 1.777) {
     };
 }
 
+function cellsNeeded(lineCount, baseLinesPerCell = 60, compressionPct = 0.05) {
+    if (lineCount <= baseLinesPerCell) {
+        return 1;
+    }
+    const repLines = Math.max(lineCount * compressionPct, baseLinesPerCell);
+    return Math.ceil(repLines / baseLinesPerCell);
+}
+
+function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, baseLinesPerCell = 60, compressionPct = 0.05) {
+    const allocations = {};
+    let totalCells = 0;
+    let maxNCells = 1;
+
+    const filesById = new Map(files.map(f => [f.id, f]));
+    const orderToIterate = (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0)
+        ? folderOrder
+        : files.map(f => f.id);
+
+    for (const fid of orderToIterate) {
+        if (!fid) {
+            totalCells += 1;
+            continue;
+        }
+        const f = filesById.get(fid);
+        const nCells = f ? (f.nCells || (f.lineCount ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1)) : 1;
+        allocations[fid] = nCells;
+        totalCells += nCells;
+        if (nCells > maxNCells) {
+            maxNCells = nCells;
+        }
+    }
+
+    const calculatedRows = Math.max(1, Math.round(Math.sqrt(Math.max(totalCells, files.length, 1) / targetAspect)));
+    const wrapRows = Math.max(calculatedRows, maxNCells);
+
+    let currCol = 0;
+    let currRow = 0;
+    let maxRowUsed = 1;
+    const placements = [];
+
+    for (const fid of orderToIterate) {
+        const file = fid ? filesById.get(fid) : null;
+        const nCells = fid ? (allocations[fid] || 1) : 1;
+        const mustBreak = currRow > 0 && currRow + nCells > wrapRows;
+
+        if (mustBreak) {
+            currCol++;
+            currRow = 0;
+        }
+
+        if (file) {
+            const slots = [];
+            for (let i = 0; i < nCells; i++) {
+                slots.push([currCol, currRow + i]);
+            }
+
+            placements.push({
+                file,
+                col: currCol,
+                row: currRow,
+                nCells,
+                slots
+            });
+        }
+
+        currRow += nCells;
+        if (currRow > maxRowUsed) {
+            maxRowUsed = currRow;
+        }
+    }
+
+    const reqCols = currCol + 1;
+    const finalRows = Math.max(1, maxRowUsed, Math.ceil(reqCols / targetAspect));
+    const finalCols = Math.max(2, reqCols, Math.ceil(finalRows * targetAspect));
+
+    return {
+        rows: finalRows,
+        cols: finalCols,
+        placements
+    };
+}
+
 /** Rebuilds the breadcrumb trail DOM for the current focusedFolder, each segment clickable to refocus. */
 function updateBreadcrumbs() {
     const container = document.getElementById("breadcrumbs");
@@ -678,10 +914,13 @@ function getFilteredFiles() {
 /**
  * Groups files by their immediate child subfolder relative to basePath.
  * Returns { folders: [{name, path, fileCount, files}], rootFiles: [file...] }.
+ * Small folders (<= 2 files) are kept as rootFiles to avoid 1-file or 2-file folder cards.
  */
 function getSubfolderGroups(files, basePath) {
     const groups = {};
     const rootFiles = [];
+    const orderedItems = [];
+    const seenFolders = new Set();
 
     for (const f of files) {
         const relPath = basePath ? f.path.substring(basePath.length) : f.path;
@@ -692,15 +931,43 @@ function getSubfolderGroups(files, basePath) {
             const folderName = relPath.substring(0, slashIdx);
             const folderPath = (basePath || "") + folderName + "/";
             if (!groups[folderPath]) {
-                groups[folderPath] = { name: folderName, path: folderPath, fileCount: 0, files: [] };
+                groups[folderPath] = { name: folderName, path: folderPath, folderPath: folderPath, fileCount: 0, files: [] };
             }
             groups[folderPath].fileCount++;
             groups[folderPath].files.push(f);
         }
     }
 
-    const folders = Object.values(groups).sort((a, b) => b.fileCount - a.fileCount);
-    return { folders, rootFiles };
+    const validFolders = new Set();
+    for (const grp of Object.values(groups)) {
+        if (grp.fileCount <= 2) {
+            rootFiles.push(...grp.files);
+        } else {
+            validFolders.add(grp.path);
+        }
+    }
+
+    for (const f of files) {
+        const relPath = basePath ? f.path.substring(basePath.length) : f.path;
+        const slashIdx = relPath.indexOf("/");
+        if (slashIdx === -1) {
+            orderedItems.push({ type: "file", file: f, id: f.id });
+        } else {
+            const folderName = relPath.substring(0, slashIdx);
+            const folderPath = (basePath || "") + folderName + "/";
+            if (validFolders.has(folderPath)) {
+                if (!seenFolders.has(folderPath)) {
+                    seenFolders.add(folderPath);
+                    orderedItems.push({ type: "folder", card: groups[folderPath], id: "folder:" + folderPath });
+                }
+            } else {
+                orderedItems.push({ type: "file", file: f, id: f.id });
+            }
+        }
+    }
+
+    const folders = Object.values(groups).filter(g => validFolders.has(g.path));
+    return { folders, rootFiles, orderedItems };
 }
 
 /** Paints the loading/error status screen shown before repository data has arrived. */
@@ -1005,49 +1272,51 @@ function tokenizeJS(text, lang) {
 
 /** Maps a token's syntax category (and isKey flag) to the hex color used to draw it. */
 function colorForCategory(category, isKey) {
-    if (isKey) return "#9cdcfe";
+    const light = isLightTheme();
+    if (isKey) return light ? "#001080" : "#9cdcfe";
 
     switch (category) {
         case "comment":
-            return getThemeColor("--vscode-editorComment-foreground", "#6a9955");
+            return getThemeColor("--vscode-editorComment-foreground", light ? "#008000" : "#6a9955");
         case "string":
-            return "#ce9178";
+            return light ? "#a31515" : "#ce9178";
         case "number":
-            return "#b5cea8";
+            return light ? "#098658" : "#b5cea8";
         case "control-flow":
-            return "#c586c0";
+            return light ? "#af00db" : "#c586c0";
         case "keyword":
-            return "#569cd6";
+            return light ? "#0000ff" : "#569cd6";
         case "operator":
         case "normal":
-            return getThemeColor("--vscode-editor-foreground", "#cccccc");
+            return getThemeColor("--vscode-editor-foreground", light ? "#333333" : "#cccccc");
         case "function":
-            return "#dcdcaa";
+            return light ? "#795e26" : "#dcdcaa";
         case "type":
-            return "#4ec9b0";
+            return light ? "#267f99" : "#4ec9b0";
         case "heading":
-            return "#9cdcfe";
+            return light ? "#0000ff" : "#9cdcfe";
         case "variable":
         case "property":
         case "css-property":
         case "attribute":
-            return "#9cdcfe";
+            return light ? "#001080" : "#9cdcfe";
         case "selector":
         case "css-value":
-            return "#ce9178";
+            return light ? "#800000" : "#ce9178";
         case "tag":
-            return "#569cd6";
+            return light ? "#800000" : "#569cd6";
         case "tag-bracket":
-            return "#808080";
+            return light ? "#800000" : "#808080";
         default:
-            return getThemeColor("--vscode-editor-foreground", "#d4d4d4");
+            return getThemeColor("--vscode-editor-foreground", light ? "#333333" : "#d4d4d4");
     }
 }
 
 let imageCache = {}; // keyed by media URI; cleared on repository data updates (see "data" handler)
 
 /** Draws img into the x,y,w,h rect scaled to fit while preserving its aspect ratio (object-fit: contain), background-filling the rest. */
-function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
+function drawAspectFit(ctx, img, x, y, w, h, bgStyle = null) {
+    const fillBg = bgStyle || (MEDIA_CONFIG ? MEDIA_CONFIG.tileBackground : "#1e1e24");
     const imgWidth = img.naturalWidth || img.width;
     const imgHeight = img.naturalHeight || img.height;
 
@@ -1071,7 +1340,7 @@ function drawAspectFit(ctx, img, x, y, w, h, bgStyle = "#1e1e24") {
     const drawX = x + (w - drawW) / 2;
     const drawY = y + (h - drawH) / 2;
 
-    ctx.fillStyle = bgStyle;
+    ctx.fillStyle = fillBg;
     ctx.fillRect(x, y, w, h);
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
 }
@@ -1469,31 +1738,14 @@ function fitPathText(path, maxWidth) {
 // MARK: drawBorder
 const TILE_PADDING = 4;       // inset from cell edge to the card's fill/stroke rect
 const TILE_DIM_ALPHA = 0.15;  // opacity applied when a tile is unfocused or being dragged
-const TILE_BACKGROUND = getThemeColor("--vscode-editor-background", "#1e1e24");
 const TILE_LABEL_FONT = "10px system-ui, sans-serif";
 const TILE_LABEL_OFFSET_X = 10;
 const TILE_LABEL_OFFSET_Y = 18;
 const TILE_LABEL_WIDTH_MARGIN = 36; // reserved space so the label doesn't run under the close button
-const TILE_LABEL_COLOR = {
-    searchMatch: ACCENT_SEARCH,
-    error: getThemeColor("--vscode-list-errorForeground", "#f14c4c"),
-    active: getThemeColor("--vscode-foreground", "#ffffff"),
-    normal: getThemeColor("--vscode-descriptionForeground", "#a0a0a5"),
-    modified: getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", "#e2c08d"),
-    added: getThemeColor("--vscode-gitDecoration-untrackedResourceForeground", "#73c991")
-};
 const TILE_THUMBNAIL_OFFSET_X = 10;
 const TILE_THUMBNAIL_OFFSET_Y = 24;
 const TILE_THUMBNAIL_WIDTH_MARGIN = 20;
 const TILE_THUMBNAIL_HEIGHT_MARGIN = 34;
-
-const BORDER_STYLES = {
-    searchMatch: { color: ACCENT_SEARCH, width: 2.5 },
-    active:      { color: getThemeColor("--vscode-focusBorder", "#007fd4"), width: 2.5 },
-    open:        { color: ACCENT_RECENCY, width: 1.8 },
-    dragging:    { color: "#648fff", width: 1.8 },
-    default:     { color: getThemeColor("--vscode-widget-border", "rgba(255, 255, 255, 0.08)"), width: 1 }
-};
 
 /** Strokes a tile's priority-ordered border: search match > active > open > default. */
 function drawTileBorder(x, y, w, h, isSearchMatch, isActive, isOpen) {
@@ -1512,7 +1764,6 @@ const CLOSE_BTN_MARGIN_RIGHT = 20;
 const CLOSE_BTN_MARGIN_TOP = 10;
 const CLOSE_BTN_GLYPH_Y_OFFSET = 8;
 const CLOSE_BTN_FONT = "12px system-ui, sans-serif";
-const CLOSE_BTN_COLOR = getThemeColor("--vscode-descriptionForeground", "#707075");
 
 /** Draws the '×' close button on an open tile and stores its hit-box on file._closeBtn. */
 function drawCloseBtn(file, x, y, w) {
@@ -1616,18 +1867,21 @@ function render() {
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+    refreshThemeTokens();
+    const light = isLightTheme();
+
     if (!data) {
         drawStatus();
         return;
     }
 
     ctx.clearRect(0, 0, rectW, rectH);
-    ctx.fillStyle = getThemeColor("--vscode-editor-background", "#18181c");
+    ctx.fillStyle = getThemeColor("--vscode-editor-background", light ? "#f8f8f8" : "#18181c");
     ctx.fillRect(0, 0, rectW, rectH);
 
     const filteredFiles = getFilteredFiles();
     if (filteredFiles.length === 0) {
-        ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", "#707075");
+        ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", light ? "#717171" : "#707075");
         ctx.font = "14px system-ui";
         ctx.fillText("No files match the active folder or search query.", 24, 80);
         return;
@@ -1644,6 +1898,7 @@ function render() {
 
     const availableW = rectW - (GRID_SIDE_MARGIN * 2);
     const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
+    const overviewAspect = availableW / Math.max(1, availableH);
 
     const rootCellW = availableW / gridCols;
     const rootCellH = availableH / gridRows;
@@ -1667,14 +1922,26 @@ function render() {
 
     let cellsTooSmall = false;
     let localFolderGrid = null;
+    let localSpanningLayout = null;
     let folderCellW = rootCellW;
     let folderCellH = rootCellH;
 
+    const isSpanningMode = data && data.mode === "spanning_grid";
+
     if (shouldOpenFolder) {
-        localFolderGrid = buildStableGrid(scopedFiles.length);
-        folderCellW = availableW / Math.max(1, localFolderGrid.cols);
-        folderCellH = availableH / Math.max(1, localFolderGrid.rows);
-        cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
+        const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
+        if (isSpanningMode) {
+            localSpanningLayout = buildSpanningGridLocal(scopedFiles, overviewAspect, folderOrder);
+            folderCellW = availableW / Math.max(1, localSpanningLayout.cols);
+            folderCellH = availableH / Math.max(1, localSpanningLayout.rows);
+            cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
+        } else {
+            const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
+            localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
+            folderCellW = availableW / Math.max(1, localFolderGrid.cols);
+            folderCellH = availableH / Math.max(1, localFolderGrid.rows);
+            cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
+        }
     } else {
         cellsTooSmall = rootCellsTooSmall;
     }
@@ -1690,137 +1957,371 @@ function render() {
     data._folderCards.length = 0;
 
     if (cellsTooSmall) {
-        // Subfolder card mode: group files into immediate child folders and render
-        // each as a clickable card. Root-level files get individual tiles. The local
-        // buildStableGrid duplicate computes a fresh grid for these items.
-        const { folders, rootFiles } = getSubfolderGroups(scopedFiles, focusedFolder === "(root files)/" ? "" : focusedFolder);
-        const totalItems = folders.length + rootFiles.length;
+        // Subfolder card mode: group files into immediate child folders and render each as a clickable card.
+        const { folders, rootFiles, orderedItems } = getSubfolderGroups(scopedFiles, focusedFolder === "(root files)/" ? "" : focusedFolder);
+
+        let displayItems = [];
+        const itemById = new Map(orderedItems.map(it => [it.id, it]));
+        if (data.cardOrder && Array.isArray(data.cardOrder) && data.cardOrder.length > 0) {
+            const seenIds = new Set();
+            for (const cid of data.cardOrder) {
+                if (!cid) {
+                    displayItems.push(null);
+                } else {
+                    const it = itemById.get(cid);
+                    if (it) {
+                        displayItems.push(it);
+                        seenIds.add(cid);
+                    } else {
+                        displayItems.push(null);
+                    }
+                }
+            }
+            for (const it of orderedItems) {
+                if (!seenIds.has(it.id)) {
+                    displayItems.push(it);
+                }
+            }
+        } else {
+            displayItems = orderedItems;
+        }
+
+        const totalItems = displayItems.length;
         if (totalItems === 0) return;
 
-        const localGrid = buildStableGrid(totalItems);
+        const localGrid = buildStableGrid(totalItems, overviewAspect);
         const localCellW = availableW / localGrid.cols;
         const localCellH = availableH / localGrid.rows;
 
+        activeRenderGrid = {
+            cols: localGrid.cols,
+            rows: localGrid.rows,
+            cellW: localCellW,
+            cellH: localCellH,
+            isFolderCards: true,
+            layout: localGrid,
+            orderedItems: displayItems
+        };
+
         let slotIdx = 0;
 
-        // Render folder cards
-        for (const group of folders) {
+        for (const item of displayItems) {
             if (slotIdx >= localGrid.slots.length) break;
             const slot = localGrid.slots[slotIdx++];
+            if (!item) continue;
             const x = GRID_SIDE_MARGIN + slot[0] * localCellW;
             const y = GRID_TOP_MARGIN + slot[1] * localCellH;
 
-            if (y + localCellH < -50 || y > rectH + 50) continue;
-
-            const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? false : (group.path.startsWith(focusedFolder) || focusedFolder.startsWith(group.path)));
-
-            ctx.save();
-            if (!isFolderMatch) ctx.globalAlpha = 0.15;
-
-            // Card background with folder accent
-            ctx.fillStyle = getThemeColor("--vscode-editor-background", "#1e1e24");
-            ctx.fillRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
-
-            ctx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.4);
-            ctx.lineWidth = 1.5;
-            ctx.strokeRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
-
-            // Folder icon accent bar
-            ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
-            ctx.fillRect(x + 4, y + 4, localCellW - 8, Math.min(22, localCellH - 8));
-
-            // Folder name
-            ctx.fillStyle = getThemeColor("--vscode-foreground", "#c4b5fd");
-            const fontSize = Math.max(8, Math.min(11, localCellW / 12));
-            ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
-            const maxLabelW = localCellW - 24;
-            let label = group.name;
-            if (ctx.measureText(label).width > maxLabelW) {
-                while (label.length > 1 && ctx.measureText(label + "…").width > maxLabelW) {
-                    label = label.slice(0, -1);
+            if (item.type === "folder") {
+                const group = item.card;
+                if (y + localCellH < -50 || y > rectH + 50) {
+                    data._folderCards.push({
+                        id: item.id,
+                        x: x + 4,
+                        y: y + 4,
+                        w: localCellW - 8,
+                        h: localCellH - 8,
+                        folderPath: group.path,
+                        group: group,
+                        _slot: slot
+                    });
+                    continue;
                 }
-                label += "…";
+
+                const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? false : (group.path.startsWith(focusedFolder) || focusedFolder.startsWith(group.path)));
+
+                ctx.save();
+                if (!isFolderMatch) ctx.globalAlpha = 0.15;
+
+                // Card background with folder accent
+                ctx.fillStyle = TILE_BACKGROUND;
+                ctx.fillRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
+
+                ctx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.4);
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(x + 4, y + 4, localCellW - 8, localCellH - 8);
+
+                // Folder icon accent bar
+                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
+                ctx.fillRect(x + 4, y + 4, localCellW - 8, Math.min(22, localCellH - 8));
+
+                // Folder name
+                ctx.fillStyle = getThemeColor("--vscode-foreground", light ? "#3730a3" : "#c4b5fd");
+                const fontSize = Math.max(8, Math.min(11, localCellW / 12));
+                ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
+                const maxLabelW = localCellW - 24;
+                let label = group.name;
+                if (ctx.measureText(label).width > maxLabelW) {
+                    while (label.length > 1 && ctx.measureText(label + "…").width > maxLabelW) {
+                        label = label.slice(0, -1);
+                    }
+                    label += "…";
+                }
+                ctx.fillText(label, x + 10, y + 18);
+
+                // File count
+                ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", light ? "#6b7280" : "#707075");
+                ctx.font = `${Math.max(7, fontSize - 2)}px system-ui, sans-serif`;
+                const countText = `${group.fileCount} file${group.fileCount !== 1 ? "s" : ""}`;
+                ctx.fillText(countText, x + 10, y + 18 + fontSize + 2);
+
+                // Mini-mosaic preview of files inside folder (cached spanning layout)
+                const mosaicX = x + 8;
+                const mosaicY = y + 36;
+                const mosaicW = localCellW - 16;
+                const mosaicH = localCellH - 46;
+
+                if (mosaicW >= 24 && mosaicH >= 16 && group.files && group.files.length > 0) {
+                    if (isSpanningMode) {
+                        if (!group._spanningLayout || group._spanningLayout._aspect !== overviewAspect) {
+                            group._spanningLayout = buildSpanningGridLocal(group.files, overviewAspect);
+                            group._spanningLayout._aspect = overviewAspect;
+                        }
+                        const spanningLayout = group._spanningLayout;
+                        const miniCols = spanningLayout.cols;
+                        const miniRows = spanningLayout.rows;
+                        const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
+
+                        const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
+                        const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
+
+                        for (const placement of spanningLayout.placements) {
+                            const pf = placement.file;
+                            const miniX = mosaicX + placement.col * (miniCellW + gap);
+                            const miniY = mosaicY + placement.row * (miniCellH + gap);
+                            const miniFileH = placement.nCells * miniCellH + (placement.nCells - 1) * gap;
+
+                            const isOpen = openFilesSet.has(pf.uri);
+                            const isActive = pf.uri === activeFileUri;
+                            const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
+
+                            ctx.fillStyle = isSearchMatch
+                                ? withAlpha(ACCENT_SEARCH, 0.35)
+                                : (light ? "#eaeaf0" : "#141418");
+                            ctx.fillRect(miniX, miniY, miniCellW, miniFileH);
+
+                            ctx.strokeStyle = isSearchMatch
+                                ? ACCENT_SEARCH
+                                : (isActive
+                                    ? getThemeColor("--vscode-focusBorder", "#007fd4")
+                                    : (isOpen
+                                        ? ACCENT_RECENCY
+                                        : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
+                            ctx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
+                            ctx.strokeRect(miniX, miniY, miniCellW, miniFileH);
+
+                            if (pf.lines && pf.lines.length > 0 && miniFileH >= 10 && miniCellW >= 8) {
+                                const maxLines = Math.min(pf.lines.length, Math.floor((miniFileH - 4) / 2));
+                                for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
+                                    const line = pf.lines[lineIdx];
+                                    const lineY = miniY + 3 + lineIdx * 2;
+                                    const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
+                                    const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
+                                    ctx.fillStyle = withAlpha(colorForCategory(line.category || "normal", false), 0.75);
+                                    ctx.fillRect(miniX + 2 + lineIndent, lineY, Math.max(1, lineWidth - lineIndent), 1);
+                                }
+                            } else if (miniFileH >= 4 && miniCellW >= 4 && pf.gitStatus) {
+                                ctx.fillStyle = pf.gitStatus === "modified"
+                                    ? getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", "#e2c08d")
+                                    : getThemeColor("--vscode-gitDecoration-untrackedResourceForeground", "#73c991");
+                                ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniFileH - 2));
+                            }
+                        }
+                    } else {
+                        if (!group._miniGrid || group._miniGrid._aspect !== overviewAspect) {
+                            group._miniGrid = buildStableGrid(group.files.length, overviewAspect);
+                            group._miniGrid._aspect = overviewAspect;
+                        }
+                        const miniGrid = group._miniGrid;
+                        const miniCols = miniGrid.cols;
+                        const miniRows = miniGrid.rows;
+                        const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
+
+                        const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
+                        const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
+
+                        for (let mIdx = 0; mIdx < group.files.length; mIdx++) {
+                            if (mIdx >= miniGrid.slots.length) break;
+                            const pf = group.files[mIdx];
+                            const miniSlot = miniGrid.slots[mIdx];
+                            const miniX = mosaicX + miniSlot[0] * (miniCellW + gap);
+                            const miniY = mosaicY + miniSlot[1] * (miniCellH + gap);
+
+                            const isOpen = openFilesSet.has(pf.uri);
+                            const isActive = pf.uri === activeFileUri;
+                            const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
+
+                            ctx.fillStyle = isSearchMatch
+                                ? withAlpha(ACCENT_SEARCH, 0.35)
+                                : (light ? "#eaeaf0" : "#141418");
+                            ctx.fillRect(miniX, miniY, miniCellW, miniCellH);
+
+                            ctx.strokeStyle = isSearchMatch
+                                ? ACCENT_SEARCH
+                                : (isActive
+                                    ? getThemeColor("--vscode-focusBorder", "#007fd4")
+                                    : (isOpen
+                                        ? ACCENT_RECENCY
+                                        : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
+                            ctx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
+                            ctx.strokeRect(miniX, miniY, miniCellW, miniCellH);
+
+                            if (pf.lines && pf.lines.length > 0 && miniCellH >= 10 && miniCellW >= 8) {
+                                const maxLines = Math.min(pf.lines.length, Math.floor((miniCellH - 4) / 2));
+                                for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
+                                    const line = pf.lines[lineIdx];
+                                    const lineY = miniY + 3 + lineIdx * 2;
+                                    const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
+                                    const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
+                                    ctx.fillStyle = withAlpha(colorForCategory(line.category || "normal", false), 0.75);
+                                    ctx.fillRect(miniX + 2 + lineIndent, lineY, Math.max(1, lineWidth - lineIndent), 1);
+                                }
+                            } else if (miniCellH >= 4 && miniCellW >= 4 && pf.gitStatus) {
+                                ctx.fillStyle = pf.gitStatus === "modified"
+                                    ? getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", "#e2c08d")
+                                    : getThemeColor("--vscode-gitDecoration-untrackedResourceForeground", "#73c991");
+                                ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniFileH - 2));
+                            }
+                        }
+                    }
+                }
+
+                // Store click target for folder cards
+                data._folderCards.push({
+                    id: item.id,
+                    x: x + 4,
+                    y: y + 4,
+                    w: localCellW - 8,
+                    h: localCellH - 8,
+                    folderPath: group.path,
+                    group: group,
+                    _slot: slot
+                });
+
+                ctx.restore();
+            } else {
+                const file = item.file;
+                const fileH = localCellH;
+                file._cell = { id: item.id, x, y, w: localCellW, h: fileH, _slot: slot };
+
+                if (y + fileH < -50 || y > rectH + 50) continue;
+
+                const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
+                const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+
+                drawFileTile(file, x, y, localCellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
             }
-            ctx.fillText(label, x + 10, y + 18);
-
-            // File count
-            ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", "#707075");
-            ctx.font = `${Math.max(7, fontSize - 2)}px system-ui, sans-serif`;
-            const countText = `${group.fileCount} file${group.fileCount !== 1 ? "s" : ""}`;
-            ctx.fillText(countText, x + 10, y + 18 + fontSize + 2);
-
-            // Density preview bar — color-coded horizontal bar proportional to file count
-            if (localCellH > 50) {
-                const barY = y + localCellH - 16;
-                const barW = Math.min(localCellW - 20, Math.max(10, (group.fileCount / 50) * (localCellW - 20)));
-                const hue = Math.max(0, 270 - group.fileCount * 3);
-                ctx.fillStyle = `hsla(${hue}, 60%, 55%, 0.5)`;
-                ctx.fillRect(x + 10, barY, barW, 6);
-            }
-
-            // Store click target for folder cards
-            data._folderCards.push({
-                x: x + 4,
-                y: y + 4,
-                w: localCellW - 8,
-                h: localCellH - 8,
-                folderPath: group.path
-            });
-
-            ctx.restore();
-        }
-
-        // Render root-level files as individual tiles in the same grid
-        for (const file of rootFiles) {
-            if (slotIdx >= localGrid.slots.length) break;
-            const slot = localGrid.slots[slotIdx++];
-            const col = slot[0];
-            const row = slot[1];
-
-            const x = GRID_SIDE_MARGIN + col * localCellW;
-            const y = GRID_TOP_MARGIN + row * localCellH;
-            const fileH = localCellH;
-
-            file._cell = { x, y, w: localCellW, h: fileH };
-
-            if (y + fileH < -50 || y > rectH + 50) continue;
-
-            const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
-            const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
-
-            drawFileTile(file, x, y, localCellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
         }
     } else if (shouldOpenFolder) {
         // Directory drill-down mode — render all files in focusedFolder as a Thumbview grid
-        const slots = localFolderGrid ? localFolderGrid.slots : [];
         const cellW = folderCellW;
         const cellH = folderCellH;
+        const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
 
-        for (let i = 0; i < scopedFiles.length; i++) {
-            const file = scopedFiles[i];
-            const slot = slots[i];
-            if (!slot) continue;
+        if (isSpanningMode && localSpanningLayout) {
+            activeRenderGrid = {
+                cols: localSpanningLayout.cols,
+                rows: localSpanningLayout.rows,
+                cellW: folderCellW,
+                cellH: folderCellH,
+                isFolderView: true,
+                files: scopedFiles,
+                layout: localSpanningLayout,
+                folderOrder: folderOrder
+            };
 
-            const col = slot[0];
-            const row = slot[1];
-            const nCells = file.nCells || 1;
+            for (const placement of localSpanningLayout.placements) {
+                const file = placement.file;
+                const col = placement.col;
+                const row = placement.row;
+                const nCells = placement.nCells;
 
-            const x = GRID_SIDE_MARGIN + col * cellW;
-            const y = GRID_TOP_MARGIN + row * cellH;
-            const fileH = cellH * nCells;
+                const x = GRID_SIDE_MARGIN + col * cellW;
+                const y = GRID_TOP_MARGIN + row * cellH;
+                const fileH = cellH * nCells;
 
-            file._cell = { x, y, w: cellW, h: fileH };
+                file._cell = { x, y, w: cellW, h: fileH };
 
-            if (y + fileH < -50 || y > rectH + 50) continue;
+                if (y + fileH < -50 || y > rectH + 50) continue;
 
-            const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
+            }
+        } else {
+            const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
+            localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
 
-            drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
+            activeRenderGrid = {
+                cols: localFolderGrid ? localFolderGrid.cols : 1,
+                rows: localFolderGrid ? localFolderGrid.rows : 1,
+                cellW: folderCellW,
+                cellH: folderCellH,
+                isFolderView: true,
+                files: scopedFiles,
+                layout: localFolderGrid,
+                folderOrder: folderOrder
+            };
+
+            const slots = localFolderGrid ? localFolderGrid.slots : [];
+            const scopedFilesById = new Map(scopedFiles.map(f => [f.id, f]));
+
+            if (folderOrder && folderOrder.length > 0) {
+                for (let i = 0; i < folderOrder.length && i < slots.length; i++) {
+                    const fid = folderOrder[i];
+                    if (!fid) continue;
+                    const file = scopedFilesById.get(fid);
+                    if (!file) continue;
+                    const slot = slots[i];
+                    if (!slot) continue;
+
+                    const col = slot[0];
+                    const row = slot[1];
+
+                    const x = GRID_SIDE_MARGIN + col * cellW;
+                    const y = GRID_TOP_MARGIN + row * cellH;
+                    const fileH = cellH;
+
+                    file._cell = { x, y, w: cellW, h: fileH };
+
+                    if (y + fileH < -50 || y > rectH + 50) continue;
+
+                    const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                    drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
+                }
+            } else {
+                for (let i = 0; i < scopedFiles.length; i++) {
+                    const file = scopedFiles[i];
+                    const slot = slots[i];
+                    if (!slot) continue;
+
+                    const col = slot[0];
+                    const row = slot[1];
+
+                    const x = GRID_SIDE_MARGIN + col * cellW;
+                    const y = GRID_TOP_MARGIN + row * cellH;
+                    const fileH = cellH;
+
+                    file._cell = { x, y, w: cellW, h: fileH };
+
+                    if (y + fileH < -50 || y > rectH + 50) continue;
+
+                    const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                    drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
+                }
+            }
         }
     } else {
         // Normal file tile mode — cells are large enough to render individual thumbnails
         const cellW = rootCellW;
         const cellH = rootCellH;
+
+        activeRenderGrid = {
+            cols: gridCols,
+            rows: gridRows,
+            cellW: rootCellW,
+            cellH: rootCellH,
+            isRootView: true
+        };
 
         for (let i = 0; i < filteredFiles.length; i++) {
             const file = filteredFiles[i];
@@ -1854,33 +2355,68 @@ function render() {
         }
     }
 
-    if (draggingFile) {
-        // ghost for currently-dragged file
-        const x = cursorPos.px - dragGrabOffset.x;
-        const y = cursorPos.py - dragGrabOffset.y;
-        const style = BORDER_STYLES.dragging;
-        ctx.strokeStyle = style.color;
-        ctx.lineWidth = style.width;
-        ctx.strokeRect(x, y, draggingFile._cell.w, draggingFile._cell.h);
-        ctx.fillStyle = style.color;
-        ctx.font = TILE_LABEL_FONT;
-        ctx.fillText(draggingFile._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
+    if (draggingFolder) {
+        const ghostW = draggingFolder.w || (activeRenderGrid ? activeRenderGrid.cellW : 120);
+        const ghostH = draggingFolder.h || (activeRenderGrid ? activeRenderGrid.cellH : 80);
+        const x = cursorPos.px - (dragGrabOffset ? dragGrabOffset.x : 0);
+        const y = cursorPos.py - (dragGrabOffset ? dragGrabOffset.y : 0);
+
+        ctx.strokeStyle = getThemeColor("--vscode-focusBorder", "#a855f7");
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, ghostW, ghostH);
+        ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.25);
+        ctx.fillRect(x, y, ghostW, ghostH);
+
+        ctx.fillStyle = getThemeColor("--vscode-foreground", "#ffffff");
+        ctx.font = "bold 12px system-ui, sans-serif";
+        ctx.fillText("📁 " + (draggingFolder.name || draggingFolder.folderPath), x + 8, y + 20);
 
         // drop-target outline
-        if (dragTarget.file) {
-            ctx.strokeRect(
-                dragTarget.file._cell.x,
-                dragTarget.file._cell.y,
-                dragTarget.file._cell.w,
-                dragTarget.file._cell.h
-            );  
-        } else {
+        if (dragTarget) {
+            ctx.strokeStyle = getThemeColor("--vscode-focusBorder", "#007fd4");
+            ctx.lineWidth = 2;
             ctx.strokeRect(
                 GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
                 GRID_TOP_MARGIN + dragTarget.row * dragTarget.cellH,
                 dragTarget.cellW,
                 dragTarget.cellH
             );
+        }
+    }
+
+    if (draggingFile) {
+        // ghost for currently-dragged file
+        const ghostW = draggingFile._cell ? draggingFile._cell.w : (activeRenderGrid ? activeRenderGrid.cellW : 100);
+        const ghostH = draggingFile._cell ? draggingFile._cell.h : (activeRenderGrid ? activeRenderGrid.cellH : 80);
+        const x = cursorPos.px - (dragGrabOffset ? dragGrabOffset.x : 0);
+        const y = cursorPos.py - (dragGrabOffset ? dragGrabOffset.y : 0);
+        const style = BORDER_STYLES.dragging;
+        ctx.strokeStyle = style.color;
+        ctx.lineWidth = style.width;
+        ctx.strokeRect(x, y, ghostW, ghostH);
+        ctx.fillStyle = style.color;
+        ctx.font = TILE_LABEL_FONT;
+        ctx.fillText(draggingFile._fittedLabel || draggingFile.path, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
+
+        // drop-target outline
+        if (dragTarget) {
+            ctx.strokeStyle = getThemeColor("--vscode-focusBorder", "#007fd4");
+            ctx.lineWidth = 2;
+            if (dragTarget.file && dragTarget.file._cell) {
+                ctx.strokeRect(
+                    dragTarget.file._cell.x,
+                    dragTarget.file._cell.y,
+                    dragTarget.file._cell.w,
+                    dragTarget.file._cell.h
+                );  
+            } else {
+                ctx.strokeRect(
+                    GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
+                    GRID_TOP_MARGIN + dragTarget.row * dragTarget.cellH,
+                    dragTarget.cellW,
+                    dragTarget.cellH
+                );
+            }
         }
     }
 }
@@ -1929,6 +2465,45 @@ window.addEventListener("keydown", event => {
         render();
         return;
     }
+
+    const isInputFocused = document.activeElement && (
+        document.activeElement.tagName === "INPUT" ||
+        document.activeElement.tagName === "TEXTAREA"
+    );
+
+    if (!isInputFocused) {
+        const isModifier = event.ctrlKey || event.metaKey;
+        if (isModifier && (event.key === "v" || event.key === "V")) {
+            event.preventDefault();
+            const currentTargetFolder = focusedFolder === "(root files)/" ? "" : (focusedFolder || "");
+            vscode.postMessage({ command: "pasteItem", targetFolder: currentTargetFolder });
+            return;
+        }
+        if (isModifier && (event.key === "c" || event.key === "C")) {
+            if (hoveredFile) {
+                event.preventDefault();
+                clipboardItem = { uri: hoveredFile.uri, path: hoveredFile.path, isFolder: false, isCut: false };
+                vscode.postMessage({ command: "copyFile", uri: hoveredFile.uri });
+                return;
+            }
+        }
+        if (isModifier && (event.key === "x" || event.key === "X")) {
+            if (hoveredFile) {
+                event.preventDefault();
+                clipboardItem = { uri: hoveredFile.uri, path: hoveredFile.path, isFolder: false, isCut: true };
+                vscode.postMessage({ command: "cutFile", uri: hoveredFile.uri });
+                return;
+            }
+        }
+        if (event.key === "Delete" || (event.metaKey && event.key === "Backspace")) {
+            if (hoveredFile) {
+                event.preventDefault();
+                vscode.postMessage({ command: "deleteFile", uri: hoveredFile.uri });
+                return;
+            }
+        }
+    }
+
     if (isControlModifier(event)) {
         isCtrlDown = true;
         updateHoverTooltip();
@@ -2021,6 +2596,148 @@ function updateHoverTooltip() {
 
     if (!cursorPos) {
         tooltip.style.display = "none";
+        return;
+    }
+
+    let hoveredFolderCard = null;
+    if (data && data._folderCards) {
+        for (const card of data._folderCards) {
+            if (pointInRect(card, cursorPos.px, cursorPos.py)) {
+                hoveredFolderCard = card;
+                break;
+            }
+        }
+    }
+
+    if (hoveredFolderCard) {
+        const grp = hoveredFolderCard.group || { name: hoveredFolderCard.folderPath, path: hoveredFolderCard.folderPath, fileCount: 0, files: [] };
+        
+        let openCount = 0;
+        let modifiedCount = 0;
+        let errorCount = 0;
+        const extCounts = {};
+
+        for (const f of grp.files) {
+            if (openFilesSet.has(f.uri)) openCount++;
+            if (f.gitStatus === "modified" || f.gitStatus === "added" || f.gitStatus === "untracked") modifiedCount++;
+            if (f.hasError) errorCount++;
+            const ext = f.path.includes(".") ? f.path.split(".").pop().toLowerCase() : "other";
+            extCounts[ext] = (extCounts[ext] || 0) + 1;
+        }
+
+        const topExts = Object.entries(extCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([ext, count]) => `${count} .${ext}`)
+            .join("   ");
+
+        const statusBadges = [];
+        if (openCount > 0) {
+            statusBadges.push(`<span style="color: var(--tv-accent-recency, #fe6100); font-weight: 500;">${openCount} open</span>`);
+        }
+        if (modifiedCount > 0) {
+            statusBadges.push(`<span style="color: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d); font-weight: 500;">${modifiedCount} modified</span>`);
+        }
+        if (errorCount > 0) {
+            statusBadges.push(`<span style="color: var(--vscode-list-errorForeground, #f14c4c); font-weight: 500;">${errorCount} error${errorCount > 1 ? 's' : ''}</span>`);
+        }
+        if (topExts) {
+            statusBadges.push(`<span style="color: var(--vscode-descriptionForeground, #8a8a93);">${topExts}</span>`);
+        }
+
+        // Sort files to show open, modified, and main files first
+        const sortedFiles = [...grp.files].sort((a, b) => {
+            const aOpen = openFilesSet.has(a.uri) ? 2 : 0;
+            const bOpen = openFilesSet.has(b.uri) ? 2 : 0;
+            const aMod = a.gitStatus ? 1 : 0;
+            const bMod = b.gitStatus ? 1 : 0;
+            const scoreA = aOpen + aMod;
+            const scoreB = bOpen + bMod;
+            if (scoreA !== scoreB) return scoreB - scoreA;
+            return a.path.localeCompare(b.path);
+        });
+
+        const maxPreviewFiles = 9;
+        const fileRows = sortedFiles.slice(0, maxPreviewFiles).map(f => {
+            const relName = f.path.startsWith(grp.path) ? f.path.substring(grp.path.length) : (f.path.split("/").pop() || f.path);
+            const isOpen = openFilesSet.has(f.uri);
+            const isAct = f.uri === activeFileUri;
+
+            let textColor = "var(--vscode-foreground, #cccccc)";
+            if (f.hasError) {
+                textColor = "var(--vscode-list-errorForeground, #f14c4c)";
+            } else if (f.gitStatus === "modified") {
+                textColor = "var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d)";
+            } else if (f.gitStatus === "added" || f.gitStatus === "untracked") {
+                textColor = "var(--vscode-gitDecoration-untrackedResourceForeground, #73c991)";
+            }
+
+            let statusTag = "";
+            if (isAct) {
+                statusTag = `<span class="badge" style="background: rgba(0, 127, 212, 0.2); color: #60a5fa; border: 1px solid rgba(0, 127, 212, 0.4); font-size: 9px; padding: 0 4px;">active</span>`;
+            } else if (isOpen) {
+                statusTag = `<span class="badge" style="background: rgba(254, 97, 0, 0.2); color: #fb923c; border: 1px solid rgba(245, 158, 11, 0.4); font-size: 9px; padding: 0 4px;">open</span>`;
+            }
+
+            return `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 3px 6px; border-radius: 4px; background: rgba(128, 128, 128, 0.05); font-size: 11px; gap: 8px;">
+                <span style="display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--vscode-editor-font-family, monospace);">
+                    ${ICONS.file}
+                    <span style="overflow: hidden; text-overflow: ellipsis; color: ${textColor}; font-weight: ${f.gitStatus || f.hasError ? '500' : 'normal'};">${escapeHtml(relName)}</span>
+                </span>
+                ${statusTag}
+            </div>`;
+        }).join("");
+
+        const remainingCount = grp.files.length - maxPreviewFiles;
+        const moreFooter = remainingCount > 0
+            ? `<div style="font-size: 10px; color: var(--vscode-descriptionForeground, #8a8a93); padding: 2px 6px; text-align: center;">+${remainingCount} more in directory</div>`
+            : "";
+
+        const summaryBar = statusBadges.length > 0
+            ? `<div style="font-size: 11px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; padding: 4px 8px; background: rgba(128, 128, 128, 0.08); border-radius: 4px;">${statusBadges.join("")}</div>`
+            : "";
+
+        const folderTooltipHtml = `
+            <div style="font-family: system-ui, -apple-system, sans-serif; white-space: normal; line-height: 1.4;">
+                <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.15)); padding-bottom: 6px; margin-bottom: 8px;">
+                    <div style="display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--vscode-foreground, #ffffff); font-size: 12px;">
+                        ${ICONS.folder}
+                        <span>${escapeHtml(grp.path)}</span>
+                    </div>
+                    <span class="badge" style="font-size: 10px; font-weight: 600; padding: 1px 6px;">${grp.fileCount} files</span>
+                </div>
+                ${summaryBar}
+                <div style="display: flex; flex-direction: column; gap: 2px;">
+                    ${fileRows}
+                    ${moreFooter}
+                </div>
+            </div>
+        `;
+
+        tooltip.innerHTML = folderTooltipHtml;
+        const width = 340;
+        tooltip.style.width = `${width}px`;
+        tooltip.style.display = "block";
+
+        const gap = TOOLTIP_CONFIG.gap;
+        const cardCenterX = hoveredFolderCard.x + hoveredFolderCard.w / 2;
+        let tx;
+        if (cardCenterX > window.innerWidth / 2) {
+            tx = hoveredFolderCard.x - gap - width;
+            if (tx < TOOLTIP_CONFIG.viewportMargin) tx = TOOLTIP_CONFIG.viewportMargin;
+        } else {
+            tx = hoveredFolderCard.x + hoveredFolderCard.w + gap;
+            if (tx + width > window.innerWidth - TOOLTIP_CONFIG.viewportMargin) {
+                tx = window.innerWidth - width - TOOLTIP_CONFIG.viewportMargin;
+            }
+        }
+        const ty = Math.max(
+            TOOLTIP_CONFIG.viewportMargin,
+            Math.min(window.innerHeight - 260 - TOOLTIP_CONFIG.viewportMargin, hoveredFolderCard.y)
+        );
+        tooltip.style.left = `${tx}px`;
+        tooltip.style.top = `${ty}px`;
         return;
     }
 
@@ -2246,7 +2963,18 @@ canvas.addEventListener("mousemove", event => {
     cursorPos = getCanvasPos(event);
     hoveredFile = findFileAt(cursorPos.px, cursorPos.py);
 
-    if (candidateFile && !draggingFile) {
+    if (candidateFolder && !draggingFolder && !draggingFile) {
+        const dx = Math.abs(candidateFolder.startX - cursorPos.px);
+        const dy = Math.abs(candidateFolder.startY - cursorPos.py);
+
+        // only start dragging if cursor has moved more than the threshold
+        if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
+            draggingFolder = candidateFolder.card;
+            candidateFolder = null;
+        }
+    }
+
+    if (candidateFile && !draggingFile && !draggingFolder) {
         const dx = Math.abs(candidateFile.startX - cursorPos.px);
         const dy = Math.abs(candidateFile.startY - cursorPos.py);
 
@@ -2256,7 +2984,7 @@ canvas.addEventListener("mousemove", event => {
             candidateFile = null;
         }
     }
-    if (draggingFile) {
+    if (draggingFile || draggingFolder) {
         if (!dragRafId) {
             dragRafId = requestAnimationFrame(() => {
                 dragRafId = null;
@@ -2290,23 +3018,84 @@ canvas.addEventListener("mouseup", event => {
     candidateFile = null;
     candidateFolder = null;
 
+    if (draggingFolder) {
+        updateDragTarget();
+
+        if (activeRenderGrid && activeRenderGrid.isFolderCards) {
+            if (dragTarget && dragTarget.item && dragTarget.item.id !== ("folder:" + draggingFolder.folderPath)) {
+                vscode.postMessage({
+                    command: "swapCardItems",
+                    sourceId: "folder:" + draggingFolder.folderPath,
+                    targetId: dragTarget.item.id
+                });
+            } else if (dragTarget && !dragTarget.item) {
+                const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
+                    ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
+                    : -1;
+                const currentCardIds = activeRenderGrid.orderedItems.map(it => it ? it.id : "");
+                vscode.postMessage({
+                    command: "swapCardItems",
+                    sourceId: "folder:" + draggingFolder.folderPath,
+                    targetId: null,
+                    targetIsEmpty: true,
+                    targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
+                    maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
+                    currentCardIds
+                });
+            }
+        } else if (dragTarget) {
+            vscode.postMessage({
+                command: "reorderFolder",
+                sourceFolder: draggingFolder.folderPath,
+                targetFolder: dragTarget.file ? dragTarget.file.path : null,
+                targetCol: dragTarget.col,
+                targetRow: dragTarget.row
+            });
+        }
+
+        clearDragState();
+        render();
+        return;
+    }
+
     if (draggingFile) {
         updateDragTarget();
 
-        // Grid-slot targeting — targetId is the occupied slot's file id, or null when
-        // targetIsEmpty; targetCol/targetRow/targetGridCols let the host compute an
-        // array index for empty-slot drops without recomputing (and risking disagreeing
-        // with) the exact cols value this payload was rendered against. See the
-        // "reorderFile" handler in extension.ts (keep both ends in sync).
-        vscode.postMessage({
-            command: "reorderFile",
-            sourceId: draggingFile.id,
-            targetId: dragTarget.file ? dragTarget.file.id : null,
-            targetIsEmpty: !dragTarget.file,
-            targetCol: dragTarget.col,
-            targetRow: dragTarget.row,
-            targetGridCols: data.layout.cols
-        });
+        if (activeRenderGrid && activeRenderGrid.isFolderCards) {
+            if (dragTarget && dragTarget.item && dragTarget.item.id !== draggingFile.id) {
+                vscode.postMessage({
+                    command: "swapCardItems",
+                    sourceId: draggingFile.id,
+                    targetId: dragTarget.item.id
+                });
+            } else if (dragTarget && !dragTarget.item) {
+                const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
+                    ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
+                    : -1;
+                const currentCardIds = activeRenderGrid.orderedItems.map(it => it ? it.id : "");
+                vscode.postMessage({
+                    command: "swapCardItems",
+                    sourceId: draggingFile.id,
+                    targetId: null,
+                    targetIsEmpty: true,
+                    targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
+                    maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
+                    currentCardIds
+                });
+            }
+        } else if (dragTarget) {
+            vscode.postMessage({
+                command: "reorderFile",
+                sourceId: draggingFile.id,
+                targetId: dragTarget.file ? dragTarget.file.id : null,
+                targetIsEmpty: !dragTarget.file,
+                targetCol: dragTarget.col,
+                targetRow: dragTarget.row,
+                targetGridCols: dragTarget.gridCols || data.layout.cols,
+                targetGridRows: (activeRenderGrid && activeRenderGrid.rows) || data.layout.rows,
+                focusedFolder: focusedFolder || ""
+            });
+        }
 
         clearDragState();
         render();
@@ -2469,106 +3258,263 @@ canvas.addEventListener("contextmenu", event => {
         }
     }
 
-    if (!targetFile) {
-        hideContextMenu();
-        return;
+    let targetFolderCard = null;
+    if (!targetFile && data._folderCards) {
+        for (const card of data._folderCards) {
+            if (pointInRect(card, px, py)) {
+                targetFolderCard = card;
+                break;
+            }
+        }
     }
 
     tooltip.style.display = "none";
 
-    const isOpen = openFiles.includes(targetFile.uri);
+    const isMacPlatform = /Mac|iPod|iPhone|iPad/.test(navigator.platform || "") || /Mac/.test(navigator.userAgent || "");
 
-    contextMenu.innerHTML = `
-        <div class="menu-item" id="menu-open">Open</div>
-        <div class="menu-item" id="menu-open-side">Open to the Side</div>
-        <div class="menu-item" id="menu-open-preview">Open Preview</div>
-        <div class="menu-separator"></div>
-        <div class="menu-item" id="menu-select-compare">Select for Compare</div>
-        <div class="menu-item" id="menu-compare-selected">Compare with Selected</div>
-        <div class="menu-separator"></div>
-        <div class="menu-item" id="menu-reveal">Reveal in Explorer</div>
-        <div class="menu-item" id="menu-open-containing-folder">Open Containing Folder</div>
-        <div class="menu-separator"></div>
-        <div class="menu-item" id="menu-cut">Cut</div>
-        <div class="menu-item" id="menu-copy">Copy</div>
-        <div class="menu-item" id="menu-copy-path">Copy Path</div>
-        <div class="menu-item" id="menu-copy-rel-path">Copy Relative Path</div>
-        <div class="menu-separator"></div>
-        <div class="menu-item" id="menu-rename">Rename...</div>
-        <div class="menu-item danger" id="menu-delete">Delete</div>
-        <div class="menu-separator"></div>
-        <div class="menu-item" id="menu-ignore">Ignore in Thumbview</div>
-    `;
+    function renderMenuItem(id, label, shortcut = "", danger = false) {
+        return `<div class="menu-item${danger ? " danger" : ""}" id="${id}"><span class="menu-item-label">${escapeHtml(label)}</span>${shortcut ? `<span class="menu-item-key">${escapeHtml(shortcut)}</span>` : ""}</div>`;
+    }
 
-    document.getElementById("menu-open").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "jump", uri: targetFile.uri, line: 0 });
-    };
+    if (targetFile) {
+        contextMenu.innerHTML = `
+            ${renderMenuItem("menu-open", "Open")}
+            ${renderMenuItem("menu-open-side", "Open to the Side", isMacPlatform ? "⌥Enter" : "Ctrl+Enter")}
+            ${renderMenuItem("menu-reveal", "Reveal in Explorer", isMacPlatform ? "⇧⌥R" : "Shift+Alt+R")}
+            ${renderMenuItem("menu-open-containing-folder", "Open Containing Folder", isMacPlatform ? "⌥⌘R" : "Ctrl+Alt+R")}
+            ${renderMenuItem("menu-open-with", "Open With...")}
+            ${renderMenuItem("menu-open-terminal", "Open in Integrated Terminal")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-select-compare", "Select for Compare")}
+            ${renderMenuItem("menu-compare-selected", "Compare with Selected")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-open-timeline", "Open Timeline")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-cut", "Cut", isMacPlatform ? "⌘X" : "Ctrl+X")}
+            ${renderMenuItem("menu-copy", "Copy", isMacPlatform ? "⌘C" : "Ctrl+C")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-copy-path", "Copy Path", isMacPlatform ? "⌥⌘C" : "Ctrl+Alt+C")}
+            ${renderMenuItem("menu-copy-rel-path", "Copy Relative Path", isMacPlatform ? "⇧⌥⌘C" : "Ctrl+Shift+Alt+C")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-run-tests", "Run Tests")}
+            ${renderMenuItem("menu-debug-tests", "Debug Tests")}
+            ${renderMenuItem("menu-coverage-tests", "Run Tests with Coverage")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-rename", "Rename...", isMacPlatform ? "Enter" : "F2")}
+            ${renderMenuItem("menu-delete", "Delete", isMacPlatform ? "⌘⌫" : "Delete", true)}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-ignore", "Ignore in Thumbview")}
+        `;
 
-    document.getElementById("menu-open-side").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "openToSide", uri: targetFile.uri });
-    };
+        document.getElementById("menu-open").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "jump", uri: targetFile.uri, line: 0 });
+        };
+        document.getElementById("menu-open-side").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "openToSide", uri: targetFile.uri });
+        };
+        document.getElementById("menu-reveal").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "revealInFiles", uri: targetFile.uri });
+        };
+        document.getElementById("menu-open-containing-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "openContainingFolder", uri: targetFile.uri });
+        };
+        document.getElementById("menu-open-with").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "openWith", uri: targetFile.uri });
+        };
+        document.getElementById("menu-open-terminal").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "openInTerminal", uri: targetFile.uri });
+        };
+        document.getElementById("menu-select-compare").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "selectForCompare", uri: targetFile.uri });
+        };
+        document.getElementById("menu-compare-selected").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "compareWithSelected", uri: targetFile.uri });
+        };
+        document.getElementById("menu-open-timeline").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "openTimeline", uri: targetFile.uri });
+        };
+        document.getElementById("menu-cut").onclick = () => {
+            hideContextMenu();
+            clipboardItem = { uri: targetFile.uri, path: targetFile.path, isFolder: false, isCut: true };
+            vscode.postMessage({ command: "cutFile", uri: targetFile.uri });
+        };
+        document.getElementById("menu-copy").onclick = () => {
+            hideContextMenu();
+            clipboardItem = { uri: targetFile.uri, path: targetFile.path, isFolder: false, isCut: false };
+            vscode.postMessage({ command: "copyFile", uri: targetFile.uri });
+        };
+        document.getElementById("menu-copy-path").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "copyPath", uri: targetFile.uri });
+        };
+        document.getElementById("menu-copy-rel-path").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "copyRelativePath", uri: targetFile.uri });
+        };
+        document.getElementById("menu-run-tests").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "runTests", uri: targetFile.uri });
+        };
+        document.getElementById("menu-debug-tests").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "debugTests", uri: targetFile.uri });
+        };
+        document.getElementById("menu-coverage-tests").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "coverageTests", uri: targetFile.uri });
+        };
+        document.getElementById("menu-rename").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "renameFile", uri: targetFile.uri, path: targetFile.path });
+        };
+        document.getElementById("menu-delete").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "deleteFile", uri: targetFile.uri });
+        };
+        document.getElementById("menu-ignore").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "ignoreFile", uri: targetFile.uri, path: targetFile.path });
+        };
+    } else if (targetFolderCard) {
+        contextMenu.innerHTML = `
+            ${renderMenuItem("menu-open-folder", "Open Folder")}
+            ${renderMenuItem("menu-reveal-folder", "Reveal in Explorer", isMacPlatform ? "⇧⌥R" : "Shift+Alt+R")}
+            ${renderMenuItem("menu-terminal-folder", "Open in Integrated Terminal")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-new-file-folder", "New File...")}
+            ${renderMenuItem("menu-new-subfolder", "New Folder...")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-cut-folder", "Cut Folder", isMacPlatform ? "⌘X" : "Ctrl+X")}
+            ${renderMenuItem("menu-copy-folder", "Copy Folder", isMacPlatform ? "⌘C" : "Ctrl+C")}
+            ${renderMenuItem("menu-paste-folder", "Paste", isMacPlatform ? "⌘V" : "Ctrl+V")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-copy-folder-path", "Copy Path", isMacPlatform ? "⌥⌘C" : "Ctrl+Alt+C")}
+            ${renderMenuItem("menu-copy-folder-rel-path", "Copy Relative Path", isMacPlatform ? "⇧⌥⌘C" : "Ctrl+Shift+Alt+C")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-rename-folder", "Rename...", isMacPlatform ? "Enter" : "F2")}
+            ${renderMenuItem("menu-delete-folder", "Delete Folder", isMacPlatform ? "⌘⌫" : "Delete", true)}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-ignore-folder", "Ignore Folder in Thumbview")}
+        `;
 
-    document.getElementById("menu-open-preview").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "openPreview", uri: targetFile.uri });
-    };
+        document.getElementById("menu-open-folder").onclick = () => {
+            hideContextMenu();
+            focusedFolder = targetFolderCard.folderPath;
+            updateBreadcrumbs();
+            render();
+        };
+        document.getElementById("menu-reveal-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "revealFolder", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-terminal-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "openFolderInTerminal", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-new-file-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "newFile", targetFolder: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-new-subfolder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "newFolder", targetFolder: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-cut-folder").onclick = () => {
+            hideContextMenu();
+            clipboardItem = { folderPath: targetFolderCard.folderPath, isFolder: true, isCut: true };
+            vscode.postMessage({ command: "cutFolder", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-copy-folder").onclick = () => {
+            hideContextMenu();
+            clipboardItem = { folderPath: targetFolderCard.folderPath, isFolder: true, isCut: false };
+            vscode.postMessage({ command: "copyFolder", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-paste-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "pasteItem", targetFolder: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-copy-folder-path").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "copyFolderPath", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-copy-folder-rel-path").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "copyFolderRelativePath", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-rename-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "renameFolder", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-delete-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "deleteFolder", folderPath: targetFolderCard.folderPath });
+        };
+        document.getElementById("menu-ignore-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "ignoreFolder", folderPath: targetFolderCard.folderPath });
+        };
+    } else {
+        const currentTargetFolder = focusedFolder === "(root files)/" ? "" : (focusedFolder || "");
+        contextMenu.innerHTML = `
+            ${renderMenuItem("menu-space-new-file", "New File...")}
+            ${renderMenuItem("menu-space-new-folder", "New Folder...")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-space-paste", "Paste", isMacPlatform ? "⌘V" : "Ctrl+V")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-space-expand", "Expand Grid Space")}
+            ${renderMenuItem("menu-space-reduce", "Reduce Grid Space")}
+            <div class="menu-separator"></div>
+            ${renderMenuItem("menu-space-reflow", "Reflow Layout")}
+            ${focusedFolder ? renderMenuItem("menu-space-root", "Show All Files (Root)") : renderMenuItem("menu-space-refresh", "Refresh View")}
+        `;
 
-    document.getElementById("menu-select-compare").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "selectForCompare", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-compare-selected").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "compareWithSelected", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-reveal").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "revealInFiles", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-open-containing-folder").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "openContainingFolder", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-cut").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "cutFile", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-copy").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "copyFile", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-copy-path").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "copyPath", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-copy-rel-path").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "copyRelativePath", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-rename").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "renameFile", uri: targetFile.uri, path: targetFile.path });
-    };
-
-    document.getElementById("menu-delete").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "deleteFile", uri: targetFile.uri });
-    };
-
-    document.getElementById("menu-ignore").onclick = () => {
-        hideContextMenu();
-        vscode.postMessage({ command: "ignoreFile", uri: targetFile.uri, path: targetFile.path });
-    };
+        document.getElementById("menu-space-new-file").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "newFile", targetFolder: currentTargetFolder });
+        };
+        document.getElementById("menu-space-new-folder").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "newFolder", targetFolder: currentTargetFolder });
+        };
+        document.getElementById("menu-space-paste").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "pasteItem", targetFolder: currentTargetFolder });
+        };
+        document.getElementById("menu-space-expand").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "expandSpace" });
+        };
+        document.getElementById("menu-space-reduce").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "reduceSpace" });
+        };
+        document.getElementById("menu-space-reflow").onclick = () => {
+            hideContextMenu();
+            vscode.postMessage({ command: "reflow" });
+        };
+        if (focusedFolder) {
+            document.getElementById("menu-space-root").onclick = () => {
+                hideContextMenu();
+                focusedFolder = "";
+                updateBreadcrumbs();
+                render();
+            };
+        } else {
+            document.getElementById("menu-space-refresh").onclick = () => {
+                hideContextMenu();
+                render();
+            };
+        }
+    }
 
     contextMenu.style.display = "block";
 
@@ -2588,11 +3534,18 @@ canvas.addEventListener("contextmenu", event => {
 
 // Re-render canvas automatically when user switches VS Code color theme
 const themeObserver = new MutationObserver(() => {
+    refreshThemeTokens();
     render();
 });
 themeObserver.observe(document.body, { attributes: true, attributeFilter: ["style", "class"] });
 
 // Functions for Settings Modal, Folder Navigation, and Ignored Items Popovers
+
+function formatFolderPath(folderPath) {
+    const escaped = escapeHtml(folderPath);
+    return escaped.replace(/\//g, '<span class="path-sep">/</span>');
+}
+
 function updateSettingsModalState() {
     if (!data) return;
     const isSpanning = data.mode === "spanning_grid";
@@ -2638,11 +3591,8 @@ function updateIgnoresPopover() {
 
     if (currentIgnorePatterns.length === 0) {
         const empty = document.createElement("div");
-        empty.style.padding = "16px";
-        empty.style.textAlign = "center";
-        empty.style.color = "var(--vscode-descriptionForeground, #707075)";
-        empty.style.fontSize = "12px";
-        empty.textContent = "No active ignore patterns";
+        empty.className = "popover-empty-state";
+        empty.innerHTML = `${ICONS.empty}<div>No active ignore patterns</div><div class="empty-hint">Files and folders matching patterns above are excluded from the grid</div>`;
         list.appendChild(empty);
         return;
     }
@@ -2655,17 +3605,23 @@ function updateIgnoresPopover() {
         const label = document.createElement("div");
         label.style.display = "flex";
         label.style.alignItems = "center";
-        label.style.gap = "6px";
+        label.style.gap = "8px";
         label.style.overflow = "hidden";
         label.style.textOverflow = "ellipsis";
         label.style.whiteSpace = "nowrap";
-        label.innerHTML = `<span>${isFolder ? "📁" : "📄"}</span><span style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(pat)}</span>`;
+        label.style.flex = "1";
+        label.style.minWidth = "0";
+
+        const iconHtml = isFolder ? ICONS.ignoreFolder : ICONS.ignoreFile;
+        const kindBadge = `<span class="pattern-type-badge">${isFolder ? "folder" : "pattern"}</span>`;
+
+        label.innerHTML = `${iconHtml}<span class="pattern-text" title="${escapeHtml(pat)}">${escapeHtml(pat)}</span>${kindBadge}`;
         item.appendChild(label);
 
         const removeBtn = document.createElement("button");
         removeBtn.className = "remove-pattern-btn";
-        removeBtn.title = "Unignore";
-        removeBtn.innerHTML = "&times;";
+        removeBtn.title = `Remove ignore rule '${pat}'`;
+        removeBtn.innerHTML = ICONS.remove;
         removeBtn.onclick = (e) => {
             e.stopPropagation();
             vscode.postMessage({ command: "removeIgnorePattern", pattern: pat });
@@ -2684,7 +3640,7 @@ function updateFoldersPopover() {
     // 1. All Workspace Files (Root)
     const allItem = document.createElement("div");
     allItem.className = "popover-item" + (!focusedFolder ? " active" : "");
-    allItem.innerHTML = `<span>🌐 All Workspace Files (Root)</span><span class="popover-item-count">${data.files.length} files</span>`;
+    allItem.innerHTML = `<span class="item-icon-label">${ICONS.workspace} <span>All Workspace Files (Root)</span></span><span class="popover-item-count">${data.files.length} files</span>`;
     allItem.onclick = () => {
         focusedFolder = "";
         updateBreadcrumbs();
@@ -2698,7 +3654,7 @@ function updateFoldersPopover() {
     if (rootOnlyFiles.length > 0) {
         const rootOnlyItem = document.createElement("div");
         rootOnlyItem.className = "popover-item" + (focusedFolder === "(root files)/" ? " active" : "");
-        rootOnlyItem.innerHTML = `<span>📄 Root Directory Files Only</span><span class="popover-item-count">${rootOnlyFiles.length} file${rootOnlyFiles.length === 1 ? "" : "s"}</span>`;
+        rootOnlyItem.innerHTML = `<span class="item-icon-label">${ICONS.rootFiles} <span>Root Directory Files Only</span></span><span class="popover-item-count">${rootOnlyFiles.length} file${rootOnlyFiles.length === 1 ? "" : "s"}</span>`;
         rootOnlyItem.onclick = () => {
             focusedFolder = "(root files)/";
             updateBreadcrumbs();
@@ -2734,15 +3690,15 @@ function updateFoldersPopover() {
         item.className = "popover-item" + (focusedFolder === folderPath ? " active" : "");
         
         const indent = Math.max(0, (folderPath.split("/").length - 2) * 12);
-        item.style.paddingLeft = `${10 + indent}px`;
+        item.style.paddingLeft = `${8 + indent}px`;
         
         const titleDiv = document.createElement("div");
         titleDiv.style.display = "flex";
         titleDiv.style.alignItems = "center";
-        titleDiv.style.gap = "6px";
+        titleDiv.style.gap = "8px";
         titleDiv.style.flex = "1";
         titleDiv.style.minWidth = "0";
-        titleDiv.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📁 ${escapeHtml(folderPath)}</span><span class="popover-item-count">${count} file${count === 1 ? "" : "s"}</span>`;
+        titleDiv.innerHTML = `<span class="item-icon-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${ICONS.folder} <span class="folder-name-text">${formatFolderPath(folderPath)}</span></span><span class="popover-item-count">${count} file${count === 1 ? "" : "s"}</span>`;
         item.appendChild(titleDiv);
 
         const ignoreBtn = document.createElement("button");

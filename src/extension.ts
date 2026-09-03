@@ -7,6 +7,7 @@ import { IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeItem } from "./directoryProvider";
 import { fetchWorkspaceGitDiff, getCachedGitDiff } from "./git";
 import { ACCENT_SEARCH, ACCENT_INSPECT, ACCENT_RECENCY, withAlpha } from "./colors";
+import { clampTargetToGridCapacity, reorderFolderItems, reorderCardItems } from "./reorder_helpers";
 
 import * as fs from "fs";
 import * as path from "path";
@@ -120,6 +121,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
+    let lastCopiedItem: { uri: vscode.Uri; isFolder: boolean; isCut: boolean } | null = null;
 
     // Reads the user setting fresh each call (rather than caching) so a config change
     // picked up by the onDidChangeConfiguration listener below is always honored.
@@ -414,12 +416,11 @@ export async function activate(context: vscode.ExtensionContext) {
             const minCellWidth = config.get<number>("minCellWidth") ?? 32;
             const minCellHeight = config.get<number>("minCellHeight") ?? 28;
             const openKeybinding = getOpenKeybindingLabel();
-            let gitDiff = getCachedGitDiff();
-            if (gitDiff.size === 0) {
-                gitDiff = await fetchWorkspaceGitDiff();
-            } else {
-                fetchWorkspaceGitDiff().catch(() => {});
-            }
+            const gitDiff = getCachedGitDiff();
+            fetchWorkspaceGitDiff().catch(() => {});
+
+            const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+            const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
 
             const workspaceDiagnostics = getWorkspaceDiagnostics();
             const filesWithWebviewUris = activeFiles.map(file => {
@@ -445,7 +446,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
             if (mode === "spanning_grid") {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+                let savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+
+                const idealRows = Math.max(1, Math.round(Math.sqrt(Math.max(activeFiles.length, 1) / (16 / 9))));
+                if (savedRows && (savedRows < Math.floor(idealRows * 0.6) || savedRows > Math.ceil(idealRows * 2.2))) {
+                    savedRows = idealRows;
+                }
 
                 const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows, forceBreakBeforeId ?? null);
 
@@ -468,10 +474,12 @@ export async function activate(context: vscode.ExtensionContext) {
                     minCellHeight,
                     openKeybinding,
                     ignorePatterns,
+                    cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
+                    folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
                     files: filesWithSlots,
                     layout: {
-                        cols: layout.cols,
-                        rows: layout.rows
+                        cols: layout.cols + extraCols,
+                        rows: layout.rows + extraRows
                     }
                 });
             } else { // uniform grid (default)
@@ -505,10 +513,12 @@ export async function activate(context: vscode.ExtensionContext) {
                     minCellHeight,
                     openKeybinding,
                     ignorePatterns,
+                    cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
+                    folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
                     files: filesWithSlots,
                     layout: {
-                        cols: Math.max(1, ugMaxCol + 1),
-                        rows: Math.max(1, ugMaxRow + 1)
+                        cols: Math.max(layout.cols, ugMaxCol + 1) + extraCols,
+                        rows: Math.max(layout.rows, ugMaxRow + 1) + extraRows
                     }
                 });
             }
@@ -1042,21 +1052,344 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "copyFile") {
                     const uri = vscode.Uri.parse(msg.uri);
+                    lastCopiedItem = { uri, isFolder: false, isCut: false };
                     try {
                         await vscode.commands.executeCommand("filesExplorer.copy", uri);
                     } catch (err: any) {
-                        // Fallback to clipboard path if native explorer command fails
                         await vscode.env.clipboard.writeText(uri.fsPath);
-                        vscode.window.showInformationMessage("Copied file path to clipboard.");
                     }
+                    vscode.window.showInformationMessage(`Copied '${vscode.workspace.asRelativePath(uri)}'.`);
                 }
 
                 if (msg.command === "cutFile") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
+                        lastCopiedItem = { uri, isFolder: false, isCut: true };
                         await vscode.commands.executeCommand("filesExplorer.cut", uri);
+                        vscode.window.showInformationMessage(`Cut '${vscode.workspace.asRelativePath(uri)}'.`);
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to cut file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "newFile") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderPrefix = msg.targetFolder ? msg.targetFolder.replace(/^\/+|\/+$/g, "") + "/" : "";
+                            const input = await vscode.window.showInputBox({
+                                prompt: "Enter file name or relative path",
+                                value: folderPrefix
+                            });
+                            if (input && input !== folderPrefix) {
+                                const targetUri = vscode.Uri.joinPath(wsFolder.uri, input);
+                                await vscode.workspace.fs.writeFile(targetUri, new Uint8Array());
+                                const doc = await vscode.workspace.openTextDocument(targetUri);
+                                await vscode.window.showTextDocument(doc);
+                                if (activePanel) {
+                                    refreshThumbview(activePanel);
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to create file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "newFolder") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderPrefix = msg.targetFolder ? msg.targetFolder.replace(/^\/+|\/+$/g, "") + "/" : "";
+                            const input = await vscode.window.showInputBox({
+                                prompt: "Enter folder name or relative path",
+                                value: folderPrefix
+                            });
+                            if (input && input !== folderPrefix) {
+                                const targetUri = vscode.Uri.joinPath(wsFolder.uri, input);
+                                await vscode.workspace.fs.createDirectory(targetUri);
+                                vscode.window.showInformationMessage(`Created folder '${input}'.`);
+                                if (activePanel) {
+                                    refreshThumbview(activePanel);
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to create folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "copyFolder") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
+                            lastCopiedItem = { uri: folderUri, isFolder: true, isCut: false };
+                            try {
+                                await vscode.commands.executeCommand("filesExplorer.copy", folderUri);
+                            } catch {
+                                await vscode.env.clipboard.writeText(folderUri.fsPath);
+                            }
+                            vscode.window.showInformationMessage(`Copied folder '${folderRel}'.`);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to copy folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "cutFolder") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
+                            lastCopiedItem = { uri: folderUri, isFolder: true, isCut: true };
+                            try {
+                                await vscode.commands.executeCommand("filesExplorer.cut", folderUri);
+                            } catch {
+                                await vscode.env.clipboard.writeText(folderUri.fsPath);
+                            }
+                            vscode.window.showInformationMessage(`Cut folder '${folderRel}'.`);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to cut folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "copyFolderPath") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
+                            await vscode.env.clipboard.writeText(folderUri.fsPath);
+                            vscode.window.showInformationMessage("Copied folder path to clipboard.");
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to copy path: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "copyFolderRelativePath") {
+                    try {
+                        const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                        await vscode.env.clipboard.writeText(folderRel);
+                        vscode.window.showInformationMessage("Copied relative folder path to clipboard.");
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to copy relative path: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "renameFolder") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const oldRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                            const oldUri = vscode.Uri.joinPath(wsFolder.uri, oldRel);
+                            const newName = await vscode.window.showInputBox({
+                                prompt: "Enter new name/relative path for folder",
+                                value: oldRel
+                            });
+                            if (newName && newName !== oldRel) {
+                                const newUri = vscode.Uri.joinPath(wsFolder.uri, newName);
+                                const edit = new vscode.WorkspaceEdit();
+                                edit.renameFile(oldUri, newUri, { overwrite: false });
+                                const success = await vscode.workspace.applyEdit(edit);
+                                if (success && activePanel) {
+                                    refreshThumbview(activePanel);
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to rename folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "deleteFolder") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
+                            const confirm = await vscode.window.showWarningMessage(
+                                `Are you sure you want to delete folder '${folderRel}' and all its contents?`,
+                                { modal: true },
+                                "Move to Trash",
+                                "Delete Permanently"
+                            );
+                            if (confirm === "Move to Trash") {
+                                await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: true });
+                                if (activePanel) {
+                                    refreshThumbview(activePanel);
+                                }
+                            } else if (confirm === "Delete Permanently") {
+                                await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: false });
+                                if (activePanel) {
+                                    refreshThumbview(activePanel);
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to delete folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "revealFolder") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
+                            await vscode.commands.executeCommand("revealInExplorer", folderUri);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to reveal folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "openFolderInTerminal") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
+                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
+                            await vscode.commands.executeCommand("openInTerminal", folderUri);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to open in integrated terminal: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "ignoreFolder") {
+                    try {
+                        const relPath = msg.folderPath;
+                        if (relPath) {
+                            const state = getIgnoreState();
+                            if (!state.ignorePatterns.includes(relPath)) {
+                                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, relPath] });
+                                vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
+                            }
+                            refreshProviders();
+                            if (activePanel) {
+                                updateLayoutFromCache(activePanel);
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to ignore folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "moveFileToFolder") {
+                    try {
+                        const sourceUri = vscode.Uri.parse(msg.uri);
+                        const fileName = sourceUri.path.split("/").pop() || "file";
+                        const wsFolder = vscode.workspace.getWorkspaceFolder(sourceUri) || vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const targetFolderRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "");
+                            const targetUri = targetFolderRel
+                                ? vscode.Uri.joinPath(wsFolder.uri, targetFolderRel, fileName)
+                                : vscode.Uri.joinPath(wsFolder.uri, fileName);
+
+                            if (sourceUri.toString() !== targetUri.toString()) {
+                                const edit = new vscode.WorkspaceEdit();
+                                edit.renameFile(sourceUri, targetUri, { overwrite: false });
+                                const success = await vscode.workspace.applyEdit(edit);
+                                if (success) {
+                                    vscode.window.showInformationMessage(`Moved '${fileName}' to '${targetFolderRel || "root"}'.`);
+                                    if (activePanel) {
+                                        refreshThumbview(activePanel);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to move file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "pasteItem") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const targetFolderRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "");
+                            const targetDirUri = targetFolderRel ? vscode.Uri.joinPath(wsFolder.uri, targetFolderRel) : wsFolder.uri;
+
+                            try {
+                                await vscode.workspace.fs.createDirectory(targetDirUri);
+                            } catch {
+                                // Already exists
+                            }
+
+                            if (lastCopiedItem) {
+                                const sourceUri = lastCopiedItem.uri;
+                                const sourceName = sourceUri.path.split("/").filter(Boolean).pop() || "item";
+                                let destUri = vscode.Uri.joinPath(targetDirUri, sourceName);
+
+                                if (lastCopiedItem.isCut) {
+                                    if (sourceUri.toString() !== destUri.toString()) {
+                                        const edit = new vscode.WorkspaceEdit();
+                                        edit.renameFile(sourceUri, destUri, { overwrite: false });
+                                        await vscode.workspace.applyEdit(edit);
+                                        vscode.window.showInformationMessage(`Moved '${sourceName}' to '${targetFolderRel || "root"}'.`);
+                                    }
+                                    lastCopiedItem = null;
+                                } else {
+                                    let finalDestUri = destUri;
+                                    let exists = true;
+                                    try {
+                                        await vscode.workspace.fs.stat(finalDestUri);
+                                    } catch {
+                                        exists = false;
+                                    }
+                                    if (exists) {
+                                        const ext = (!lastCopiedItem.isFolder && sourceName.includes(".")) ? "." + sourceName.split(".").pop() : "";
+                                        const base = ext ? sourceName.slice(0, -ext.length) : sourceName;
+                                        let copyIdx = 1;
+                                        while (true) {
+                                            const candName = `${base} copy${copyIdx > 1 ? " " + copyIdx : ""}${ext}`;
+                                            const candUri = vscode.Uri.joinPath(targetDirUri, candName);
+                                            try {
+                                                await vscode.workspace.fs.stat(candUri);
+                                                copyIdx++;
+                                            } catch {
+                                                finalDestUri = candUri;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    await vscode.workspace.fs.copy(sourceUri, finalDestUri, { overwrite: false });
+                                    vscode.window.showInformationMessage(`Pasted '${finalDestUri.path.split("/").pop()}'.`);
+                                }
+                                if (activePanel) {
+                                    refreshThumbview(activePanel);
+                                }
+                            } else {
+                                const clipboardText = (await vscode.env.clipboard.readText() || "").trim();
+                                if (clipboardText && (clipboardText.startsWith("/") || clipboardText.match(/^[A-Za-z]:[\\/]/))) {
+                                    const clipUri = vscode.Uri.file(clipboardText);
+                                    try {
+                                        await vscode.workspace.fs.stat(clipUri);
+                                        const clipName = clipUri.path.split("/").filter(Boolean).pop() || "item";
+                                        const destUri = vscode.Uri.joinPath(targetDirUri, clipName);
+                                        await vscode.workspace.fs.copy(clipUri, destUri, { overwrite: false });
+                                        vscode.window.showInformationMessage(`Pasted '${clipName}'.`);
+                                        if (activePanel) {
+                                            refreshThumbview(activePanel);
+                                        }
+                                        return;
+                                    } catch {
+                                        // Not a valid path, continue
+                                    }
+                                }
+                                await vscode.commands.executeCommand("filesExplorer.paste");
+                                if (activePanel) {
+                                    refreshThumbview(activePanel);
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to paste: ${err?.message ?? String(err)}`);
                     }
                 }
 
@@ -1089,19 +1422,132 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                 }
 
+                if (msg.command === "openWith") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("explorer.openWith", uri);
+                    } catch {
+                        try {
+                            const uri = vscode.Uri.parse(msg.uri);
+                            await vscode.commands.executeCommand("workbench.action.openWith", uri);
+                        } catch (err: any) {
+                            vscode.window.showErrorMessage(`Failed to open with: ${err?.message ?? String(err)}`);
+                        }
+                    }
+                }
+
+                if (msg.command === "openInTerminal") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("openInTerminal", uri);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to open in integrated terminal: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "openTimeline") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        await vscode.commands.executeCommand("filesExplorer.openTimeline", uri);
+                    } catch {
+                        try {
+                            await vscode.commands.executeCommand("timeline.focus");
+                        } catch (err: any) {
+                            vscode.window.showErrorMessage(`Failed to open timeline: ${err?.message ?? String(err)}`);
+                        }
+                    }
+                }
+
+                if (msg.command === "runTests") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+                        await vscode.commands.executeCommand("testing.runCurrentFile");
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to run tests: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "debugTests") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+                        await vscode.commands.executeCommand("testing.debugCurrentFile");
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to debug tests: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "coverageTests") {
+                    try {
+                        const uri = vscode.Uri.parse(msg.uri);
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+                        await vscode.commands.executeCommand("testing.coverageCurrentFile");
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to run tests with coverage: ${err?.message ?? String(err)}`);
+                    }
+                }
+
                 if (msg.command === "reorderFile") {
-                    // Grid-slot targeting — msg: { sourceId, targetId (occupied slot's
-                    // file id, or null when targetIsEmpty), targetIsEmpty, targetCol,
-                    // targetRow, targetGridCols (trust this over recomputing layout.cols
-                    // locally) }. Sent from mouseup in media/overview.js (keep both ends
-                    // in sync).
                     const mode = getDragReorderMode();
                     const layoutMode = getLayoutMode();
 
                     try {
                         let forceBreakBeforeId: string | undefined;
 
-                        if (layoutMode === "spanning_grid") {
+                        if (msg.focusedFolder) {
+                            const { ignorePatterns } = getIgnoreState();
+                            const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
+                            const scopedFiles = activeFiles.filter(f => f.path && (msg.focusedFolder === "(root files)/" ? !f.path.includes("/") : f.path.startsWith(msg.focusedFolder)));
+                            const fullOrder = fileOrder.getOrder();
+                            const folderOrders = context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {};
+                            let currentFolderOrder = folderOrders[msg.focusedFolder] ? [...folderOrders[msg.focusedFolder]] : [];
+
+                            const scopedIds = scopedFiles.map(f => f.id);
+                            if (currentFolderOrder.length === 0) {
+                                currentFolderOrder = [...scopedIds];
+                            } else {
+                                const presentIds = new Set(currentFolderOrder.filter(Boolean));
+                                for (const sid of scopedIds) {
+                                    if (!presentIds.has(sid)) {
+                                        const holeIdx = currentFolderOrder.indexOf("");
+                                        if (holeIdx !== -1) {
+                                            currentFolderOrder[holeIdx] = sid;
+                                        } else {
+                                            currentFolderOrder.push(sid);
+                                        }
+                                    }
+                                }
+                            }
+
+                            const gridCols = Math.max(1, msg.targetGridCols || 1);
+                            const gridRows = Math.max(1, msg.targetGridRows || Math.ceil(currentFolderOrder.length / gridCols));
+                            const maxCapacity = gridCols * gridRows;
+                            const targetSlotIdx = Math.max(0, msg.targetRow * gridCols + msg.targetCol);
+
+                            currentFolderOrder = reorderFolderItems(
+                                currentFolderOrder,
+                                msg.sourceId,
+                                !!msg.targetIsEmpty,
+                                msg.targetId || null,
+                                targetSlotIdx,
+                                maxCapacity,
+                                mode
+                            );
+
+                            folderOrders[msg.focusedFolder] = currentFolderOrder;
+                            await context.workspaceState.update("thumbview.folderOrders", folderOrders);
+
+                            const orderedScopedIds = currentFolderOrder.filter(Boolean);
+                            const scopedIndices = scopedFiles.map(f => fullOrder.indexOf(f.id)).filter(idx => idx !== -1).sort((a, b) => a - b);
+                            for (let i = 0; i < scopedIndices.length && i < orderedScopedIds.length; i++) {
+                                fullOrder[scopedIndices[i]] = orderedScopedIds[i];
+                            }
+                            fileOrder.setOrder(fullOrder);
+                        } else if (layoutMode === "spanning_grid") {
                             const { ignorePatterns } = getIgnoreState();
                             const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
                             const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
@@ -1133,15 +1579,21 @@ export async function activate(context: vscode.ExtensionContext) {
                                     targetPlacement = undefined;
                                 }
 
-                                const targetCol = targetPlacement ? targetPlacement.col : msg.targetCol;
-                                const targetRow = targetPlacement ? targetPlacement.row : msg.targetRow;
+                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                                const maxAllowedRows = (savedRows || currentLayout.wrapRows) + extraRows;
+                                const maxAllowedCols = currentLayout.cols + extraCols;
+
+                                const clamped = clampTargetToGridCapacity(msg.targetCol, msg.targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
+                                const targetCol = targetPlacement ? targetPlacement.col : clamped.col;
+                                const targetRow = targetPlacement ? targetPlacement.row : clamped.row;
 
                                 let reqRows = currentLayout.wrapRows;
                                 for (const p of currentLayout.placements) {
                                     reqRows = Math.max(reqRows, p.row + p.nCells);
                                 }
-                                const gridRows = Math.max(reqRows, targetRow + sourceCells);
-                                const maxCol = Math.max(currentLayout.cols - 1, targetCol, sourceCol);
+                                const gridRows = Math.min(maxAllowedRows, Math.max(reqRows, targetRow + sourceCells));
+                                const maxCol = Math.min(maxAllowedCols - 1, Math.max(currentLayout.cols - 1, targetCol, sourceCol));
 
                                 // Build 2D column-major grid representing current spanning layout
                                 const grid: string[][] = [];
@@ -1292,12 +1744,21 @@ export async function activate(context: vscode.ExtensionContext) {
                                     newOrder.pop();
                                 }
 
-                                await context.workspaceState.update("thumbview.spanningRows", Math.max(savedRows || 0, gridRows));
+                                await context.workspaceState.update("thumbview.spanningRows", savedRows || currentLayout.wrapRows);
                                 fileOrder.setOrder(newOrder);
                             }
                         } else {
                             if (msg.targetIsEmpty) {
-                                const targetIndex = findSlotIndex(msg.targetCol, msg.targetRow, fileOrder.getOrder().length);
+                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                                const layout = buildStableGrid(fileOrder.getOrder().length);
+                                const maxCols = layout.cols + extraCols;
+                                const maxRows = layout.rows + extraRows;
+                                const maxCapacity = maxCols * maxRows;
+
+                                const clamped = clampTargetToGridCapacity(msg.targetCol, msg.targetRow, 1, maxCols, maxRows);
+                                const rawTargetIndex = findSlotIndex(clamped.col, clamped.row, fileOrder.getOrder().length);
+                                const targetIndex = Math.min(rawTargetIndex, maxCapacity - 1);
                                 fileOrder.moveToEmptySlot(msg.sourceId, targetIndex);
                             } else if (mode === "shift") {
                                 fileOrder.move(msg.sourceId, msg.targetId);
@@ -1311,6 +1772,185 @@ export async function activate(context: vscode.ExtensionContext) {
                         }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to reorder file: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "moveFolderToFolder") {
+                    try {
+                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                        if (wsFolder) {
+                            const srcRel = (msg.sourceFolder || "").replace(/^\/+|\/+$/g, "");
+                            const tgtRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "");
+                            const folderName = srcRel.split("/").filter(Boolean).pop() || "folder";
+                            const srcUri = vscode.Uri.joinPath(wsFolder.uri, srcRel);
+                            const destUri = tgtRel ? vscode.Uri.joinPath(wsFolder.uri, tgtRel, folderName) : vscode.Uri.joinPath(wsFolder.uri, folderName);
+
+                            if (srcUri.toString() !== destUri.toString()) {
+                                const edit = new vscode.WorkspaceEdit();
+                                edit.renameFile(srcUri, destUri, { overwrite: false });
+                                const success = await vscode.workspace.applyEdit(edit);
+                                if (success) {
+                                    vscode.window.showInformationMessage(`Moved folder '${folderName}' to '${tgtRel || "root"}'.`);
+                                    if (activePanel) {
+                                        refreshThumbview(activePanel);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to move folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "reorderFolder") {
+                    try {
+                        const srcFolderRel = (msg.sourceFolder || "").replace(/^\/+|\/+$/g, "") + "/";
+                        const currentOrder = fileOrder.getOrder();
+                        const srcFiles = currentOrder.filter(id => {
+                            const f = (cachedScannedFiles || []).find(cf => cf.id === id);
+                            return f && f.path.startsWith(srcFolderRel);
+                        });
+
+                        if (srcFiles.length > 0) {
+                            const remainingOrder = currentOrder.filter(id => !srcFiles.includes(id));
+                            let insertIdx = remainingOrder.length;
+
+                            if (msg.targetFolder) {
+                                const tgtFolderRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "") + "/";
+                                const tgtFirstIdx = remainingOrder.findIndex(id => {
+                                    const f = (cachedScannedFiles || []).find(cf => cf.id === id);
+                                    return f && f.path.startsWith(tgtFolderRel);
+                                });
+                                if (tgtFirstIdx !== -1) {
+                                    insertIdx = tgtFirstIdx;
+                                }
+                            }
+                            remainingOrder.splice(insertIdx, 0, ...srcFiles);
+                            fileOrder.setOrder(remainingOrder);
+                            if (activePanel) {
+                                updateLayoutFromCache(activePanel);
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to reorder folder: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "swapCardItems") {
+                    try {
+                        const fullOrder = fileOrder.getOrder();
+                        const activeFiles = (cachedScannedFiles || []);
+
+                        const getIdsForItem = (itemId: string): string[] => {
+                            if (!itemId) return [];
+                            if (itemId.startsWith("folder:")) {
+                                const folderRel = itemId.substring(7);
+                                return fullOrder.filter(id => {
+                                    const f = activeFiles.find(cf => cf.id === id);
+                                    return f && f.path.startsWith(folderRel);
+                                });
+                            } else {
+                                return [itemId];
+                            }
+                        };
+
+                        let cardOrder = context.workspaceState.get<string[]>("thumbview.cardOrder") || [];
+                        if (cardOrder.length === 0 && Array.isArray(msg.currentCardIds)) {
+                            cardOrder = [...msg.currentCardIds];
+                        }
+
+                        if (msg.targetIsEmpty) {
+                            const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
+                            cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
+                            await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+
+                            const srcIds = getIdsForItem(msg.sourceId);
+                            if (srcIds.length > 0) {
+                                const remaining = fullOrder.filter(id => !srcIds.includes(id));
+                                const validCards = cardOrder.filter(Boolean);
+                                const cardPos = validCards.indexOf(msg.sourceId);
+                                if (cardPos <= 0) {
+                                    remaining.unshift(...srcIds);
+                                } else if (cardPos >= validCards.length - 1) {
+                                    remaining.push(...srcIds);
+                                } else {
+                                    const prevCard = validCards[cardPos - 1];
+                                    const prevIds = getIdsForItem(prevCard);
+                                    const prevLastIdx = prevIds.length > 0 ? remaining.indexOf(prevIds[prevIds.length - 1]) : -1;
+                                    if (prevLastIdx !== -1) {
+                                        remaining.splice(prevLastIdx + 1, 0, ...srcIds);
+                                    } else {
+                                        remaining.push(...srcIds);
+                                    }
+                                }
+                                fileOrder.setOrder(remaining);
+                            }
+                            if (activePanel) {
+                                updateLayoutFromCache(activePanel);
+                            }
+                            return;
+                        }
+
+                        const srcIds = getIdsForItem(msg.sourceId);
+                        const tgtIds = getIdsForItem(msg.targetId);
+
+                        if (srcIds.length > 0 && tgtIds.length > 0 && msg.sourceId !== msg.targetId) {
+                            if (cardOrder.length > 0) {
+                                cardOrder = reorderCardItems(cardOrder, msg.sourceId, false, msg.targetId, 0, cardOrder.length);
+                                await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+                            }
+
+                            const srcFirst = fullOrder.indexOf(srcIds[0]);
+                            const tgtFirst = fullOrder.indexOf(tgtIds[0]);
+
+                            if (srcFirst !== -1 && tgtFirst !== -1) {
+                                const remaining = fullOrder.filter(id => !srcIds.includes(id));
+                                const newTgtIdx = remaining.indexOf(tgtIds[0]);
+                                if (newTgtIdx !== -1) {
+                                    if (srcFirst < tgtFirst) {
+                                        remaining.splice(newTgtIdx + tgtIds.length, 0, ...srcIds);
+                                    } else {
+                                        remaining.splice(newTgtIdx, 0, ...srcIds);
+                                    }
+                                    fileOrder.setOrder(remaining);
+                                    if (activePanel) {
+                                        updateLayoutFromCache(activePanel);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to swap items: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "expandSpace") {
+                    try {
+                        const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                        const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                        await context.workspaceState.update("thumbview.extraCols", curCols + 1);
+                        await context.workspaceState.update("thumbview.extraRows", curRows + 1);
+                        vscode.window.showInformationMessage("Expanded grid space.");
+                        if (activePanel) {
+                            updateLayoutFromCache(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to expand space: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "reduceSpace") {
+                    try {
+                        const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                        const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                        await context.workspaceState.update("thumbview.extraCols", Math.max(0, curCols - 1));
+                        await context.workspaceState.update("thumbview.extraRows", Math.max(0, curRows - 1));
+                        vscode.window.showInformationMessage("Reduced grid space.");
+                        if (activePanel) {
+                            updateLayoutFromCache(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to reduce space: ${err?.message ?? String(err)}`);
                     }
                 }
 
@@ -1393,7 +2033,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             vscode.window.showInformationMessage(`Unignored '${pattern}'.`);
                             refreshProviders();
                             if (activePanel) {
-                                updateLayoutFromCache(activePanel);
+                                await refreshThumbview(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -1447,6 +2087,8 @@ export async function activate(context: vscode.ExtensionContext) {
         await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
         await context.workspaceState.update("thumbview.spanningAllocations", undefined);
         await context.workspaceState.update("thumbview.spanningRows", undefined);
+        await context.workspaceState.update("thumbview.cardOrder", undefined);
+        await context.workspaceState.update("thumbview.folderOrders", undefined);
 
         if (activePanel) {
             refreshThumbview(activePanel);
@@ -1594,7 +2236,7 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(msg);
             refreshProviders();
             if (activePanel) {
-                updateLayoutFromCache(activePanel);
+                await refreshThumbview(activePanel);
             }
         }
     });
@@ -1838,6 +2480,7 @@ function getHtml(
     context: vscode.ExtensionContext,
     openKeybindingLabel: string = "F4"
 ): string {
+    const isMac = process.platform === "darwin";
     const jsUri = webview.asWebviewUri(
         vscode.Uri.joinPath(context.extensionUri, "media", "overview.js")
     );
@@ -1909,14 +2552,13 @@ function getHtml(
         .breadcrumb-container {
             display: flex;
             align-items: center;
-            background: color-mix(in srgb, var(--vscode-editorWidget-background, #1e1e22) 85%, transparent);
-            backdrop-filter: blur(8px);
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+            background: var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-background, #1e1e22) 90%, #888888 10%));
+            border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
             border-radius: 8px;
             padding: 6px 12px;
             font-size: 13px;
             pointer-events: auto;
-            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
+            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.15));
             max-width: 60%;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -1939,13 +2581,12 @@ function getHtml(
         }
 
         .search-container {
-            background: color-mix(in srgb, var(--vscode-editorWidget-background, #1e1e22) 85%, transparent);
-            backdrop-filter: blur(8px);
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+            background: var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-background, #1e1e22) 90%, #888888 10%));
+            border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
             border-radius: 8px;
             padding: 2px;
             pointer-events: auto;
-            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
+            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.15));
             display: flex;
             align-items: center;
         }
@@ -1954,7 +2595,7 @@ function getHtml(
             background: transparent;
             border: none;
             outline: none;
-            color: var(--vscode-input-foreground, #ffffff);
+            color: var(--vscode-input-foreground, var(--vscode-foreground, #ffffff));
             font-size: 13px;
             padding: 6px 10px;
             width: 180px;
@@ -1971,7 +2612,7 @@ function getHtml(
         }
 
         .search-input::placeholder {
-            color: var(--vscode-input-placeholderForeground, #707075);
+            color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground, #707075));
         }
 
         .search-option-btn {
@@ -1989,7 +2630,7 @@ function getHtml(
         }
         
         .search-option-btn.active {
-            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 25%, transparent);
+            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 20%, transparent);
             border: 1px solid var(--vscode-focusBorder, #007fd4);
             border-radius: 4px;
             color: var(--vscode-foreground, #ffffff);
@@ -2031,22 +2672,26 @@ function getHtml(
             position: absolute;
             display: none;
             background: var(--vscode-menu-background, #252526);
-            border: 1px solid var(--vscode-menu-border, #454545);
-            border-radius: 6px;
+            border: 1px solid var(--vscode-menu-border, rgba(255, 255, 255, 0.12));
+            border-radius: 5px;
             padding: 4px 0;
-            box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.5));
-            z-index: 2000;
-            min-width: 180px;
+            box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.5));
+            z-index: 4000;
+            min-width: 220px;
             font-size: 12px;
             color: var(--vscode-menu-foreground, #cccccc);
         }
 
         .menu-item {
-            padding: 6px 14px;
+            padding: 5px 12px;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 16px;
+            font-size: 12px;
+            color: var(--vscode-menu-foreground, #cccccc);
+            user-select: none;
             transition: background 0.1s ease;
         }
 
@@ -2055,45 +2700,91 @@ function getHtml(
             color: var(--vscode-menu-selectionForeground, #ffffff);
         }
 
+        .menu-item-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .menu-item-key {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground, #8a8a93);
+            margin-left: auto;
+            padding-left: 12px;
+            flex-shrink: 0;
+            letter-spacing: 0.2px;
+        }
+
+        .menu-item:hover .menu-item-key {
+            color: var(--vscode-menu-selectionForeground, #ffffff);
+            opacity: 0.85;
+        }
+
         .menu-item.danger:hover {
             background: var(--vscode-statusBarItem-errorBackground, #900c3f);
-            color: var(--vscode-menu-selectionForeground, #ffffff);
+            color: #ffffff;
+        }
+
+        .menu-separator {
+            height: 1px;
+            background: var(--vscode-menu-separatorBackground, rgba(255, 255, 255, 0.08));
+            margin: 4px 0;
         }
 
         .top-bar-actions {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
             margin-left: auto;
             pointer-events: auto;
         }
 
         .toolbar-btn {
-            background: color-mix(in srgb, var(--vscode-editorWidget-background, #1e1e22) 85%, transparent);
-            backdrop-filter: blur(8px);
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
-            border-radius: 8px;
-            color: var(--vscode-foreground, #e1e1e6);
-            padding: 6px 12px;
+            background: var(--vscode-editorWidget-background, #222227);
+            border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, rgba(255, 255, 255, 0.12)));
+            border-radius: 4px;
+            color: var(--vscode-foreground, #d0d0d5);
+            padding: 4px 10px;
             font-size: 12px;
             font-weight: 500;
             cursor: pointer;
             display: flex;
             align-items: center;
             gap: 6px;
-            box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
-            transition: all 0.15s ease;
+            box-shadow: 0 2px 6px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.2));
+            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+            position: relative;
         }
 
-        .toolbar-btn:hover, .toolbar-btn.active {
-            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 25%, transparent);
+        .toolbar-btn:hover {
+            background: color-mix(in srgb, var(--vscode-editorWidget-background, #222227) 80%, rgba(255, 255, 255, 0.1));
+            border-color: rgba(255, 255, 255, 0.25);
+            color: var(--vscode-foreground, #ffffff);
+        }
+
+        .toolbar-btn.active {
+            background: var(--vscode-list-activeSelectionBackground, rgba(255, 255, 255, 0.12));
             border-color: var(--vscode-focusBorder, #007fd4);
             color: var(--vscode-foreground, #ffffff);
         }
 
+        .toolbar-btn-icon {
+            display: inline-block;
+            vertical-align: middle;
+            flex-shrink: 0;
+            opacity: 0.9;
+        }
+
+        .toolbar-btn:hover .toolbar-btn-icon,
+        .toolbar-btn.active .toolbar-btn-icon {
+            opacity: 1;
+        }
+
         .badge {
-            background: color-mix(in srgb, var(--vscode-badge-background, #4d4d4d) 60%, transparent);
-            border: 1px solid var(--vscode-badge-background, #4d4d4d);
+            background: var(--vscode-badge-background, #4d4d4d);
             border-radius: 10px;
             padding: 1px 6px;
             font-size: 10px;
@@ -2101,80 +2792,196 @@ function getHtml(
             color: var(--vscode-badge-foreground, #ffffff);
         }
 
-        /* Glassmorphic Dropdown Popovers */
-        .glass-popover {
+        /* Clean Minimalist Dropdown Popovers */
+        .menu-popover {
             position: absolute;
             top: 56px;
             right: 16px;
-            width: 360px;
-            max-width: 90vw;
-            max-height: 70vh;
-            background: color-mix(in srgb, var(--vscode-editorWidget-background, #14141a) 96%, transparent);
-            backdrop-filter: blur(16px);
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15));
-            border-radius: 12px;
-            box-shadow: 0 16px 48px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.85));
+            width: 380px;
+            max-width: 92vw;
+            max-height: 75vh;
+            background: var(--vscode-editorWidget-background, #222227);
+            border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, rgba(255, 255, 255, 0.14)));
+            border-radius: 6px;
+            box-shadow: 0 10px 30px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.45));
             z-index: 3000;
             display: flex;
             flex-direction: column;
             overflow: hidden;
-            font-size: 13px;
-            color: var(--vscode-foreground, #d4d4d8);
+            font-size: 12px;
+            color: var(--vscode-foreground, #cccccc);
             pointer-events: auto;
+        }
+
+        .menu-popover::before, .menu-modal::before {
+            content: "";
+            display: block;
+            height: 2px;
+            width: 100%;
+            background: linear-gradient(90deg, var(--tv-accent-inspect, #785ef0) 0%, var(--tv-accent-search, #dc267f) 50%, var(--tv-accent-recency, #fe6100) 100%);
+            flex-shrink: 0;
         }
 
         .popover-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             color: var(--vscode-foreground, #ffffff);
-            padding: 10px 14px;
-            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.1));
-            background: color-mix(in srgb, var(--vscode-editorWidget-background, #191920) 90%, transparent);
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+            background: var(--vscode-editorWidget-headerBackground, color-mix(in srgb, var(--vscode-editorWidget-background, #222227) 90%, #ffffff 10%));
+        }
+
+        .popover-header-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            letter-spacing: 0.2px;
         }
 
         .popover-close {
             background: transparent;
             border: none;
             color: var(--vscode-descriptionForeground, #a0a0a5);
-            font-size: 18px;
+            width: 22px;
+            height: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 3px;
             cursor: pointer;
+            transition: background 0.1s ease, color 0.1s ease;
         }
 
-        .popover-close:hover { color: var(--vscode-foreground, #ffffff); }
+        .popover-close:hover {
+            background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
+            color: var(--vscode-foreground, #ffffff);
+        }
+
+        .folders-popover-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            max-height: 68vh;
+            min-height: 260px;
+            overflow: hidden;
+        }
+
+        .popover-column {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            padding: 10px;
+            overflow: hidden;
+        }
+
+        .popover-column-left {
+            border-right: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+        }
+
+        .popover-column-header {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-descriptionForeground, #8a8a93));
+            margin-bottom: 8px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .popover-count-badge {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--vscode-descriptionForeground, #8a8a93);
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 1px 6px;
+            border-radius: 10px;
+        }
 
         .popover-body {
-            padding: 8px;
+            flex: 1;
             overflow-y: auto;
-            max-height: 52vh;
             display: flex;
             flex-direction: column;
             gap: 2px;
+            padding: 2px 0;
         }
 
         .popover-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 6px 10px;
-            border-radius: 6px;
+            padding: 5px 8px;
+            border-radius: 4px;
             cursor: pointer;
-            transition: background 0.1s ease;
+            transition: background 0.1s ease, border-color 0.1s ease;
             font-size: 12px;
-            color: var(--vscode-foreground, #d4d4d8);
+            color: var(--vscode-foreground, #cccccc);
+            user-select: none;
+            border-left: 2px solid transparent;
         }
 
         .popover-item:hover {
-            background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.08));
+            background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.06));
             color: var(--vscode-list-hoverForeground, #ffffff);
         }
 
         .popover-item.active {
-            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 20%, transparent);
-            border: 1px solid var(--vscode-focusBorder, #007fd4);
-            color: var(--vscode-foreground, #ffffff);
+            background: var(--vscode-list-activeSelectionBackground, rgba(255, 255, 255, 0.1));
+            border-left: 2px solid var(--vscode-focusBorder, #007fd4);
+            color: var(--vscode-list-activeSelectionForeground, #ffffff);
+            font-weight: 500;
+        }
+
+        .item-icon-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .folder-name-text {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .path-sep {
+            opacity: 0.35;
+            margin: 0 1px;
+        }
+
+        .pattern-text {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 11px;
+        }
+
+        .pattern-type-badge {
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-weight: 500;
+            margin-left: auto;
+            margin-right: 4px;
+            flex-shrink: 0;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: var(--vscode-descriptionForeground, #8a8a93);
         }
 
         .popover-item-count {
@@ -2182,24 +2989,27 @@ function getHtml(
             font-size: 11px;
             margin-left: auto;
             padding-left: 8px;
+            flex-shrink: 0;
         }
 
         .popover-add-bar {
             display: flex;
             gap: 6px;
-            padding: 8px 10px;
+            padding-bottom: 8px;
+            margin-bottom: 8px;
             border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
         }
 
         .popover-input {
             flex: 1;
-            background: var(--vscode-input-background, rgba(0, 0, 0, 0.4));
-            border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.15));
-            border-radius: 6px;
-            color: var(--vscode-input-foreground, #ffffff);
-            padding: 5px 8px;
+            background: var(--vscode-input-background, #1a1a1e);
+            border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.12));
+            border-radius: 3px;
+            color: var(--vscode-input-foreground, #cccccc);
+            padding: 4px 8px;
             font-size: 12px;
             outline: none;
+            transition: border-color 0.1s ease;
         }
 
         .popover-input:focus {
@@ -2207,14 +3017,18 @@ function getHtml(
         }
 
         .popover-btn-action {
-            background: color-mix(in srgb, var(--vscode-button-background, #0e639c) 80%, transparent);
-            border: 1px solid var(--vscode-button-border, var(--vscode-button-background, #0e639c));
-            border-radius: 6px;
+            background: var(--vscode-button-background, #0e639c);
+            border: 1px solid transparent;
+            border-radius: 3px;
             color: var(--vscode-button-foreground, #ffffff);
             padding: 4px 10px;
             font-size: 12px;
             cursor: pointer;
             font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: background 0.12s ease;
         }
 
         .popover-btn-action:hover {
@@ -2224,226 +3038,325 @@ function getHtml(
         .remove-pattern-btn {
             background: transparent;
             border: none;
-            color: var(--vscode-errorForeground, #ef4444);
-            font-size: 14px;
+            color: var(--vscode-descriptionForeground, #a0a0a5);
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 3px;
             cursor: pointer;
-            padding: 2px 6px;
-            border-radius: 4px;
+            transition: background 0.1s ease, color 0.1s ease;
         }
 
         .remove-pattern-btn:hover {
-            background: color-mix(in srgb, var(--vscode-errorForeground, #ef4444) 20%, transparent);
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--vscode-errorForeground, #f87171);
         }
 
         .popover-action-btn {
-            background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15));
-            border-radius: 4px;
-            color: var(--vscode-button-secondaryForeground, #b0b0b8);
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            color: var(--vscode-descriptionForeground, #a0a0a5);
             padding: 2px 7px;
             font-size: 11px;
             cursor: pointer;
-            transition: all 0.15s ease;
+            transition: all 0.12s ease;
             margin-left: 8px;
             flex-shrink: 0;
         }
 
         .popover-action-btn:hover {
-            background: color-mix(in srgb, var(--vscode-errorForeground, #ef4444) 25%, transparent);
-            border-color: var(--vscode-errorForeground, #ef4444);
-            color: var(--vscode-errorForeground, #ff8888);
+            background: rgba(239, 68, 68, 0.15);
+            border-color: rgba(239, 68, 68, 0.4);
+            color: var(--vscode-errorForeground, #f87171);
         }
 
-        /* Glassmorphic Settings Modal */
-        #actions-modal {
+        .popover-empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 28px 16px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground, #707075);
+            font-size: 12px;
+        }
+
+        .popover-empty-state .empty-hint {
+            font-size: 11px;
+            margin-top: 4px;
+            opacity: 0.7;
+            max-width: 220px;
+        }
+
+        /* Clean Minimalist Settings Modal */
+        .menu-modal {
             position: absolute;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
             display: none;
-            width: 560px;
+            width: 540px;
             max-width: 90vw;
-            max-height: 82vh;
-            overflow-y: auto;
-            background: color-mix(in srgb, var(--vscode-editorWidget-background, #14141a) 96%, transparent);
-            backdrop-filter: blur(16px);
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15));
-            border-radius: 12px;
-            padding: 20px 24px;
-            box-shadow: 0 16px 48px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.85));
+            max-height: 84vh;
+            background: var(--vscode-editorWidget-background, #222227);
+            border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, rgba(255, 255, 255, 0.14)));
+            border-radius: 6px;
+            box-shadow: 0 12px 36px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.5));
             z-index: 3000;
             font-size: 13px;
-            color: var(--vscode-foreground, #d4d4d8);
+            color: var(--vscode-foreground, #cccccc);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #actions-modal {
+            display: none;
         }
 
         .modal-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            font-size: 15px;
+            font-size: 13px;
             font-weight: 600;
             color: var(--vscode-foreground, #ffffff);
-            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
-            padding-bottom: 10px;
-            margin-bottom: 16px;
-            position: sticky;
-            top: 0;
-            background: color-mix(in srgb, var(--vscode-editorWidget-background, #14141a) 98%, transparent);
-            z-index: 10;
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+            padding: 10px 16px;
+            background: var(--vscode-editorWidget-headerBackground, color-mix(in srgb, var(--vscode-editorWidget-background, #222227) 90%, #ffffff 10%));
+            flex-shrink: 0;
+        }
+
+        .modal-header-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            letter-spacing: 0.2px;
         }
 
         .modal-close {
             background: transparent;
             border: none;
             color: var(--vscode-descriptionForeground, #a0a0a5);
-            font-size: 18px;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 3px;
             cursor: pointer;
+            transition: background 0.1s ease, color 0.1s ease;
         }
 
-        .modal-close:hover { color: var(--vscode-foreground, #ffffff); }
+        .modal-close:hover {
+            background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
+            color: var(--vscode-foreground, #ffffff);
+        }
 
-        .modal-section { margin-bottom: 20px; }
+        .modal-content-scroll {
+            padding: 16px 20px;
+            overflow-y: auto;
+            max-height: calc(84vh - 48px);
+        }
+
+        .modal-section {
+            margin-bottom: 20px;
+        }
+
+        .modal-section:last-child {
+            margin-bottom: 4px;
+        }
+
         .modal-section-title {
-            font-size: 12px;
+            font-size: 11px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: var(--vscode-focusBorder, #007fd4);
+            letter-spacing: 0.6px;
+            color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-descriptionForeground, #8a8a93));
             font-weight: 600;
-            margin-bottom: 8px;
-            border-bottom: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 20%, transparent);
-            padding-bottom: 4px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+            padding-bottom: 5px;
         }
 
         .setting-row {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 8px 0;
-            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.06));
+            padding: 9px 0;
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.05));
+        }
+
+        .setting-row:last-child {
+            border-bottom: none;
+        }
+
+        .setting-text {
+            padding-right: 16px;
+            min-width: 0;
         }
 
         .setting-name {
             font-weight: 500;
-            color: var(--vscode-foreground, #ffffff);
+            color: var(--vscode-settings-headerForeground, var(--vscode-foreground, #ffffff));
             font-size: 13px;
         }
 
         .setting-desc {
-            font-size: 11px;
+            font-size: 12px;
             color: var(--vscode-descriptionForeground, #8a8a93);
             margin-top: 2px;
+            line-height: 1.4;
         }
 
         .segmented-control {
-            display: flex;
-            background: var(--vscode-input-background, rgba(0, 0, 0, 0.4));
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
-            border-radius: 6px;
+            display: inline-flex;
+            background: var(--vscode-input-background, #1a1a1e);
+            border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.1));
+            border-radius: 4px;
             padding: 2px;
             gap: 2px;
+            flex-shrink: 0;
         }
 
         .seg-btn {
             background: transparent;
             border: none;
-            border-radius: 4px;
+            border-radius: 3px;
             color: var(--vscode-descriptionForeground, #a0a0a5);
-            padding: 4px 10px;
+            padding: 4px 12px;
             font-size: 12px;
             cursor: pointer;
-            transition: all 0.15s ease;
+            transition: all 0.12s ease;
         }
 
         .seg-btn:hover {
             color: var(--vscode-foreground, #ffffff);
+            background: rgba(255, 255, 255, 0.04);
         }
 
         .seg-btn.active {
-            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 40%, transparent);
-            color: var(--vscode-foreground, #ffffff);
-            font-weight: 600;
-            box-shadow: 0 2px 6px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+            background: var(--vscode-button-background, #0e639c);
+            color: var(--vscode-button-foreground, #ffffff);
+            font-weight: 500;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
         }
 
         .action-trigger-btn {
-            background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.2));
-            border-radius: 6px;
+            background: var(--vscode-button-secondaryBackground, #3a3d41);
+            border: 1px solid var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.1));
+            border-radius: 4px;
             color: var(--vscode-button-secondaryForeground, #ffffff);
-            padding: 6px 12px;
+            padding: 5px 12px;
             font-size: 12px;
+            font-weight: 500;
             cursor: pointer;
-            transition: all 0.15s ease;
+            transition: background 0.12s ease, border-color 0.12s ease;
+            flex-shrink: 0;
         }
 
         .action-trigger-btn:hover {
-            background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 30%, transparent);
-            border-color: var(--vscode-focusBorder, #007fd4);
+            background: var(--vscode-button-secondaryHoverBackground, #45494e);
+            border-color: rgba(255, 255, 255, 0.2);
         }
 
-        .switch {
+        /* Clean Desktop Toggle Control with Accent */
+        .toggle-control {
             position: relative;
-            display: inline-block;
-            width: 38px;
-            height: 20px;
+            display: inline-flex;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            flex-shrink: 0;
         }
 
-        .switch input {
+        .toggle-control input {
             opacity: 0;
             width: 0;
             height: 0;
+            position: absolute;
         }
 
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: var(--vscode-input-background, rgba(255, 255, 255, 0.15));
-            border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.2));
-            transition: .2s;
-            border-radius: 20px;
+        .toggle-track {
+            width: 36px;
+            height: 18px;
+            background: var(--vscode-input-background, #1a1a1e);
+            border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.15));
+            border-radius: 10px;
+            position: relative;
+            transition: all 0.15s ease;
+            display: block;
         }
 
-        .slider:before {
+        .toggle-thumb {
             position: absolute;
-            content: "";
-            height: 14px;
-            width: 14px;
+            top: 2px;
             left: 2px;
-            bottom: 2px;
-            background-color: var(--vscode-foreground, white);
-            transition: .2s;
+            width: 12px;
+            height: 12px;
+            background: var(--vscode-descriptionForeground, #8a8a93);
             border-radius: 50%;
+            transition: transform 0.15s ease, background 0.15s ease;
         }
 
-        input:checked + .slider {
-            background-color: var(--vscode-focusBorder, #007fd4);
+        .toggle-control input:checked + .toggle-track {
+            background: var(--vscode-button-background, #0e639c);
+            border-color: var(--vscode-button-background, #0e639c);
         }
 
-        input:checked + .slider:before {
+        .toggle-control input:checked + .toggle-track .toggle-thumb {
             transform: translateX(18px);
+            background: #ffffff;
+        }
+
+        .shortcuts-table {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
         }
 
         .shortcut-row {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 4px 0;
+            padding: 5px 0;
             font-size: 12px;
         }
 
-        .kbd {
-            background: var(--vscode-keybindingLabel-background, rgba(255, 255, 255, 0.1));
-            border: 1px solid var(--vscode-keybindingLabel-border, rgba(255, 255, 255, 0.2));
-            border-bottom-color: var(--vscode-keybindingLabel-bottomBorder, rgba(255, 255, 255, 0.2));
-            border-radius: 4px;
-            padding: 2px 6px;
-            font-family: monospace;
+        .shortcut-label {
+            color: var(--vscode-foreground, #cccccc);
+        }
+
+        .shortcut-keys {
+            color: var(--vscode-descriptionForeground, #8a8a93);
             font-size: 11px;
-            color: var(--vscode-keybindingLabel-foreground, #f472b6);
+        }
+
+        .kbd {
+            background: var(--vscode-keybindingLabel-background, rgba(128, 128, 128, 0.12));
+            border: 1px solid var(--vscode-keybindingLabel-border, rgba(128, 128, 128, 0.25));
+            border-bottom: 2px solid var(--vscode-keybindingLabel-bottomBorder, rgba(128, 128, 128, 0.35));
+            border-radius: 3px;
+            padding: 2px 6px;
+            font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--vscode-keybindingLabel-foreground, var(--vscode-foreground, #dcdce0));
+            box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+            display: inline-block;
+        }
+
+        .shortcut-config-box {
+            margin-top: 12px;
+            padding: 10px 14px;
+            background: var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-background, #222227) 85%, #888888 15%));
+            border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.2));
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
     </style>
 </head>
@@ -2453,131 +3366,156 @@ function getHtml(
         <div id="hover-tooltip"></div>
         <div id="context-menu"></div>
         
-        <div id="folders-popover" class="glass-popover" style="display: none; width: 680px; max-width: 94vw; max-height: 80vh;">
+        <div id="folders-popover" class="menu-popover" style="display: none; width: 700px; max-width: 94vw; max-height: 82vh;">
             <div class="popover-header">
-                <span>📁 Folders &amp; Ignored Items</span>
-                <button class="popover-close" id="close-folders-popover">&times;</button>
+                <div class="popover-header-title">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="opacity:0.9;"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z" fill="currentColor" fill-opacity="0.08"/></svg>
+                    <span>Folders &amp; Ignored Items</span>
+                </div>
+                <button class="popover-close" id="close-folders-popover" title="Close (Esc)">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5"/></svg>
+                </button>
             </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 12px; overflow-y: auto; max-height: 68vh;">
+            <div class="folders-popover-grid">
                 <!-- Left column: Shown Folders -->
-                <div style="display: flex; flex-direction: column; min-width: 0;">
-                    <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--vscode-focusBorder, #007fd4); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 20%, transparent); display: flex; justify-content: space-between; align-items: center;">
-                        <span>Shown Folders</span>
-                        <span id="shown-folders-count" style="font-size: 11px; color: var(--vscode-descriptionForeground, #8a8a93);">0</span>
+                <div class="popover-column popover-column-left">
+                    <div class="popover-column-header">
+                        <span>Active Directories</span>
+                        <span id="shown-folders-count" class="popover-count-badge">0</span>
                     </div>
-                    <div class="popover-body" id="folders-list" style="max-height: none; padding: 0;"></div>
+                    <div class="popover-body" id="folders-list"></div>
                 </div>
 
                 <!-- Right column: Ignored Patterns & Folders -->
-                <div style="display: flex; flex-direction: column; min-width: 0;">
-                    <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--vscode-errorForeground, #ef4444); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #ef4444) 20%, transparent); display: flex; justify-content: space-between; align-items: center;">
-                        <span>Ignored Items</span>
-                        <span id="ignores-count" style="font-size: 11px; color: var(--vscode-descriptionForeground, #8a8a93);">0</span>
+                <div class="popover-column popover-column-right">
+                    <div class="popover-column-header">
+                        <span>Ignored Patterns</span>
+                        <span id="ignores-count" class="popover-count-badge">0</span>
                     </div>
-                    <div class="popover-add-bar" style="padding: 0 0 8px 0; border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08)); margin-bottom: 8px;">
-                        <input type="text" id="add-ignore-input" class="popover-input" placeholder="e.g. src/temp/ or *.log">
-                        <button id="add-ignore-btn" class="popover-btn-action">+ Add</button>
+                    <div class="popover-add-bar">
+                        <input type="text" id="add-ignore-input" class="popover-input" placeholder="e.g. src/temp/ or *.log" spellcheck="false">
+                        <button id="add-ignore-btn" class="popover-btn-action">
+                            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M8 2.5V13.5M2.5 8H13.5"/></svg>
+                            <span>Add</span>
+                        </button>
                     </div>
-                    <div class="popover-body" id="ignores-list" style="max-height: none; padding: 0;"></div>
+                    <div class="popover-body" id="ignores-list"></div>
                 </div>
             </div>
         </div>
 
-        <div id="actions-modal">
+        <div id="actions-modal" class="menu-modal">
             <div class="modal-header">
-                <span>⚙ Settings &amp; Actions</span>
-                <button class="modal-close" id="close-modal">&times;</button>
+                <div class="modal-header-title">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" style="opacity:0.9;"><path d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.8-1.3 2 .8.8 2-1.3.8.3.4 2.3h1.2l.5-2.4.8-.3 2 1.3.8-.8-1.3-2 .3-.8 2.3-.4V7.4l-2.4-.5-.3-.7 1.3-2-.8-.9-2 1.3-.7-.2zM8 10.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+                    <span>Settings &amp; Shortcuts</span>
+                </div>
+                <button class="modal-close" id="close-modal" title="Close (Esc)">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5"/></svg>
+                </button>
             </div>
-            <div class="modal-section">
-                <div class="modal-section-title">Layout &amp; Grid</div>
-                <div class="setting-row">
-                    <div>
-                        <div class="setting-name">Layout Mode</div>
-                        <div class="setting-desc">Spanning grid scales tall files across multiple slots</div>
+            <div class="modal-content-scroll">
+                <div class="modal-section">
+                    <div class="modal-section-title">Layout &amp; Grid</div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Layout Mode</div>
+                            <div class="setting-desc">Spanning grid scales tall files across multiple vertical slots</div>
+                        </div>
+                        <div class="segmented-control">
+                            <button id="layout-spanning-btn" class="seg-btn">Spanning</button>
+                            <button id="layout-uniform-btn" class="seg-btn">Uniform</button>
+                        </div>
                     </div>
-                    <div class="segmented-control">
-                        <button id="layout-spanning-btn" class="seg-btn">Spanning</button>
-                        <button id="layout-uniform-btn" class="seg-btn">Uniform</button>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Drag-to-Reorder Mode</div>
+                            <div class="setting-desc">Choose between swapping positions or reflowing adjacent tiles</div>
+                        </div>
+                        <div class="segmented-control">
+                            <button id="drag-swap-btn" class="seg-btn">Swap</button>
+                            <button id="drag-shift-btn" class="seg-btn">Shift</button>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Media Thumbnails</div>
+                            <div class="setting-desc">Render image and PDF page 1 previews directly inside thumbnail tiles</div>
+                        </div>
+                        <label class="toggle-control">
+                            <input type="checkbox" id="media-thumbnails-toggle" checked>
+                            <span class="toggle-track">
+                                <span class="toggle-thumb"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Reflow Layout</div>
+                            <div class="setting-desc">Reset grid slot arrangement back to repository directory order</div>
+                        </div>
+                        <button id="reflow-layout-btn" class="action-trigger-btn">Reflow Grid</button>
                     </div>
                 </div>
-                <div class="setting-row">
-                    <div>
-                        <div class="setting-name">Drag-to-Reorder Mode</div>
-                        <div class="setting-desc">Choose swap positions or shift reflow when dropping tiles</div>
-                    </div>
-                    <div class="segmented-control">
-                        <button id="drag-swap-btn" class="seg-btn">Swap</button>
-                        <button id="drag-shift-btn" class="seg-btn">Shift</button>
-                    </div>
-                </div>
-                <div class="setting-row">
-                    <div>
-                        <div class="setting-name">Media Thumbnails</div>
-                        <div class="setting-desc">Render images and PDF page 1 previews inside tiles</div>
-                    </div>
-                    <label class="switch">
-                        <input type="checkbox" id="media-thumbnails-toggle" checked>
-                        <span class="slider"></span>
-                    </label>
-                </div>
-                <div class="setting-row" style="border-bottom: none; margin-top: 6px;">
-                    <div>
-                        <div class="setting-name">Reflow Layout</div>
-                        <div class="setting-desc">Reset grid slot ordering to repository order</div>
-                    </div>
-                    <button id="reflow-layout-btn" class="action-trigger-btn">Reflow Grid</button>
-                </div>
-            </div>
 
-            <div class="modal-section">
-                <div class="modal-section-title">Shortcuts</div>
-                <div class="shortcut-row">
-                    <span>Open / Focus</span>
-                    <span>Press <span class="kbd" id="open-shortcut-label">${openKeybindingLabel}</span></span>
-                </div>
-                <div class="shortcut-row">
-                    <span>Code Magnifier</span>
-                    <span>Hold <span class="kbd">Left CTRL</span> + Hover</span>
-                </div>
-                <div class="shortcut-row">
-                    <span>Jump to Line</span>
-                    <span><span class="kbd">Left Click</span> Tile Line</span>
-                </div>
-                <div class="shortcut-row">
-                    <span>Close Tab</span>
-                    <span><span class="kbd">Middle Click</span> or <span class="kbd">×</span></span>
-                </div>
-                <div class="shortcut-row">
-                    <span>Isolate Folder</span>
-                    <span><span class="kbd">Left Click</span> Header / Tree Item</span>
-                </div>
-                <div class="shortcut-row">
-                    <span>Context Menu</span>
-                    <span><span class="kbd">Right Click</span> Tile</span>
-                </div>
-                <div class="shortcut-row" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.08);">
-                    <div>
-                        <div style="font-weight: 500; color: #ffffff;">Toggle Hotkey</div>
-                        <div style="font-size: 11px; color: #8a8a93; margin-top: 2px;">Shortcut: <span class="kbd" id="open-shortcut-label-2">${openKeybindingLabel}</span></div>
+                <div class="modal-section">
+                    <div class="modal-section-title">Keyboard &amp; Mouse Shortcuts</div>
+                    <div class="shortcuts-table">
+                        <div class="shortcut-row">
+                            <span class="shortcut-label">Open / Focus Thumbview</span>
+                            <span class="shortcut-keys"><span class="kbd" id="open-shortcut-label">${openKeybindingLabel}</span></span>
+                        </div>
+                        <div class="shortcut-row">
+                            <span class="shortcut-label">Code Magnifier Preview</span>
+                            <span class="shortcut-keys"><span class="kbd">${isMac ? "Cmd / Ctrl" : "Ctrl"}</span> + Hover</span>
+                        </div>
+                        <div class="shortcut-row">
+                            <span class="shortcut-label">Jump to Line in Editor</span>
+                            <span class="shortcut-keys"><span class="kbd">Left Click</span> Tile Line</span>
+                        </div>
+                        <div class="shortcut-row">
+                            <span class="shortcut-label">Close Document / Tab</span>
+                            <span class="shortcut-keys"><span class="kbd">Middle Click</span> or <span class="kbd">×</span></span>
+                        </div>
+                        <div class="shortcut-row">
+                            <span class="shortcut-label">Isolate Folder</span>
+                            <span class="shortcut-keys"><span class="kbd">Left Click</span> Folder Header / Item</span>
+                        </div>
+                        <div class="shortcut-row">
+                            <span class="shortcut-label">Context Menu</span>
+                            <span class="shortcut-keys"><span class="kbd">${isMac ? "Right Click / ⌃Click" : "Right Click"}</span> Tile</span>
+                        </div>
                     </div>
-                    <button id="change-hotkey-btn" class="action-trigger-btn" style="padding: 4px 10px; font-size: 11px;">Change Hotkey</button>
+                    <div class="shortcut-config-box">
+                        <div class="setting-text">
+                            <div class="setting-name">Global Shortcut Hotkey</div>
+                            <div class="setting-desc">Current keybinding: <span class="kbd" id="open-shortcut-label-2">${openKeybindingLabel}</span></div>
+                        </div>
+                        <button id="change-hotkey-btn" class="action-trigger-btn">Configure Keybinding</button>
+                    </div>
                 </div>
             </div>
         </div>
         <div class="controls-overlay">
             <div class="search-container">
                 <input type="text" id="search-input" class="search-input" title="Begin typing with the Thumbview open to Search" placeholder="Search files (e.g. auth)...">
-                <button id="search-match-case" class="search-option-btn" title="Match Case (Alt+C)">Aa</button>
-                <button id="search-match-word" class="search-option-btn" title="Match Whole Word (Alt+W)">[ab]</button>
-                <button id="search-use-regex" class="search-option-btn" title="Use Regular Expression (Alt+X)">.*</button>
-                <button id="clear-search" class="search-option-btn" title="Clear Search (Ctrl+Backspace)" style="display: none;">&times;</button>
+                <button id="search-match-case" class="search-option-btn" title="Match Case (${isMac ? "⌥C" : "Alt+C"})">Aa</button>
+                <button id="search-match-word" class="search-option-btn" title="Match Whole Word (${isMac ? "⌥W" : "Alt+W"})">[ab]</button>
+                <button id="search-use-regex" class="search-option-btn" title="Use Regular Expression (${isMac ? "⌥X" : "Alt+X"})">.*</button>
+                <button id="clear-search" class="search-option-btn" title="Clear Search (${isMac ? "⌘⌫" : "Ctrl+Backspace"})" style="display: none;">&times;</button>
             </div>
             <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
                 <span class="breadcrumb-item" id="breadcrumb-root">root</span>
             </div>
             <div class="top-bar-actions">
-                <button id="folders-btn" class="toolbar-btn" title="Folders &amp; Ignored">📁 Folders &amp; Ignored</button>
-                <button id="actions-btn" class="toolbar-btn" title="Settings &amp; Shortcuts">⚙ Settings</button>
+                <button id="folders-btn" class="toolbar-btn" title="Folders &amp; Ignored">
+                    <svg class="toolbar-btn-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z" fill="currentColor" fill-opacity="0.1"/></svg>
+                    <span>Folders &amp; Ignored</span>
+                </button>
+                <button id="actions-btn" class="toolbar-btn" title="Settings &amp; Shortcuts">
+                    <svg class="toolbar-btn-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.8-1.3 2 .8.8 2-1.3.8.3.4 2.3h1.2l.5-2.4.8-.3 2 1.3.8-.8-1.3-2 .3-.8 2.3-.4V7.4l-2.4-.5-.3-.7 1.3-2-.8-.9-2 1.3-.7-.2zM8 10.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+                    <span>Settings</span>
+                </button>
             </div>
         </div>
     </div>
