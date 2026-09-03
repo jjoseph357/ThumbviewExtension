@@ -155,7 +155,8 @@
       "thumbview-container": [
         {
           "id": "thumbview-sidebar",
-          "name": "Thumbview"
+          "name": "Thumbview",
+          "icon": "media/icon.svg"
         }
       ]
     },
