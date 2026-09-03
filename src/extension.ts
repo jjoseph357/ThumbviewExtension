@@ -2919,6 +2919,7 @@ function getHtml(
         }
 
         .popover-header {
+            flex-shrink: 0;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -2959,8 +2960,10 @@ function getHtml(
         .folders-popover-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            max-height: 68vh;
-            min-height: 260px;
+            grid-template-rows: 1fr;
+            flex: 1 1 0%;
+            min-height: 0;
+            height: 100%;
             overflow: hidden;
         }
 
@@ -2968,8 +2971,11 @@ function getHtml(
             display: flex;
             flex-direction: column;
             min-width: 0;
+            min-height: 0;
+            height: 100%;
             padding: 10px;
             overflow: hidden;
+            box-sizing: border-box;
         }
 
         .popover-column-left {
@@ -2977,6 +2983,7 @@ function getHtml(
         }
 
         .popover-column-header {
+            flex-shrink: 0;
             font-size: 11px;
             font-weight: 600;
             text-transform: uppercase;
@@ -3001,12 +3008,44 @@ function getHtml(
         }
 
         .popover-body {
-            flex: 1;
+            flex: 1 1 0%;
+            min-height: 0;
             overflow-y: auto;
+            overflow-x: hidden;
             display: flex;
             flex-direction: column;
             gap: 2px;
-            padding: 2px 0;
+            padding: 2px 4px 6px 0;
+            scrollbar-width: thin;
+            scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.25)) transparent;
+        }
+
+        .popover-body::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .popover-body::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.12);
+            border-radius: 4px;
+        }
+
+        .popover-body::-webkit-scrollbar-thumb {
+            background: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.25));
+            border-radius: 4px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+
+        .popover-body::-webkit-scrollbar-thumb:hover {
+            background: var(--vscode-scrollbarSlider-hoverBackground, rgba(255, 255, 255, 0.45));
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+
+        .popover-body::-webkit-scrollbar-thumb:active {
+            background: var(--vscode-scrollbarSlider-activeBackground, rgba(255, 255, 255, 0.65));
+            border: 2px solid transparent;
+            background-clip: padding-box;
         }
 
         .popover-item {
@@ -3089,6 +3128,7 @@ function getHtml(
         }
 
         .popover-add-bar {
+            flex-shrink: 0;
             display: flex;
             gap: 6px;
             padding-bottom: 8px;
@@ -3256,6 +3296,30 @@ function getHtml(
             padding: 16px 20px;
             overflow-y: auto;
             max-height: calc(84vh - 48px);
+            scrollbar-width: thin;
+            scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.25)) transparent;
+        }
+
+        .modal-content-scroll::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .modal-content-scroll::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.12);
+            border-radius: 4px;
+        }
+
+        .modal-content-scroll::-webkit-scrollbar-thumb {
+            background: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.25));
+            border-radius: 4px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+
+        .modal-content-scroll::-webkit-scrollbar-thumb:hover {
+            background: var(--vscode-scrollbarSlider-hoverBackground, rgba(255, 255, 255, 0.45));
+            border: 2px solid transparent;
+            background-clip: padding-box;
         }
 
         .modal-section {
@@ -3462,7 +3526,7 @@ function getHtml(
         <div id="hover-tooltip"></div>
         <div id="context-menu"></div>
         
-        <div id="folders-popover" class="menu-popover" style="display: none; width: 700px; max-width: 94vw; max-height: 82vh;">
+        <div id="folders-popover" class="menu-popover" style="display: none; width: 720px; max-width: 94vw; height: 560px; max-height: 82vh;">
             <div class="popover-header">
                 <div class="popover-header-title">
                     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="opacity:0.9;"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z" fill="currentColor" fill-opacity="0.08"/></svg>
