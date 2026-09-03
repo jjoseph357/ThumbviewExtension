@@ -395,6 +395,37 @@ export async function activate(context: vscode.ExtensionContext) {
         return map;
     };
 
+    let cachedAllRelativePaths: string[] = [];
+    const getAllWorkspaceRelativePaths = async (): Promise<string[]> => {
+        try {
+            const uris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git}/**");
+            cachedAllRelativePaths = uris.map(u => vscode.workspace.asRelativePath(u).replace(/\\/g, "/"));
+            return cachedAllRelativePaths;
+        } catch {
+            return cachedAllRelativePaths;
+        }
+    };
+
+    const computeIgnoreCounts = (patterns: string[], allPaths: string[]): { counts: { [pat: string]: number }; filesMap: { [pat: string]: string[] } } => {
+        const counts: { [pat: string]: number } = {};
+        const filesMap: { [pat: string]: string[] } = {};
+        for (const pat of patterns) {
+            counts[pat] = 0;
+            filesMap[pat] = [];
+        }
+        for (const p of allPaths) {
+            for (const pat of patterns) {
+                if (shouldIgnore(p, [pat])) {
+                    counts[pat] = (counts[pat] || 0) + 1;
+                    if (filesMap[pat].length < 100) {
+                        filesMap[pat].push(p);
+                    }
+                }
+            }
+        }
+        return { counts, filesMap };
+    };
+
     const updateLayoutFromCache = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
         if (!cachedScannedFiles) {
             await refreshThumbview(panel);
@@ -404,6 +435,11 @@ export async function activate(context: vscode.ExtensionContext) {
         try {
             const { ignorePatterns } = getIgnoreState();
             const activeFiles = cachedScannedFiles.filter(file => !shouldIgnore(file.path, ignorePatterns));
+
+            const allPaths = cachedAllRelativePaths.length > 0
+                ? cachedAllRelativePaths
+                : cachedScannedFiles.map(f => f.path);
+            const { counts: ignorePatternCounts, filesMap: ignoredFilesMap } = computeIgnoreCounts(ignorePatterns, allPaths);
 
             fileOrder.update(activeFiles.map(f => f.id));
             await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
@@ -474,6 +510,10 @@ export async function activate(context: vscode.ExtensionContext) {
                     minCellHeight,
                     openKeybinding,
                     ignorePatterns,
+                    ignorePatternCounts,
+                    ignoredFilesMap,
+                    extraCols,
+                    extraRows,
                     cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
                     folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
                     files: filesWithSlots,
@@ -513,6 +553,10 @@ export async function activate(context: vscode.ExtensionContext) {
                     minCellHeight,
                     openKeybinding,
                     ignorePatterns,
+                    ignorePatternCounts,
+                    ignoredFilesMap,
+                    extraCols,
+                    extraRows,
                     cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
                     folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
                     files: filesWithSlots,
@@ -604,6 +648,7 @@ export async function activate(context: vscode.ExtensionContext) {
         cachedScannedFiles = files;
     }).catch(() => {});
     fetchWorkspaceGitDiff().catch(() => {});
+    getAllWorkspaceRelativePaths().catch(() => {});
 
     const enterFullscreen = async (): Promise<void> => {
         if (fullscreenActive) {
@@ -1012,16 +1057,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "ignoreFile") {
                     try {
-                        const relPath = msg.path;
+                        const relPath = (msg.path || "").replace(/\\/g, "/").trim();
                         if (relPath) {
                             const state = getIgnoreState();
                             if (!state.ignorePatterns.includes(relPath)) {
                                 await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, relPath] });
                                 vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
+                                refreshProviders();
                             }
-                            refreshProviders();
                             if (activePanel) {
-                                updateLayoutFromCache(activePanel);
+                                await updateLayoutFromCache(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -1263,7 +1308,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "ignoreFolder") {
                     try {
-                        const relPath = msg.folderPath;
+                        const relPath = (msg.folderPath || "").replace(/\\/g, "/").trim();
                         if (relPath) {
                             const state = getIgnoreState();
                             if (!state.ignorePatterns.includes(relPath)) {
@@ -1272,7 +1317,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
                             refreshProviders();
                             if (activePanel) {
-                                updateLayoutFromCache(activePanel);
+                                await updateLayoutFromCache(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -2027,16 +2072,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "addIgnorePattern") {
                     try {
-                        const pattern = (msg.pattern || "").trim();
+                        const pattern = (msg.pattern || "").replace(/\\/g, "/").trim();
                         if (pattern) {
                             const state = getIgnoreState();
                             if (!state.ignorePatterns.includes(pattern)) {
                                 await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, pattern] });
                                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                                 refreshProviders();
-                                if (activePanel) {
-                                    updateLayoutFromCache(activePanel);
-                                }
+                            }
+                            if (activePanel) {
+                                await updateLayoutFromCache(activePanel);
                             }
                         }
                     } catch (err: any) {
@@ -2482,8 +2527,8 @@ export async function activate(context: vscode.ExtensionContext) {
         }, 200);
     };
 
-    watcher.onDidCreate(() => triggerUpdate());
-    watcher.onDidDelete(() => triggerUpdate());
+    watcher.onDidCreate(() => { getAllWorkspaceRelativePaths().catch(() => {}); triggerUpdate(); });
+    watcher.onDidDelete(() => { getAllWorkspaceRelativePaths().catch(() => {}); triggerUpdate(); });
     watcher.onDidChange(() => triggerUpdate());
 
     const docChangeDisposable = vscode.workspace.onDidChangeTextDocument(e => {

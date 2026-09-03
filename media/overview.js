@@ -133,7 +133,9 @@ const ICONS = {
     ignoreFolder: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-descriptionForeground,#8a8a93);"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z"/><path d="M3.25 13L12.75 3.25" stroke-linecap="round"/></svg>',
     ignoreFile: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-descriptionForeground,#8a8a93);"><path d="M3.5 2C2.67 2 2 2.67 2 3.5V12.5C2 13.33 2.67 14 3.5 14H12.5C13.33 14 14 13.33 14 12.5V5.5L10.5 2H3.5Z"/><path d="M10.5 2V5.5H14"/><path d="M3.5 12.5L12.5 3.5" stroke-linecap="round"/></svg>',
     remove: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg>',
-    empty: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.35;margin-bottom:8px;"><circle cx="12" cy="12" r="9"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>'
+    empty: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.35;margin-bottom:8px;"><circle cx="12" cy="12" r="9"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
+    chevronRight: '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;vertical-align:middle;flex-shrink:0;opacity:0.6;"><path d="M6 4l4 4-4 4V4z"/></svg>',
+    chevronDown: '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;vertical-align:middle;flex-shrink:0;opacity:0.6;"><path d="M4 6l4 4 4-4H4z"/></svg>'
 };
 
 let data = null;
@@ -142,6 +144,7 @@ let activeFileUri = null;
 let focusedFolder = ""; // empty means root
 
 let currentIgnorePatterns = [];
+const expandedNavigatorFolders = new Set();
 let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
@@ -2029,11 +2032,24 @@ function render() {
         const totalItems = displayItems.length;
         if (totalItems === 0) return;
 
-        const localGrid = buildStableGrid(totalItems, overviewAspect);
-        const cardCols = localGrid.cols + extraCols;
-        const cardRows = localGrid.rows + extraRows;
+        const baseGrid = buildStableGrid(totalItems, overviewAspect);
+        const cardCols = baseGrid.cols + extraCols;
+        const cardRows = baseGrid.rows + extraRows;
         const localCellW = availableW / Math.max(1, cardCols);
         const localCellH = availableH / Math.max(1, cardRows);
+
+        const cardSlots = [];
+        for (let r = 0; r < cardRows; r++) {
+            for (let c = 0; c < cardCols; c++) {
+                cardSlots.push([c, r]);
+            }
+        }
+
+        const localGrid = {
+            cols: cardCols,
+            rows: cardRows,
+            slots: cardSlots
+        };
 
         activeRenderGrid = {
             cols: cardCols,
@@ -2048,8 +2064,8 @@ function render() {
         let slotIdx = 0;
 
         for (const item of displayItems) {
-            if (slotIdx >= localGrid.slots.length) break;
-            const slot = localGrid.slots[slotIdx++];
+            if (slotIdx >= cardSlots.length) break;
+            const slot = cardSlots[slotIdx++];
             if (!item) continue;
             const x = GRID_SIDE_MARGIN + slot[0] * localCellW;
             const y = GRID_TOP_MARGIN + slot[1] * localCellH;
@@ -2114,12 +2130,9 @@ function render() {
                 const mosaicH = localCellH - 46;
 
                 if (mosaicW >= 24 && mosaicH >= 16 && group.files && group.files.length > 0) {
+                    const groupFolderOrder = (data && data.folderOrders && data.folderOrders[group.path]) || null;
                     if (isSpanningMode) {
-                        if (!group._spanningLayout || group._spanningLayout._aspect !== overviewAspect) {
-                            group._spanningLayout = buildSpanningGridLocal(group.files, overviewAspect);
-                            group._spanningLayout._aspect = overviewAspect;
-                        }
-                        const spanningLayout = group._spanningLayout;
+                        const spanningLayout = buildSpanningGridLocal(group.files, overviewAspect, groupFolderOrder, extraCols, extraRows);
                         const miniCols = spanningLayout.cols;
                         const miniRows = spanningLayout.rows;
                         const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
@@ -2170,22 +2183,33 @@ function render() {
                             }
                         }
                     } else {
-                        if (!group._miniGrid || group._miniGrid._aspect !== overviewAspect) {
-                            group._miniGrid = buildStableGrid(group.files.length, overviewAspect);
-                            group._miniGrid._aspect = overviewAspect;
-                        }
-                        const miniGrid = group._miniGrid;
-                        const miniCols = miniGrid.cols;
-                        const miniRows = miniGrid.rows;
+                        const totalSlots = Math.max(group.files.length, groupFolderOrder ? groupFolderOrder.length : 0);
+                        const baseMiniGrid = buildStableGrid(totalSlots, overviewAspect);
+                        const miniCols = baseMiniGrid.cols + extraCols;
+                        const miniRows = baseMiniGrid.rows + extraRows;
                         const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
 
                         const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
                         const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
 
-                        for (let mIdx = 0; mIdx < group.files.length; mIdx++) {
-                            if (mIdx >= miniGrid.slots.length) break;
-                            const pf = group.files[mIdx];
-                            const miniSlot = miniGrid.slots[mIdx];
+                        const miniSlots = [];
+                        for (let r = 0; r < miniRows; r++) {
+                            for (let c = 0; c < miniCols; c++) {
+                                miniSlots.push([c, r]);
+                            }
+                        }
+
+                        const groupFilesById = new Map(group.files.map(f => [f.id, f]));
+                        const orderToUse = groupFolderOrder && groupFolderOrder.length > 0
+                            ? groupFolderOrder
+                            : group.files.map(f => f.id);
+
+                        for (let mIdx = 0; mIdx < orderToUse.length && mIdx < miniSlots.length; mIdx++) {
+                            const fid = orderToUse[mIdx];
+                            if (!fid) continue;
+                            const pf = groupFilesById.get(fid);
+                            if (!pf) continue;
+                            const miniSlot = miniSlots[mIdx];
                             const miniX = mosaicX + miniSlot[0] * (miniCellW + gap);
                             const miniY = mosaicY + miniSlot[1] * (miniCellH + gap);
 
@@ -2406,26 +2430,33 @@ function render() {
         const x = cursorPos.px - (dragGrabOffset ? dragGrabOffset.x : 0);
         const y = cursorPos.py - (dragGrabOffset ? dragGrabOffset.y : 0);
 
-        ctx.strokeStyle = getThemeColor("--vscode-focusBorder", "#a855f7");
-        ctx.lineWidth = 2;
+        const style = BORDER_STYLES.dragging;
+        ctx.strokeStyle = style.color;
+        ctx.lineWidth = style.width;
         ctx.strokeRect(x, y, ghostW, ghostH);
-        ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.25);
-        ctx.fillRect(x, y, ghostW, ghostH);
-
-        ctx.fillStyle = getThemeColor("--vscode-foreground", "#ffffff");
-        ctx.font = "bold 12px system-ui, sans-serif";
-        ctx.fillText("📁 " + (draggingFolder.name || draggingFolder.folderPath), x + 8, y + 20);
+        ctx.fillStyle = style.color;
+        ctx.font = TILE_LABEL_FONT;
+        ctx.fillText("📁 " + (draggingFolder.name || draggingFolder.folderPath), x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
 
         // drop-target outline
         if (dragTarget) {
             ctx.strokeStyle = getThemeColor("--vscode-focusBorder", "#007fd4");
             ctx.lineWidth = 2;
-            ctx.strokeRect(
-                GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
-                GRID_TOP_MARGIN + dragTarget.row * dragTarget.cellH,
-                dragTarget.cellW,
-                dragTarget.cellH
-            );
+            if (dragTarget.file && dragTarget.file._cell) {
+                ctx.strokeRect(
+                    dragTarget.file._cell.x,
+                    dragTarget.file._cell.y,
+                    dragTarget.file._cell.w,
+                    dragTarget.file._cell.h
+                );
+            } else {
+                ctx.strokeRect(
+                    GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
+                    GRID_TOP_MARGIN + dragTarget.row * dragTarget.cellH,
+                    dragTarget.cellW,
+                    dragTarget.cellH
+                );
+            }
         }
     }
 
@@ -2979,9 +3010,10 @@ canvas.addEventListener("mousedown", event => {
     if (data._folderCards) {
         for (const card of data._folderCards) {
             if (pointInRect(card, cursorPos.px, cursorPos.py)) {
-                    candidateFolder = { card, startX: cursorPos.px, startY: cursorPos.py };
-                    return;
-                }
+                candidateFolder = { card, startX: cursorPos.px, startY: cursorPos.py };
+                dragGrabOffset = { x: cursorPos.px - card.x, y: cursorPos.py - card.y };
+                return;
+            }
         }
     }
 
@@ -3427,6 +3459,11 @@ canvas.addEventListener("contextmenu", event => {
         };
         document.getElementById("menu-ignore").onclick = () => {
             hideContextMenu();
+            if (targetFile && targetFile.path && !currentIgnorePatterns.includes(targetFile.path)) {
+                currentIgnorePatterns.push(targetFile.path);
+                updateIgnoresPopover();
+                updateFoldersPopover();
+            }
             vscode.postMessage({ command: "ignoreFile", uri: targetFile.uri, path: targetFile.path });
         };
     } else if (targetFolderCard) {
@@ -3503,6 +3540,12 @@ canvas.addEventListener("contextmenu", event => {
         };
         document.getElementById("menu-ignore-folder").onclick = () => {
             hideContextMenu();
+            const fp = targetFolderCard && targetFolderCard.folderPath;
+            if (fp && !currentIgnorePatterns.includes(fp)) {
+                currentIgnorePatterns.push(fp);
+                updateIgnoresPopover();
+                updateFoldersPopover();
+            }
             vscode.postMessage({ command: "ignoreFolder", folderPath: targetFolderCard.folderPath });
         };
     } else {
@@ -3620,6 +3663,12 @@ function escapeHtml(s) {
         .replace(/'/g, "&#039;");
 }
 
+function isPatternIgnored(target) {
+    if (!target) return false;
+    const clean = target.replace(/\/+$/, "");
+    return currentIgnorePatterns.some(p => p === target || p.replace(/\/+$/, "") === clean);
+}
+
 function updateIgnoresPopover() {
     const countEl = document.getElementById("ignores-count");
     if (countEl) {
@@ -3656,7 +3705,17 @@ function updateIgnoresPopover() {
         const iconHtml = isFolder ? ICONS.ignoreFolder : ICONS.ignoreFile;
         const kindBadge = `<span class="pattern-type-badge">${isFolder ? "folder" : "pattern"}</span>`;
 
-        label.innerHTML = `${iconHtml}<span class="pattern-text" title="${escapeHtml(pat)}">${escapeHtml(pat)}</span>${kindBadge}`;
+        const matchedCount = (data && data.ignorePatternCounts && typeof data.ignorePatternCounts[pat] === "number")
+            ? data.ignorePatternCounts[pat]
+            : 0;
+        const matchedFiles = (data && data.ignoredFilesMap && data.ignoredFilesMap[pat]) || [];
+        const countBadge = `<span class="popover-item-count" style="margin-right: 6px; font-size: 10px;" title="${matchedCount} file${matchedCount === 1 ? '' : 's'} matching pattern">${matchedCount} file${matchedCount === 1 ? '' : 's'}</span>`;
+
+        const tooltipText = matchedFiles.length > 0
+            ? `${pat} (${matchedCount} file${matchedCount === 1 ? '' : 's'}):\n` + matchedFiles.slice(0, 10).join('\n') + (matchedFiles.length > 10 ? `\n...and ${matchedFiles.length - 10} more` : '')
+            : pat;
+
+        label.innerHTML = `${iconHtml}<span class="pattern-text" title="${escapeHtml(tooltipText)}">${escapeHtml(pat)}</span>${kindBadge}${countBadge}`;
         item.appendChild(label);
 
         const removeBtn = document.createElement("button");
@@ -3665,6 +3724,9 @@ function updateIgnoresPopover() {
         removeBtn.innerHTML = ICONS.remove;
         removeBtn.onclick = (e) => {
             e.stopPropagation();
+            currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== pat);
+            updateIgnoresPopover();
+            updateFoldersPopover();
             vscode.postMessage({ command: "removeIgnorePattern", pattern: pat });
         };
         item.appendChild(removeBtn);
@@ -3691,14 +3753,132 @@ function updateFoldersPopover() {
     // 2. Root Directory Files Only
     const rootOnlyFiles = data.files.filter(f => f.path && !f.path.includes("/"));
     if (rootOnlyFiles.length > 0) {
-        const rootOnlyItem = document.createElement("div");
-        rootOnlyItem.className = "popover-item" + (focusedFolder === "(root files)/" ? " active" : "");
-        rootOnlyItem.innerHTML = `<span class="item-icon-label">${ICONS.rootFiles} <span>Root Directory Files Only</span></span><span class="popover-item-count">${rootOnlyFiles.length} file${rootOnlyFiles.length === 1 ? "" : "s"}</span>`;
-        rootOnlyItem.onclick = () => {
+        const isRootExpanded = expandedNavigatorFolders.has("__root__");
+        const rootItem = document.createElement("div");
+        rootItem.className = "popover-item" + (focusedFolder === "(root files)/" ? " active" : "");
+
+        const titleDiv = document.createElement("div");
+        titleDiv.style.display = "flex";
+        titleDiv.style.alignItems = "center";
+        titleDiv.style.gap = "6px";
+        titleDiv.style.flex = "1";
+        titleDiv.style.minWidth = "0";
+
+        const chevronBtn = document.createElement("button");
+        chevronBtn.className = "popover-chevron-btn";
+        chevronBtn.style.background = "transparent";
+        chevronBtn.style.border = "none";
+        chevronBtn.style.padding = "0";
+        chevronBtn.style.cursor = "pointer";
+        chevronBtn.style.display = "flex";
+        chevronBtn.style.alignItems = "center";
+        chevronBtn.innerHTML = isRootExpanded ? ICONS.chevronDown : ICONS.chevronRight;
+        chevronBtn.title = isRootExpanded ? "Collapse root files" : "Expand root files";
+        chevronBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (isRootExpanded) {
+                expandedNavigatorFolders.delete("__root__");
+            } else {
+                expandedNavigatorFolders.add("__root__");
+            }
+            updateFoldersPopover();
+        };
+        titleDiv.appendChild(chevronBtn);
+
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "item-icon-label";
+        labelSpan.innerHTML = `${ICONS.rootFiles} <span>Root Directory Files Only</span>`;
+        titleDiv.appendChild(labelSpan);
+
+        const countSpan = document.createElement("span");
+        countSpan.className = "popover-item-count";
+        countSpan.textContent = `${rootOnlyFiles.length} file${rootOnlyFiles.length === 1 ? "" : "s"}`;
+        titleDiv.appendChild(countSpan);
+
+        rootItem.appendChild(titleDiv);
+
+        const isRootIgnored = isPatternIgnored("(root files)/");
+        const ignoreBtn = document.createElement("button");
+        ignoreBtn.className = "popover-action-btn";
+        if (isRootIgnored) {
+            ignoreBtn.textContent = "Unignore";
+            ignoreBtn.title = "Unignore root directory files";
+            ignoreBtn.style.color = "var(--vscode-errorForeground, #f87171)";
+            ignoreBtn.onclick = (e) => {
+                e.stopPropagation();
+                currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== "(root files)/");
+                updateIgnoresPopover();
+                updateFoldersPopover();
+                vscode.postMessage({ command: "removeIgnorePattern", pattern: "(root files)/" });
+            };
+        } else {
+            ignoreBtn.textContent = "Ignore";
+            ignoreBtn.title = "Ignore root directory files in Thumbview";
+            ignoreBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (!currentIgnorePatterns.includes("(root files)/")) {
+                    currentIgnorePatterns.push("(root files)/");
+                    updateIgnoresPopover();
+                    updateFoldersPopover();
+                }
+                vscode.postMessage({ command: "addIgnorePattern", pattern: "(root files)/" });
+            };
+        }
+        rootItem.appendChild(ignoreBtn);
+
+        rootItem.onclick = () => {
             setFocusedFolderWithHistory("(root files)/");
             closeAllPopovers();
         };
-        list.appendChild(rootOnlyItem);
+        list.appendChild(rootItem);
+
+        if (isRootExpanded) {
+            for (const f of rootOnlyFiles) {
+                const fileItem = document.createElement("div");
+                fileItem.className = "popover-item";
+                fileItem.style.paddingLeft = "26px";
+
+                const fileLabel = document.createElement("div");
+                fileLabel.className = "item-icon-label";
+                fileLabel.innerHTML = `${ICONS.file} <span title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>`;
+                fileItem.appendChild(fileLabel);
+
+                const isFileIgnored = isPatternIgnored(f.path);
+                const fileIgnoreBtn = document.createElement("button");
+                fileIgnoreBtn.className = "popover-action-btn";
+                if (isFileIgnored) {
+                    fileIgnoreBtn.textContent = "Unignore";
+                    fileIgnoreBtn.title = `Unignore file '${f.path}'`;
+                    fileIgnoreBtn.style.color = "var(--vscode-errorForeground, #f87171)";
+                    fileIgnoreBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== f.path);
+                        updateIgnoresPopover();
+                        updateFoldersPopover();
+                        vscode.postMessage({ command: "removeIgnorePattern", pattern: f.path });
+                    };
+                } else {
+                    fileIgnoreBtn.textContent = "Ignore";
+                    fileIgnoreBtn.title = `Ignore file '${f.path}' in Thumbview`;
+                    fileIgnoreBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        if (!currentIgnorePatterns.includes(f.path)) {
+                            currentIgnorePatterns.push(f.path);
+                            updateIgnoresPopover();
+                            updateFoldersPopover();
+                        }
+                        vscode.postMessage({ command: "ignoreFile", uri: f.uri, path: f.path });
+                    };
+                }
+                fileItem.appendChild(fileIgnoreBtn);
+
+                fileItem.onclick = () => {
+                    vscode.postMessage({ command: "openFile", uri: f.uri });
+                    closeAllPopovers();
+                };
+                list.appendChild(fileItem);
+            }
+        }
     }
 
     // 3. Collect directory paths and counts
@@ -3723,6 +3903,9 @@ function updateFoldersPopover() {
 
     for (const folderPath of sortedFolders) {
         const count = folderCounts.get(folderPath);
+        const isFolderExpanded = expandedNavigatorFolders.has(folderPath);
+        const directFiles = data.files.filter(f => f.path && f.path.startsWith(folderPath) && !f.path.slice(folderPath.length).includes("/"));
+        
         const item = document.createElement("div");
         item.className = "popover-item" + (focusedFolder === folderPath ? " active" : "");
         
@@ -3732,20 +3915,80 @@ function updateFoldersPopover() {
         const titleDiv = document.createElement("div");
         titleDiv.style.display = "flex";
         titleDiv.style.alignItems = "center";
-        titleDiv.style.gap = "8px";
+        titleDiv.style.gap = "6px";
         titleDiv.style.flex = "1";
         titleDiv.style.minWidth = "0";
-        titleDiv.innerHTML = `<span class="item-icon-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${ICONS.folder} <span class="folder-name-text">${formatFolderPath(folderPath)}</span></span><span class="popover-item-count">${count} file${count === 1 ? "" : "s"}</span>`;
+
+        if (directFiles.length > 0) {
+            const chevronBtn = document.createElement("button");
+            chevronBtn.className = "popover-chevron-btn";
+            chevronBtn.style.background = "transparent";
+            chevronBtn.style.border = "none";
+            chevronBtn.style.padding = "0";
+            chevronBtn.style.cursor = "pointer";
+            chevronBtn.style.display = "flex";
+            chevronBtn.style.alignItems = "center";
+            chevronBtn.innerHTML = isFolderExpanded ? ICONS.chevronDown : ICONS.chevronRight;
+            chevronBtn.title = isFolderExpanded ? `Collapse ${folderPath}` : `Expand ${folderPath}`;
+            chevronBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (isFolderExpanded) {
+                    expandedNavigatorFolders.delete(folderPath);
+                } else {
+                    expandedNavigatorFolders.add(folderPath);
+                }
+                updateFoldersPopover();
+            };
+            titleDiv.appendChild(chevronBtn);
+        } else {
+            const spacer = document.createElement("span");
+            spacer.style.width = "12px";
+            spacer.style.display = "inline-block";
+            titleDiv.appendChild(spacer);
+        }
+
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "item-icon-label";
+        labelSpan.style.overflow = "hidden";
+        labelSpan.style.textOverflow = "ellipsis";
+        labelSpan.style.whiteSpace = "nowrap";
+        labelSpan.innerHTML = `${ICONS.folder} <span class="folder-name-text">${formatFolderPath(folderPath)}</span>`;
+        titleDiv.appendChild(labelSpan);
+
+        const countSpan = document.createElement("span");
+        countSpan.className = "popover-item-count";
+        countSpan.textContent = `${count} file${count === 1 ? "" : "s"}`;
+        titleDiv.appendChild(countSpan);
+
         item.appendChild(titleDiv);
 
+        const isDirIgnored = isPatternIgnored(folderPath);
         const ignoreBtn = document.createElement("button");
         ignoreBtn.className = "popover-action-btn";
-        ignoreBtn.title = `Ignore folder '${folderPath}' in Thumbview`;
-        ignoreBtn.textContent = "Ignore";
-        ignoreBtn.onclick = (e) => {
-            e.stopPropagation();
-            vscode.postMessage({ command: "addIgnorePattern", pattern: folderPath });
-        };
+        if (isDirIgnored) {
+            ignoreBtn.textContent = "Unignore";
+            ignoreBtn.title = `Unignore folder '${folderPath}'`;
+            ignoreBtn.style.color = "var(--vscode-errorForeground, #f87171)";
+            ignoreBtn.onclick = (e) => {
+                e.stopPropagation();
+                currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== folderPath && p.replace(/\/+$/, "") !== folderPath.replace(/\/+$/, ""));
+                updateIgnoresPopover();
+                updateFoldersPopover();
+                vscode.postMessage({ command: "removeIgnorePattern", pattern: folderPath });
+            };
+        } else {
+            ignoreBtn.textContent = "Ignore";
+            ignoreBtn.title = `Ignore folder '${folderPath}' in Thumbview`;
+            ignoreBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (!currentIgnorePatterns.includes(folderPath)) {
+                    currentIgnorePatterns.push(folderPath);
+                    updateIgnoresPopover();
+                    updateFoldersPopover();
+                }
+                vscode.postMessage({ command: "addIgnorePattern", pattern: folderPath });
+            };
+        }
         item.appendChild(ignoreBtn);
 
         item.onclick = () => {
@@ -3753,6 +3996,55 @@ function updateFoldersPopover() {
             closeAllPopovers();
         };
         list.appendChild(item);
+
+        if (isFolderExpanded && directFiles.length > 0) {
+            for (const f of directFiles) {
+                const fileItem = document.createElement("div");
+                fileItem.className = "popover-item";
+                fileItem.style.paddingLeft = `${8 + indent + 20}px`;
+
+                const fileName = f.path.slice(folderPath.length);
+                const fileLabel = document.createElement("div");
+                fileLabel.className = "item-icon-label";
+                fileLabel.innerHTML = `${ICONS.file} <span title="${escapeHtml(f.path)}">${escapeHtml(fileName)}</span>`;
+                fileItem.appendChild(fileLabel);
+
+                const isFileIgnored = isPatternIgnored(f.path);
+                const fileIgnoreBtn = document.createElement("button");
+                fileIgnoreBtn.className = "popover-action-btn";
+                if (isFileIgnored) {
+                    fileIgnoreBtn.textContent = "Unignore";
+                    fileIgnoreBtn.title = `Unignore file '${f.path}'`;
+                    fileIgnoreBtn.style.color = "var(--vscode-errorForeground, #f87171)";
+                    fileIgnoreBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== f.path);
+                        updateIgnoresPopover();
+                        updateFoldersPopover();
+                        vscode.postMessage({ command: "removeIgnorePattern", pattern: f.path });
+                    };
+                } else {
+                    fileIgnoreBtn.textContent = "Ignore";
+                    fileIgnoreBtn.title = `Ignore file '${f.path}' in Thumbview`;
+                    fileIgnoreBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        if (!currentIgnorePatterns.includes(f.path)) {
+                            currentIgnorePatterns.push(f.path);
+                            updateIgnoresPopover();
+                            updateFoldersPopover();
+                        }
+                        vscode.postMessage({ command: "ignoreFile", uri: f.uri, path: f.path });
+                    };
+                }
+                fileItem.appendChild(fileIgnoreBtn);
+
+                fileItem.onclick = () => {
+                    vscode.postMessage({ command: "openFile", uri: f.uri });
+                    closeAllPopovers();
+                };
+                list.appendChild(fileItem);
+            }
+        }
     }
 }
 
@@ -3798,6 +4090,11 @@ function handleAddIgnore() {
     if (!addIgnoreInput) return;
     const val = addIgnoreInput.value.trim();
     if (val) {
+        if (!currentIgnorePatterns.includes(val)) {
+            currentIgnorePatterns.push(val);
+            updateIgnoresPopover();
+            updateFoldersPopover();
+        }
         vscode.postMessage({ command: "addIgnorePattern", pattern: val });
         addIgnoreInput.value = "";
     }

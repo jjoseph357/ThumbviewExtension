@@ -4,20 +4,41 @@ const assert = require("assert");
 
 // Mock browser environment
 const listeners = {};
-const mockElement = (id) => ({
-    id,
-    style: {},
-    classList: { contains: () => false, add: () => {}, remove: () => {}, toggle: () => {} },
-    appendChild: () => {},
-    addEventListener: (event, fn) => {
-        listeners[id + ":" + event] = fn;
-    },
-    contains: () => false,
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
-    getContext: () => mockCtx,
-    clientWidth: 800,
-    clientHeight: 600
-});
+const mockElements = {};
+const mockElement = (id) => {
+    if (!mockElements[id]) {
+        let _innerHTML = "";
+        const children = [];
+        const el = {
+            id,
+            style: {},
+            classList: { contains: () => false, add: () => {}, remove: () => {}, toggle: () => {} },
+            appendChild: (child) => children.push(child),
+            children,
+            textContent: "",
+            value: "",
+            addEventListener: (event, fn) => {
+                listeners[id + ":" + event] = fn;
+            },
+            contains: () => false,
+            getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+            getContext: () => mockCtx,
+            clientWidth: 800,
+            clientHeight: 600
+        };
+        Object.defineProperty(el, "innerHTML", {
+            get: () => _innerHTML,
+            set: (val) => {
+                _innerHTML = val;
+                if (!val) {
+                    children.length = 0;
+                }
+            }
+        });
+        mockElements[id] = el;
+    }
+    return mockElements[id];
+};
 
 const calls = [];
 const mockCtx = {
@@ -74,7 +95,20 @@ global.document = {
         style: {}
     },
     getElementById: (id) => mockElement(id),
-    createElement: (tag) => mockElement(tag),
+    createElement: (tag) => {
+        const children = [];
+        return {
+            tag,
+            style: {},
+            classList: { contains: () => false, add: () => {}, remove: () => {}, toggle: () => {} },
+            appendChild: (child) => children.push(child),
+            children,
+            innerHTML: "",
+            textContent: "",
+            title: "",
+            onclick: null
+        };
+    },
     addEventListener: (event, fn) => {
         docListeners[event] = fn;
     },
@@ -103,11 +137,15 @@ global.getOverviewState = () => ({
     data,
     focusedFolder,
     draggingFolder,
+    dragGrabOffset,
     dragTarget,
     activeRenderGrid,
+    currentIgnorePatterns,
     breadcrumb: { history: breadcrumbHistory, index: breadcrumbHistoryIndex }
 });
 global.setFocusedFolder = (f) => { focusedFolder = f; };
+global.updateIgnoresPopover = updateIgnoresPopover;
+global.updateFoldersPopover = updateFoldersPopover;
 `;
 
 try {
@@ -272,4 +310,64 @@ console.log("Focused folder after forward mouse button (4):", `"${global.getOver
 assert.strictEqual(global.getOverviewState().focusedFolder, "src/", "Forward button should navigate forward to src/");
 console.log("✓ Forward side mouse button navigated back to src/");
 
+console.log("\n=== Test 6: Testing Expand/Reduce Grid Space with Collapsed Folders ===");
+global.setFocusedFolder("");
+const expandedData = {
+    ...sampleData,
+    extraCols: 2,
+    extraRows: 1
+};
+messageHandler({ data: expandedData });
+const stateExpanded = global.getOverviewState();
+const localGrid = stateExpanded.activeRenderGrid;
+assert(localGrid, "activeRenderGrid must exist");
+console.log("localGrid cols & rows:", { cols: localGrid.cols, rows: localGrid.rows, slotsCount: localGrid.layout?.slots?.length });
+assert.strictEqual(localGrid.layout.slots.length, localGrid.cols * localGrid.rows, "cardSlots must cover all expanded grid cells");
+console.log("✓ Grid space correctly expanded for collapsed folder cards");
+
+console.log("\n=== Test 7: Testing Folder Drag Grab Offset ===");
+const testCard = stateExpanded.data._folderCards[0];
+canvasMousedown({
+    button: 0,
+    clientX: testCard.x + 15,
+    clientY: testCard.y + 25,
+    preventDefault: () => {}
+});
+const stateGrab = global.getOverviewState();
+console.log("dragGrabOffset:", stateGrab.dragGrabOffset);
+assert(stateGrab.dragGrabOffset, "dragGrabOffset should be defined on mousedown");
+assert.strictEqual(stateGrab.dragGrabOffset.x, 15, "dragGrabOffset.x should match cursor relative x");
+assert.strictEqual(stateGrab.dragGrabOffset.y, 25, "dragGrabOffset.y should match cursor relative y");
+console.log("✓ Folder drag grab offset computed correctly without top-left snapping");
+canvasMouseup({
+    button: 0,
+    clientX: testCard.x + 15,
+    clientY: testCard.y + 25,
+    preventDefault: () => {}
+});
+
+console.log("\n=== Test 8: Testing Ignored Patterns Popover and Counts ===");
+const popoverData = {
+    ...sampleData,
+    ignorePatterns: ["src/folder0/", "file_1.ts"],
+    ignorePatternCounts: { "src/folder0/": 40, "file_1.ts": 1 },
+    ignoredFilesMap: { "src/folder0/": ["src/folder0/file_0.ts"] }
+};
+messageHandler({ data: popoverData });
+global.updateIgnoresPopover();
+
+const ignoresCountEl = mockElements["ignores-count"];
+assert.strictEqual(ignoresCountEl.textContent, 2, "Ignores count should be 2");
+const ignoresListEl = mockElements["ignores-list"];
+assert(ignoresListEl.children.length === 2, "Ignores list should contain 2 items");
+console.log("✓ Ignored patterns rendered with correct counts in popover");
+
+console.log("\n=== Test 9: Testing File Navigator (Folders Popover) Optimistic Ignore ===");
+global.updateFoldersPopover();
+const foldersListEl = mockElements["folders-list"];
+assert(foldersListEl.children.length > 0, "Folders list should have active directories");
+console.log("Folders list rendered with items:", foldersListEl.children.length);
+console.log("✓ File navigator rendered successfully with optimistic ignore support");
+
 console.log("\n=== ALL OVERVIEW DIAGNOSTIC TESTS PASSED ===");
+
