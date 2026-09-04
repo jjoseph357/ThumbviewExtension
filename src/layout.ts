@@ -25,26 +25,22 @@ export function buildStableGrid(
     }
 
     while (slots.length < nCells) {
-        const newRows = rows + 1;
-        const newCols = Math.max(
-            cols,
-            Math.ceil(newRows * targetAspect)
-        );
+        const errCol = Math.abs((cols + 1) / rows - targetAspect);
+        const errRow = Math.abs(cols / (rows + 1) - targetAspect);
 
-        for (let r = 0; r < rows; r++) {
-            for (let c = cols; c < newCols; c++) {
-                slots.push([c, r]);
+        if (errCol <= errRow) {
+            const newCol = cols;
+            for (let r = 0; r < rows; r++) {
+                slots.push([newCol, r]);
             }
-        }
-
-        for (let r = rows; r < newRows; r++) {
-            for (let c = 0; c < newCols; c++) {
-                slots.push([c, r]);
+            cols++;
+        } else {
+            const newRow = rows;
+            for (let c = 0; c < cols; c++) {
+                slots.push([c, newRow]);
             }
+            rows++;
         }
-
-        rows = newRows;
-        cols = newCols;
     }
 
     return {

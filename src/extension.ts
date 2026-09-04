@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
-import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile } from "./scanner";
+import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache } from "./scanner";
 import { buildStableGrid, slotToIndex, findSlotIndex } from "./layout";
-import { buildSpanningGrid } from "./spanning_layout";
+import { buildSpanningGrid, integrateNewFilesPreservingPositions, SpanningPlacement } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
 import { IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeItem } from "./directoryProvider";
@@ -75,39 +75,44 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     }
 
-    // Auto-populate ignorePatterns with workspace .gitignore rules once initialized
+    // Auto-populate ignorePatterns with workspace .gitignore rules once initialized and sanitize stale source ignore rules
     if (workspaceFolders && workspaceFolders.length > 0) {
         const gitignorePath = path.join(workspaceFolders[0].uri.fsPath, ".gitignore");
+        const actualGitignoreRules = new Set<string>();
         if (fs.existsSync(gitignorePath)) {
             try {
                 const content = fs.readFileSync(gitignorePath, "utf-8");
-                const gitignoreRules = content
+                content
                     .split("\n")
                     .map(line => line.trim())
-                    .filter(line => line && !line.startsWith("#"));
-
-                const { ignorePatterns, autoIgnoreExclusions } = getIgnoreState();
-                const exclusionSet = new Set(autoIgnoreExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
-                const isExcluded = (pat: string) => {
-                    const clean = pat.trim().replace(/^\/+|\/+$/g, "");
-                    return exclusionSet.has(clean) || autoIgnoreExclusions.includes(pat);
-                };
-
-                const updatedIgnored = [...ignorePatterns];
-                let changed = false;
-
-                for (const rule of gitignoreRules) {
-                    if (!updatedIgnored.includes(rule) && !isExcluded(rule)) {
-                        updatedIgnored.push(rule);
-                        changed = true;
-                    }
-                }
-
-                if (changed) {
-                    await persistIgnoreState({ ignorePatterns: updatedIgnored, autoIgnoreExclusions });
-                }
+                    .filter(line => line && !line.startsWith("#"))
+                    .forEach(rule => {
+                        actualGitignoreRules.add(rule);
+                        actualGitignoreRules.add(rule.replace(/^\/+|\/+$/g, ""));
+                    });
             } catch {
             }
+        }
+
+        const { ignorePatterns, autoIgnoreExclusions } = getIgnoreState();
+        const exclusionSet = new Set(autoIgnoreExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
+        const isExcluded = (pat: string) => {
+            const clean = pat.trim().replace(/^\/+|\/+$/g, "");
+            return exclusionSet.has(clean) || autoIgnoreExclusions.includes(pat);
+        };
+
+        const updatedIgnored = [...ignorePatterns];
+        let changed = false;
+
+        for (const rule of actualGitignoreRules) {
+            if (!updatedIgnored.includes(rule) && !isExcluded(rule)) {
+                updatedIgnored.push(rule);
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            await persistIgnoreState({ ignorePatterns: updatedIgnored, autoIgnoreExclusions });
         }
     }
 
@@ -118,6 +123,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const cursorLocations: { [uri: string]: number } = {};
+    let lastSpanningPlacements: SpanningPlacement[] = [];
 
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
@@ -441,16 +447,39 @@ export async function activate(context: vscode.ExtensionContext) {
                 : cachedScannedFiles.map(f => f.path);
             const { counts: ignorePatternCounts, filesMap: ignoredFilesMap } = computeIgnoreCounts(ignorePatterns, allPaths);
 
-            fileOrder.update(activeFiles.map(f => f.id));
+            const activeFileIds = activeFiles.map(f => f.id);
+            const mode = getLayoutMode();
+
+            if (mode === "spanning_grid") {
+                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                let savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+
+                if (lastSpanningPlacements.length > 0) {
+                    const prevIds = new Set(lastSpanningPlacements.map(p => p.file.id));
+                    const newIds = activeFileIds.filter(id => !prevIds.has(id));
+                    if (newIds.length > 0) {
+                        const validPrevPlacements = lastSpanningPlacements.filter(p => activeFileIds.includes(p.file.id));
+                        const integrated = integrateNewFilesPreservingPositions(validPrevPlacements, newIds, savedAllocations, 16 / 9);
+                        fileOrder.setOrder(integrated.newOrder);
+                        savedRows = integrated.wrapRows;
+                        await context.workspaceState.update("thumbview.spanningRows", integrated.wrapRows);
+                    } else {
+                        fileOrder.update(activeFileIds);
+                    }
+                } else {
+                    fileOrder.update(activeFileIds);
+                }
+            } else {
+                fileOrder.update(activeFileIds);
+            }
             await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
 
             const order = fileOrder.getOrder();
-            const mode = getLayoutMode();
             const dragReorderMode = getDragReorderMode();
             const config = vscode.workspace.getConfiguration("thumbview");
             const renderMediaThumbnails = config.get<boolean>("renderMediaThumbnails") ?? true;
-            const minCellWidth = config.get<number>("minCellWidth") ?? 32;
-            const minCellHeight = config.get<number>("minCellHeight") ?? 28;
+            const minCellWidth = config.get<number>("minCellWidth") ?? 60;
+            const minCellHeight = config.get<number>("minCellHeight") ?? 40;
             const openKeybinding = getOpenKeybindingLabel();
             const gitDiff = getCachedGitDiff();
             fetchWorkspaceGitDiff().catch(() => {});
@@ -484,12 +513,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
                 let savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
 
-                const idealRows = Math.max(1, Math.round(Math.sqrt(Math.max(activeFiles.length, 1) / (16 / 9))));
-                if (savedRows && (savedRows < Math.floor(idealRows * 0.6) || savedRows > Math.ceil(idealRows * 2.2))) {
-                    savedRows = idealRows;
-                }
-
                 const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows, forceBreakBeforeId ?? null);
+                lastSpanningPlacements = layout.placements;
 
                 await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
                 await context.workspaceState.update("thumbview.spanningRows", layout.wrapRows);
@@ -562,7 +587,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     files: filesWithSlots,
                     layout: {
                         cols: Math.max(layout.cols, ugMaxCol + 1) + extraCols,
-                        rows: Math.max(layout.rows, ugMaxRow + 1) + extraRows
+                        rows: Math.max(layout.rows, ugMaxRow + 1) + extraRows,
+                        slots: layout.slots
                     }
                 });
             }
@@ -1060,8 +1086,10 @@ export async function activate(context: vscode.ExtensionContext) {
                         const relPath = (msg.path || "").replace(/\\/g, "/").trim();
                         if (relPath) {
                             const state = getIgnoreState();
-                            if (!state.ignorePatterns.includes(relPath)) {
-                                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, relPath] });
+                            const cleanPattern = relPath.replace(/\/+$/, "");
+                            const exists = state.ignorePatterns.some(p => p === relPath || p.replace(/\/+$/, "") === cleanPattern);
+                            if (!exists) {
+                                await persistIgnoreState({ ...state, ignorePatterns: [relPath, ...state.ignorePatterns] });
                                 vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
                                 refreshProviders();
                             }
@@ -1311,8 +1339,10 @@ export async function activate(context: vscode.ExtensionContext) {
                         const relPath = (msg.folderPath || "").replace(/\\/g, "/").trim();
                         if (relPath) {
                             const state = getIgnoreState();
-                            if (!state.ignorePatterns.includes(relPath)) {
-                                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, relPath] });
+                            const cleanPattern = relPath.replace(/\/+$/, "");
+                            const exists = state.ignorePatterns.some(p => p === relPath || p.replace(/\/+$/, "") === cleanPattern);
+                            if (!exists) {
+                                await persistIgnoreState({ ...state, ignorePatterns: [relPath, ...state.ignorePatterns] });
                                 vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
                             }
                             refreshProviders();
@@ -1573,7 +1603,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                 const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
                                 const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
                                 const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))));
-                                const wrapRows = msg.targetGridRows || baseWrapRows;
+                                const wrapRows = msg.targetWrapRows || msg.targetGridRows || baseWrapRows;
                                 const maxAllowedCols = Math.max(2, (msg.targetGridCols || 2) + extraCols);
                                 const maxAllowedRows = Math.max(1, wrapRows + extraRows);
 
@@ -1595,7 +1625,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                 const maxCapacity = gridCols * gridRows;
                                 const targetSlotIdx = (typeof msg.targetSlotIdx === "number" && msg.targetSlotIdx >= 0)
                                     ? msg.targetSlotIdx
-                                    : Math.max(0, msg.targetRow * gridCols + msg.targetCol);
+                                    : findSlotIndex(msg.targetCol, msg.targetRow, currentFolderOrder.length);
 
                                 currentFolderOrder = reorderFolderItems(
                                     currentFolderOrder,
@@ -1651,8 +1681,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
                                 const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
                                 const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                                const maxAllowedRows = (savedRows || currentLayout.wrapRows) + extraRows;
-                                const maxAllowedCols = currentLayout.cols + extraCols;
+                                const maxAllowedRows = Math.max(currentLayout.rows, currentLayout.wrapRows, savedRows || 0) + extraRows;
+                                const maxAllowedCols = Math.max(currentLayout.cols, 2) + extraCols;
 
                                 const clamped = clampTargetToGridCapacity(msg.targetCol, msg.targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
                                 const targetCol = targetPlacement ? targetPlacement.col : clamped.col;
@@ -1814,7 +1844,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                     newOrder.pop();
                                 }
 
-                                await context.workspaceState.update("thumbview.spanningRows", savedRows || currentLayout.wrapRows);
+                                await context.workspaceState.update("thumbview.spanningRows", gridRows);
                                 fileOrder.setOrder(newOrder);
                             }
                         } else {
@@ -1924,9 +1954,14 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
                         };
 
-                        let cardOrder = context.workspaceState.get<string[]>("thumbview.cardOrder") || [];
-                        if (cardOrder.length === 0 && Array.isArray(msg.currentCardIds)) {
+                        let cardOrder: string[] = [];
+                        if (Array.isArray(msg.currentCardIds) && msg.currentCardIds.length > 0) {
                             cardOrder = [...msg.currentCardIds];
+                        } else {
+                            cardOrder = context.workspaceState.get<string[]>("thumbview.cardOrder") || [];
+                        }
+                        if (msg.sourceId && !cardOrder.includes(msg.sourceId)) {
+                            cardOrder.push(msg.sourceId);
                         }
 
                         if (msg.targetIsEmpty) {
@@ -2062,6 +2097,20 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                 }
 
+                if (msg.command === "refresh") {
+                    try {
+                        clearScanCache();
+                        cachedAllRelativePaths = [];
+                        await getAllWorkspaceRelativePaths().catch(() => {});
+                        refreshProviders();
+                        if (activePanel) {
+                            await refreshThumbview(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to refresh: ${err?.message ?? String(err)}`);
+                    }
+                }
+
                 if (msg.command === "reflow") {
                     try {
                         await vscode.commands.executeCommand("thumbview.reflow");
@@ -2075,8 +2124,10 @@ export async function activate(context: vscode.ExtensionContext) {
                         const pattern = (msg.pattern || "").replace(/\\/g, "/").trim();
                         if (pattern) {
                             const state = getIgnoreState();
-                            if (!state.ignorePatterns.includes(pattern)) {
-                                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, pattern] });
+                            const cleanPattern = pattern.replace(/\/+$/, "");
+                            const exists = state.ignorePatterns.some(p => p === pattern || p.replace(/\/+$/, "") === cleanPattern);
+                            if (!exists) {
+                                await persistIgnoreState({ ...state, ignorePatterns: [pattern, ...state.ignorePatterns] });
                                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                                 refreshProviders();
                             }
@@ -2094,9 +2145,10 @@ export async function activate(context: vscode.ExtensionContext) {
                         const pattern = (msg.pattern || "").trim();
                         if (pattern) {
                             const state = getIgnoreState();
-                            const updatedPatterns = state.ignorePatterns.filter(p => p !== pattern);
+                            const cleanPattern = pattern.replace(/\/+$/, "");
+                            const updatedPatterns = state.ignorePatterns.filter(p => p !== pattern && p.replace(/\/+$/, "") !== cleanPattern);
                             const updatedExclusions = [...state.autoIgnoreExclusions];
-                            if (!updatedExclusions.includes(pattern)) {
+                            if (!updatedExclusions.some(p => p === pattern || p.replace(/\/+$/, "") === cleanPattern)) {
                                 updatedExclusions.push(pattern);
                             }
                             await persistIgnoreState({ ignorePatterns: updatedPatterns, autoIgnoreExclusions: updatedExclusions });
@@ -2161,6 +2213,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await context.workspaceState.update("thumbview.folderOrders", undefined);
         await context.workspaceState.update("thumbview.extraCols", undefined);
         await context.workspaceState.update("thumbview.extraRows", undefined);
+        lastSpanningPlacements = [];
 
         if (activePanel) {
             refreshThumbview(activePanel);
@@ -2263,8 +2316,10 @@ export async function activate(context: vscode.ExtensionContext) {
         const folderPath = item?.folderPath;
         if (folderPath && !item?.isRoot) {
             const state = getIgnoreState();
-            if (!state.ignorePatterns.includes(folderPath)) {
-                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, folderPath] });
+            const cleanPattern = folderPath.replace(/\/+$/, "");
+            const exists = state.ignorePatterns.some(p => p === folderPath || p.replace(/\/+$/, "") === cleanPattern);
+            if (!exists) {
+                await persistIgnoreState({ ...state, ignorePatterns: [folderPath, ...state.ignorePatterns] });
                 vscode.window.showInformationMessage(`Ignored directory '${folderPath}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`);
                 refreshProviders();
                 if (activePanel) {
@@ -2283,8 +2338,10 @@ export async function activate(context: vscode.ExtensionContext) {
         if (input && input.trim()) {
             const state = getIgnoreState();
             const pattern = input.trim();
-            if (!state.ignorePatterns.includes(pattern)) {
-                await persistIgnoreState({ ...state, ignorePatterns: [...state.ignorePatterns, pattern] });
+            const cleanPattern = pattern.replace(/\/+$/, "");
+            const exists = state.ignorePatterns.some(p => p === pattern || p.replace(/\/+$/, "") === cleanPattern);
+            if (!exists) {
+                await persistIgnoreState({ ...state, ignorePatterns: [pattern, ...state.ignorePatterns] });
                 vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
                 refreshProviders();
                 if (activePanel) {
@@ -2316,10 +2373,12 @@ export async function activate(context: vscode.ExtensionContext) {
         }
 
         if (patternsToRemove.length > 0) {
-            const updatedPatterns = state.ignorePatterns.filter(p => !patternsToRemove.includes(p));
+            const cleanTargets = patternsToRemove.map(p => p.replace(/\/+$/, ""));
+            const updatedPatterns = state.ignorePatterns.filter(p => !patternsToRemove.includes(p) && !cleanTargets.includes(p.replace(/\/+$/, "")));
             const updatedExclusions = [...state.autoIgnoreExclusions];
             for (const p of patternsToRemove) {
-                if (!updatedExclusions.includes(p)) {
+                const cleanP = p.replace(/\/+$/, "");
+                if (!updatedExclusions.some(e => e === p || e.replace(/\/+$/, "") === cleanP)) {
                     updatedExclusions.push(p);
                 }
             }
@@ -2520,15 +2579,17 @@ export async function activate(context: vscode.ExtensionContext) {
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(async () => {
+            clearScanCache();
+            await getAllWorkspaceRelativePaths().catch(() => {});
             refreshProviders();
             if (activePanel) {
-                refreshThumbview(activePanel);
+                await refreshThumbview(activePanel);
             }
         }, 200);
     };
 
-    watcher.onDidCreate(() => { getAllWorkspaceRelativePaths().catch(() => {}); triggerUpdate(); });
-    watcher.onDidDelete(() => { getAllWorkspaceRelativePaths().catch(() => {}); triggerUpdate(); });
+    watcher.onDidCreate(() => triggerUpdate());
+    watcher.onDidDelete(() => triggerUpdate());
     watcher.onDidChange(() => triggerUpdate());
 
     const docChangeDisposable = vscode.workspace.onDidChangeTextDocument(e => {
@@ -3072,6 +3133,28 @@ function getHtml(
             border-left: 2px solid var(--vscode-focusBorder, #007fd4);
             color: var(--vscode-list-activeSelectionForeground, #ffffff);
             font-weight: 500;
+        }
+
+        .popover-chevron-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            margin: 0 2px 0 0;
+            background: transparent;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            color: var(--vscode-foreground, #cccccc);
+            flex-shrink: 0;
+            transition: background-color 0.15s ease, color 0.15s ease;
+        }
+
+        .popover-chevron-btn:hover {
+            background-color: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.12));
+            color: var(--vscode-foreground, #ffffff);
         }
 
         .item-icon-label {

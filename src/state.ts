@@ -17,7 +17,7 @@ export class PersistentFileOrder {
         const holes: number[] = [];
 
         for (let i = 0; i < this.seenFiles.length; i++) {
-            if (!current.has(this.seenFiles[i])) {
+            if (this.seenFiles[i] && !current.has(this.seenFiles[i])) {
                 holes.push(i);
             }
         }

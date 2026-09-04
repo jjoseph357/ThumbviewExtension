@@ -186,6 +186,106 @@ export interface ScanIgnoreState {
     autoIgnoreExclusions: string[];
 }
 
+export const isLibFolderRegex = /(^|\/)(lib|lib64|vendor|libraries|venv|\.venv|env|\.env|__pycache__|\.pytest_cache|\.mypy_cache)(\/|$)/i;
+export const isSourceRootRegex = /^(src|app|packages|pkg|source|frontend|backend|client|server|pages|components|routes)([\s_-].*)?(\/|$)/i;
+
+export function computeAutoIgnorePatterns(
+    relativePaths: string[],
+    threshold: number,
+    gitignoreRules: string[],
+    autoIgnoreExclusions: string[] = []
+): string[] {
+    const dirDirectCounts = new Map<string, number>();
+    const dirSubdirs = new Map<string, Set<string>>();
+
+    for (const relative of relativePaths) {
+        const parts = relative.replace(/\\/g, "/").split("/");
+        if (parts.length > 1) {
+            let prefix = "";
+            for (let i = 0; i < parts.length - 1; i++) {
+                const parent = prefix;
+                prefix += parts[i] + "/";
+                if (parent) {
+                    if (!dirSubdirs.has(parent)) dirSubdirs.set(parent, new Set());
+                    dirSubdirs.get(parent)!.add(prefix);
+                }
+            }
+            const directDir = prefix;
+            dirDirectCounts.set(directDir, (dirDirectCounts.get(directDir) || 0) + 1);
+        }
+    }
+
+    const denseFolders: string[] = [];
+    const isAlreadyCovered = (dir: string, rules: string[]): boolean => {
+        if (shouldIgnore(dir, rules)) return true;
+        for (const rule of rules) {
+            const clean = rule.trim().replace(/^\/+|\/+$/g, "");
+            if (clean && (dir.startsWith(clean + "/") || dir === clean + "/")) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const exclusionSet = new Set(autoIgnoreExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
+    const isUserExcluded = (dir: string): boolean => {
+        const clean = dir.trim().replace(/^\/+|\/+$/g, "");
+        return exclusionSet.has(clean);
+    };
+
+    const combinedRules = [...gitignoreRules];
+
+    const allDirs = new Set<string>();
+    for (const d of dirDirectCounts.keys()) allDirs.add(d);
+    for (const d of dirSubdirs.keys()) allDirs.add(d);
+
+    const sortedDirs = Array.from(allDirs).sort((a, b) => {
+        const depthA = a.split("/").length;
+        const depthB = b.split("/").length;
+        if (depthA !== depthB) return depthA - depthB;
+        return a.localeCompare(b);
+    });
+
+    for (const dir of sortedDirs) {
+        if (isUserExcluded(dir)) continue;
+        if (isAlreadyCovered(dir, combinedRules)) continue;
+
+        const isLib = isLibFolderRegex.test(dir);
+        if (isLib) {
+            denseFolders.push(dir);
+            combinedRules.push(dir);
+            continue;
+        }
+
+        // Never auto-ignore standard project source roots or any folder inside them
+        if (isSourceRootRegex.test(dir)) {
+            continue;
+        }
+
+        if (threshold > 0) {
+            const directCount = dirDirectCounts.get(dir) || 0;
+            if (directCount > threshold) {
+                denseFolders.push(dir);
+                combinedRules.push(dir);
+            }
+        }
+    }
+
+    return denseFolders;
+}
+
+interface FileCacheEntry {
+    mtime: number;
+    size: number;
+    repoFile: RepoFile;
+}
+
+const scanFileCache = new Map<string, FileCacheEntry>();
+
+export function clearScanCache(): void {
+    scanFileCache.clear();
+}
+
 export async function scanRepository(
     ignoreState: ScanIgnoreState,
     persistIgnore: (updated: ScanIgnoreState) => Promise<void>
@@ -202,63 +302,32 @@ export async function scanRepository(
     const gitignoreRules = [...ignoreState.ignorePatterns];
     const autoIgnoreExclusions = ignoreState.autoIgnoreExclusions;
 
+    // Read workspace .gitignore rules so legitimate gitignore entries are never pruned
+    const actualGitignoreRules = new Set<string>();
+    if (wsFolder) {
+        const gitignorePath = path.join(wsFolder.uri.fsPath, ".gitignore");
+        if (fs.existsSync(gitignorePath)) {
+            try {
+                const content = fs.readFileSync(gitignorePath, "utf-8");
+                content.split("\n")
+                    .map(line => line.trim())
+                    .filter(line => line && !line.startsWith("#"))
+                    .forEach(rule => {
+                        actualGitignoreRules.add(rule);
+                        actualGitignoreRules.add(rule.replace(/^\/+|\/+$/g, ""));
+                    });
+            } catch {}
+        }
+    }
+
     // Prioritize auto-ignoring top-level dense folders & library subdirectories (>threshold files)
     const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
-    const dirCounts = new Map<string, number>();
-
-    for (const file of files) {
-        const relative = vscode.workspace.asRelativePath(file).replace(/\\/g, "/");
-        const parts = relative.split("/");
-        let prefix = "";
-        for (let i = 0; i < parts.length - 1; i++) {
-            prefix += parts[i] + "/";
-            dirCounts.set(prefix, (dirCounts.get(prefix) || 0) + 1);
-        }
-    }
-
-    const denseFolders: string[] = [];
-
-    // Helper: returns true if candidate pattern is already ignored by an existing rule or parent rule
-    const isAlreadyCovered = (dir: string, rules: string[]): boolean => {
-        if (shouldIgnore(dir, rules)) return true;
-        for (const rule of rules) {
-            const clean = rule.trim().replace(/^\/+|\/+$/g, "");
-            if (clean && (dir.startsWith(clean + "/") || dir === clean + "/")) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    // User-excluded folders that auto-ignore must never re-add
-    const exclusionSet = new Set(autoIgnoreExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
-    const isUserExcluded = (dir: string): boolean => {
-        const clean = dir.trim().replace(/^\/+|\/+$/g, "");
-        return exclusionSet.has(clean);
-    };
-
-    // Sort all directory paths by hierarchy depth (shallowest first)
-    const sortedDirs = Array.from(dirCounts.keys()).sort((a, b) => {
-        const depthA = a.split("/").length;
-        const depthB = b.split("/").length;
-        if (depthA !== depthB) return depthA - depthB;
-        return a.localeCompare(b);
-    });
-
-    const combinedRules = [...gitignoreRules];
-    const isLibFolderRegex = /(^|\/)(lib|lib64|vendor|libraries|venv|\.venv|env|\.env|__pycache__|\.pytest_cache|\.mypy_cache)(\/|$)/i;
-
-    for (const dir of sortedDirs) {
-        const count = dirCounts.get(dir) || 0;
-        const isLibFolder = isLibFolderRegex.test(dir);
-
-        if ((isLibFolder || (threshold > 0 && count > threshold)) &&
-            !isAlreadyCovered(dir, combinedRules) &&
-            !isUserExcluded(dir)) {
-            denseFolders.push(dir);
-            combinedRules.push(dir);
-        }
-    }
+    const denseFolders = computeAutoIgnorePatterns(
+        files.map(f => vscode.workspace.asRelativePath(f)),
+        threshold,
+        gitignoreRules,
+        autoIgnoreExclusions
+    );
 
     // Prune redundant child rules from gitignoreRules (e.g. if BOFS/ or lib64/ exists, remove deep child entries)
     const allEffectiveRules = [...gitignoreRules, ...denseFolders];
@@ -266,6 +335,7 @@ export async function scanRepository(
     for (const rule of gitignoreRules) {
         const clean = rule.trim().replace(/^\/+|\/+$/g, "");
         if (!clean) continue;
+
         const isChildOfOther = allEffectiveRules.some(other => {
             const otherClean = other.trim().replace(/^\/+|\/+$/g, "");
             return otherClean && clean !== otherClean && clean.startsWith(otherClean + "/");
@@ -338,9 +408,36 @@ export async function scanRepository(
                     } as RepoFile;
                 }
 
+                let statMtime = 0;
+                let statSize = 0;
+                try {
+                    const st = await fs.promises.stat(file.fsPath);
+                    statMtime = st.mtimeMs;
+                    statSize = st.size;
+                } catch {
+                    try {
+                        const st = await vscode.workspace.fs.stat(file);
+                        statMtime = st.mtime || 0;
+                        statSize = st.size || 0;
+                    } catch {
+                        statMtime = 0;
+                        statSize = 0;
+                    }
+                }
+
+                // Skip massive files (>2MB) to prevent memory overload
+                if (statSize > 2 * 1024 * 1024) {
+                    return null;
+                }
+
+                const cached = scanFileCache.get(file.fsPath);
+                if (cached && cached.mtime === statMtime && cached.size === statSize && statMtime !== 0) {
+                    return cached.repoFile;
+                }
+
                 if (isPdf) {
                     const pdfLines = await extractPdfPage1Lines(file);
-                    return {
+                    const pdfFile: RepoFile = {
                         id: file.fsPath,
                         path: vscode.workspace.asRelativePath(file),
                         uri: file.toString(),
@@ -349,30 +446,59 @@ export async function scanRepository(
                         isImage: false,
                         isPdf: true,
                         mediaUri: file.toString()
-                    } as RepoFile;
+                    };
+                    if (statMtime !== 0) {
+                        scanFileCache.set(file.fsPath, { mtime: statMtime, size: statSize, repoFile: pdfFile });
+                    }
+                    return pdfFile;
                 }
 
-                const stat = await vscode.workspace.fs.stat(file);
-                // Skip massive files (>2MB) to prevent memory overload
-                if (stat.size > 2 * 1024 * 1024) {
+                let rawText: string | null = null;
+                try {
+                    rawText = await fs.promises.readFile(file.fsPath, "utf-8");
+                } catch {
+                    if (vscode.workspace.fs && typeof vscode.workspace.fs.readFile === "function") {
+                        try {
+                            const bytes = await vscode.workspace.fs.readFile(file);
+                            rawText = Buffer.from(bytes).toString("utf-8");
+                        } catch {
+                            rawText = null;
+                        }
+                    }
+                    if (rawText === null && typeof vscode.workspace.openTextDocument === "function") {
+                        try {
+                            const doc = await vscode.workspace.openTextDocument(file);
+                            const lines: string[] = [];
+                            for (let i = 0; i < doc.lineCount; i++) {
+                                lines.push(doc.lineAt(i).text);
+                            }
+                            rawText = lines.join("\n");
+                        } catch {
+                            rawText = null;
+                        }
+                    }
+                }
+
+                if (rawText === null) {
                     return null;
                 }
 
-                const doc = await vscode.workspace.openTextDocument(file);
-                if (doc.lineCount === 0) {
+                const lines = rawText.split(/\r?\n/);
+                const lineCount = lines.length;
+                if (lineCount === 0 || (lineCount === 1 && lines[0] === "")) {
                     return null;
                 }
 
                 const MAX_LINES = 2000;
                 const MAX_LINE_LENGTH = 300;
-                const step = doc.lineCount > MAX_LINES ? doc.lineCount / MAX_LINES : 1;
+                const step = lineCount > MAX_LINES ? lineCount / MAX_LINES : 1;
 
                 const rawLines: MiniLine[] = [];
-                for (let idx = 0; idx < Math.min(doc.lineCount, MAX_LINES); idx++) {
+                for (let idx = 0; idx < Math.min(lineCount, MAX_LINES); idx++) {
                     const i = Math.floor(idx * step);
-                    if (i >= doc.lineCount) break;
+                    if (i >= lineCount) break;
 
-                    let textLine = doc.lineAt(i).text;
+                    let textLine = lines[i];
                     if (textLine.length > MAX_LINE_LENGTH) {
                         textLine = textLine.substring(0, MAX_LINE_LENGTH);
                     }
@@ -389,10 +515,10 @@ export async function scanRepository(
                 }
 
                 let fullLines: string[] | undefined = undefined;
-                if (doc.lineCount > MAX_LINES) {
+                if (lineCount > MAX_LINES) {
                     fullLines = [];
-                    for (let i = 0; i < doc.lineCount; i++) {
-                        let text = doc.lineAt(i).text;
+                    for (let i = 0; i < lineCount; i++) {
+                        let text = lines[i];
                         if (text.length > MAX_LINE_LENGTH) {
                             text = text.substring(0, MAX_LINE_LENGTH);
                         }
@@ -400,14 +526,24 @@ export async function scanRepository(
                     }
                 }
 
-                return {
+                const repoFile: RepoFile = {
                     id: file.fsPath,
                     path: vscode.workspace.asRelativePath(file),
                     uri: file.toString(),
                     lines: rawLines,
-                    lineCount: doc.lineCount,
+                    lineCount,
                     fullLines
-                } as RepoFile;
+                };
+
+                if (statMtime !== 0) {
+                    scanFileCache.set(file.fsPath, {
+                        mtime: statMtime,
+                        size: statSize,
+                        repoFile
+                    });
+                }
+
+                return repoFile;
             } catch {
                 return null;
             }

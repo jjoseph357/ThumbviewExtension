@@ -59,7 +59,11 @@ let MEDIA_CONFIG = {
     activeFocusHighlight: "#007fd4"
 };
 
+let themeTokensDirty = true;
+let THEME_CATEGORY_COLORS = {};
+
 function refreshThemeTokens() {
+    themeTokensDirty = false;
     const light = isLightTheme();
     ACCENT_SEARCH = getThemeColor("--tv-accent-search", "#dc267f");
     ACCENT_INSPECT = getThemeColor("--tv-accent-inspect", "#785ef0");
@@ -94,6 +98,33 @@ function refreshThemeTokens() {
         pdfHeaderForeground: getThemeColor("--vscode-badge-foreground", light ? "#333333" : "#ffffff"),
         pdfPlaceholderLine: getThemeColor("--vscode-widget-border", light ? "rgba(0, 0, 0, 0.15)" : "rgba(255, 255, 255, 0.25)"),
         activeFocusHighlight: getThemeColor("--vscode-focusBorder", "#007fd4")
+    };
+
+    const commentColor = getThemeColor("--vscode-editorComment-foreground", light ? "#008000" : "#6a9955");
+    const editorFgColor = getThemeColor("--vscode-editor-foreground", light ? "#333333" : "#cccccc");
+    const editorDefaultFgColor = getThemeColor("--vscode-editor-foreground", light ? "#333333" : "#d4d4d4");
+
+    THEME_CATEGORY_COLORS = {
+        "key": light ? "#001080" : "#9cdcfe",
+        "comment": commentColor,
+        "string": light ? "#a31515" : "#ce9178",
+        "number": light ? "#098658" : "#b5cea8",
+        "control-flow": light ? "#af00db" : "#c586c0",
+        "keyword": light ? "#0000ff" : "#569cd6",
+        "operator": editorFgColor,
+        "normal": editorFgColor,
+        "function": light ? "#795e26" : "#dcdcaa",
+        "type": light ? "#267f99" : "#4ec9b0",
+        "heading": light ? "#0000ff" : "#9cdcfe",
+        "variable": light ? "#001080" : "#9cdcfe",
+        "property": light ? "#001080" : "#9cdcfe",
+        "css-property": light ? "#001080" : "#9cdcfe",
+        "attribute": light ? "#001080" : "#9cdcfe",
+        "selector": light ? "#800000" : "#ce9178",
+        "css-value": light ? "#800000" : "#ce9178",
+        "tag": light ? "#800000" : "#569cd6",
+        "tag-bracket": light ? "#800000" : "#808080",
+        "default": editorDefaultFgColor
     };
 }
 
@@ -134,8 +165,8 @@ const ICONS = {
     ignoreFile: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;color:var(--vscode-descriptionForeground,#8a8a93);"><path d="M3.5 2C2.67 2 2 2.67 2 3.5V12.5C2 13.33 2.67 14 3.5 14H12.5C13.33 14 14 13.33 14 12.5V5.5L10.5 2H3.5Z"/><path d="M10.5 2V5.5H14"/><path d="M3.5 12.5L12.5 3.5" stroke-linecap="round"/></svg>',
     remove: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg>',
     empty: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.35;margin-bottom:8px;"><circle cx="12" cy="12" r="9"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
-    chevronRight: '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;vertical-align:middle;flex-shrink:0;opacity:0.6;"><path d="M6 4l4 4-4 4V4z"/></svg>',
-    chevronDown: '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;vertical-align:middle;flex-shrink:0;opacity:0.6;"><path d="M4 6l4 4 4-4H4z"/></svg>'
+    chevronRight: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="M6 3.5l4.5 4.5L6 12.5V3.5z"/></svg>',
+    chevronDown: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="M3.5 6l4.5 4.5L12.5 6H3.5z"/></svg>'
 };
 
 let data = null;
@@ -144,7 +175,33 @@ let activeFileUri = null;
 let focusedFolder = ""; // empty means root
 
 let currentIgnorePatterns = [];
+const optimisticPatternCounts = {};
 const expandedNavigatorFolders = new Set();
+const collapsedNavigatorFolders = new Set();
+
+function getParentFolderPath(folderPath) {
+    const clean = folderPath.replace(/\/+$/, "");
+    const lastSlash = clean.lastIndexOf("/");
+    if (lastSlash === -1) return null;
+    return clean.substring(0, lastSlash + 1);
+}
+
+function getFolderSegmentName(folderPath) {
+    const clean = folderPath.replace(/\/+$/, "");
+    const lastSlash = clean.lastIndexOf("/");
+    return lastSlash === -1 ? clean + "/" : clean.substring(lastSlash + 1) + "/";
+}
+
+function isFolderVisibleInTree(folderPath, collapsedSet) {
+    let parent = getParentFolderPath(folderPath);
+    while (parent) {
+        if (collapsedSet.has(parent)) {
+            return false;
+        }
+        parent = getParentFolderPath(parent);
+    }
+    return true;
+}
 let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
@@ -170,6 +227,9 @@ let dragTarget = null;
 let dragTargetFolder = null;
 let dragTargetBreadcrumb = null;
 let activeRenderGrid = null;
+let dragBackgroundCanvas = null;
+let cachedDragBackgroundCanvas = null;
+const fileTokenCache = new Map();
 let clipboardItem = null;
 
 let hoveredFile = null;
@@ -326,6 +386,7 @@ function clearDragState() {
     dragTargetFile = null;
     dragTargetFolder = null;
     dragTargetBreadcrumb = null;
+    dragBackgroundCanvas = null;
 
     if (dragRafId !== null) {
         cancelAnimationFrame(dragRafId);
@@ -612,6 +673,11 @@ window.addEventListener("message", event => {
     if (msg.command === "data") {
         data = msg;
         currentIgnorePatterns = msg.ignorePatterns || [];
+        for (const k of Object.keys(optimisticPatternCounts)) {
+            if (data.ignorePatternCounts && typeof data.ignorePatternCounts[k] === "number") {
+                delete optimisticPatternCounts[k];
+            }
+        }
         statusText = "";
         hoverLineCache = {};
         slotOccupancy.clear();
@@ -624,39 +690,67 @@ window.addEventListener("message", event => {
                 fileByUri.set(f.uri, f);
                 f._lowerPath = f.path ? f.path.toLowerCase() : "";
                 const lang = detectLang(f.path);
-                const textArr = [];
-                const textArrOriginal = [];
-                if (f.path) textArr.push(f.path.toLowerCase());
-                if (f.lines) {
-                    for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
-                        const l = f.lines[lIdx];
-                        const lower = l.text ? l.text.toLowerCase() : "";
-                        l._lowerText = lower;
-                        l._tokens = tokenizeLine(l.text ? l.text.trimStart() : "", lang);
-                        textArr.push(lower);
-                        textArrOriginal.push(l.text || "");
-                    }
-                    let totalChars = 0;
-                    let validCount = 0;
-                    for (let k = 0; k < Math.min(f.lines.length, 50); k++) {
-                        const len = f.lines[k]?.text?.length || 0;
-                        if (len > 0) {
-                            totalChars += len;
-                            validCount++;
+
+                const cacheKey = `${f.id}:${f.lineCount || (f.lines ? f.lines.length : 0)}:${f.lines && f.lines[0] ? f.lines[0].text : ""}`;
+                const cached = fileTokenCache.get(cacheKey);
+
+                if (cached) {
+                    f._combinedText = cached.combinedText;
+                    f._combinedTextOriginal = cached.combinedTextOriginal;
+                    f._avgLineChars = cached.avgLineChars;
+                    f._lowerFullLines = cached.lowerFullLines;
+                    if (f.lines && cached.lines) {
+                        for (let lIdx = 0; lIdx < f.lines.length && lIdx < cached.lines.length; lIdx++) {
+                            f.lines[lIdx]._lowerText = cached.lines[lIdx].lowerText;
+                            f.lines[lIdx]._tokens = cached.lines[lIdx].tokens;
                         }
                     }
-                    f._avgLineChars = validCount > 0 ? Math.min(100, Math.max(45, Math.round(totalChars / validCount))) : 65;
-                }
-                if (f.fullLines) {
-                    f._lowerFullLines = f.fullLines.map(str => {
-                        const lower = str.toLowerCase();
-                        textArr.push(lower);
-                        return lower;
+                } else {
+                    const textArr = [];
+                    const textArrOriginal = [];
+                    if (f.path) textArr.push(f.path.toLowerCase());
+                    const cachedLines = [];
+                    if (f.lines) {
+                        for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
+                            const l = f.lines[lIdx];
+                            const lower = l.text ? l.text.toLowerCase() : "";
+                            l._lowerText = lower;
+                            l._tokens = tokenizeLine(l.text ? l.text.trimStart() : "", lang);
+                            textArr.push(lower);
+                            textArrOriginal.push(l.text || "");
+                            cachedLines.push({ lowerText: lower, tokens: l._tokens });
+                        }
+                        let totalChars = 0;
+                        let validCount = 0;
+                        for (let k = 0; k < Math.min(f.lines.length, 50); k++) {
+                            const len = f.lines[k]?.text?.length || 0;
+                            if (len > 0) {
+                                totalChars += len;
+                                validCount++;
+                            }
+                        }
+                        f._avgLineChars = validCount > 0 ? Math.min(100, Math.max(45, Math.round(totalChars / validCount))) : 65;
+                    }
+                    if (f.fullLines) {
+                        f._lowerFullLines = f.fullLines.map(str => {
+                            const lower = str.toLowerCase();
+                            textArr.push(lower);
+                            return lower;
+                        });
+                        textArrOriginal.push(...f.fullLines);
+                    }
+                    f._combinedText = textArr.join("\n");
+                    f._combinedTextOriginal = textArrOriginal.join("\n");
+
+                    fileTokenCache.set(cacheKey, {
+                        combinedText: f._combinedText,
+                        combinedTextOriginal: f._combinedTextOriginal,
+                        avgLineChars: f._avgLineChars,
+                        lowerFullLines: f._lowerFullLines,
+                        lines: cachedLines
                     });
-                    textArrOriginal.push(...f.fullLines);
                 }
-                f._combinedText = textArr.join("\n");                 // lowercased (existing)
-                f._combinedTextOriginal = textArrOriginal.join("\n"); // add: same loop, no .toLowerCase()
+
                 if (f.slots) {
                     for (const [col, row] of f.slots) {
                         slotOccupancy.set(`${col},${row}`, f);
@@ -739,26 +833,22 @@ function buildStableGrid(nCells, targetAspect = 1.777) {
     }
 
     while (slots.length < nCells) {
-        const newRows = rows + 1;
-        const newCols = Math.max(
-            cols,
-            Math.ceil(newRows * targetAspect)
-        );
+        const errCol = Math.abs((cols + 1) / rows - targetAspect);
+        const errRow = Math.abs(cols / (rows + 1) - targetAspect);
 
-        for (let r = 0; r < rows; r++) {
-            for (let c = cols; c < newCols; c++) {
-                slots.push([c, r]);
+        if (errCol <= errRow) {
+            const newCol = cols;
+            for (let r = 0; r < rows; r++) {
+                slots.push([newCol, r]);
             }
-        }
-
-        for (let r = rows; r < newRows; r++) {
-            for (let c = 0; c < newCols; c++) {
-                slots.push([c, r]);
+            cols++;
+        } else {
+            const newRow = rows;
+            for (let c = 0; c < cols; c++) {
+                slots.push([c, newRow]);
             }
+            rows++;
         }
-
-        rows = newRows;
-        cols = newCols;
     }
 
     return {
@@ -794,9 +884,23 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     const wrapRows = Math.max(calculatedRows, maxNCells);
 
     const filesById = new Map(files.map(f => [f.id, f]));
-    const orderToIterate = (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0)
-        ? folderOrder
-        : files.map(f => f.id);
+    let orderToIterate = [];
+    if (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0) {
+        orderToIterate = [...folderOrder];
+        const seenIds = new Set(folderOrder.filter(Boolean));
+        const newFiles = files.filter(f => !seenIds.has(f.id));
+        let newIdx = 0;
+        for (let i = 0; i < orderToIterate.length && newIdx < newFiles.length; i++) {
+            if (!orderToIterate[i]) {
+                orderToIterate[i] = newFiles[newIdx++].id;
+            }
+        }
+        while (newIdx < newFiles.length) {
+            orderToIterate.push(newFiles[newIdx++].id);
+        }
+    } else {
+        orderToIterate = files.map(f => f.id);
+    }
 
     let currCol = 0;
     let currRow = 0;
@@ -835,7 +939,7 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     }
 
     const reqCols = currCol + 1;
-    const finalRows = Math.max(1, maxRowUsed, Math.ceil(reqCols / targetAspect)) + extraRows;
+    const finalRows = Math.max(1, maxRowUsed) + extraRows;
     const finalCols = Math.max(2, reqCols, Math.ceil(finalRows * targetAspect)) + extraCols;
 
     return {
@@ -1311,44 +1415,8 @@ function tokenizeJS(text, lang) {
 
 /** Maps a token's syntax category (and isKey flag) to the hex color used to draw it. */
 function colorForCategory(category, isKey) {
-    const light = isLightTheme();
-    if (isKey) return light ? "#001080" : "#9cdcfe";
-
-    switch (category) {
-        case "comment":
-            return getThemeColor("--vscode-editorComment-foreground", light ? "#008000" : "#6a9955");
-        case "string":
-            return light ? "#a31515" : "#ce9178";
-        case "number":
-            return light ? "#098658" : "#b5cea8";
-        case "control-flow":
-            return light ? "#af00db" : "#c586c0";
-        case "keyword":
-            return light ? "#0000ff" : "#569cd6";
-        case "operator":
-        case "normal":
-            return getThemeColor("--vscode-editor-foreground", light ? "#333333" : "#cccccc");
-        case "function":
-            return light ? "#795e26" : "#dcdcaa";
-        case "type":
-            return light ? "#267f99" : "#4ec9b0";
-        case "heading":
-            return light ? "#0000ff" : "#9cdcfe";
-        case "variable":
-        case "property":
-        case "css-property":
-        case "attribute":
-            return light ? "#001080" : "#9cdcfe";
-        case "selector":
-        case "css-value":
-            return light ? "#800000" : "#ce9178";
-        case "tag":
-            return light ? "#800000" : "#569cd6";
-        case "tag-bracket":
-            return light ? "#800000" : "#808080";
-        default:
-            return getThemeColor("--vscode-editor-foreground", light ? "#333333" : "#d4d4d4");
-    }
+    if (isKey) return THEME_CATEGORY_COLORS["key"] || (isLightTheme() ? "#001080" : "#9cdcfe");
+    return THEME_CATEGORY_COLORS[category] || THEME_CATEGORY_COLORS["default"] || "#cccccc";
 }
 
 let imageCache = {}; // keyed by media URI; cleared on repository data updates (see "data" handler)
@@ -1903,11 +1971,23 @@ function render() {
     if (canvas.width !== targetW || canvas.height !== targetH) {
         canvas.width = targetW;
         canvas.height = targetH;
+        dragBackgroundCanvas = null;
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    refreshThemeTokens();
+    if (themeTokensDirty) {
+        refreshThemeTokens();
+    }
     const light = isLightTheme();
+
+    if ((draggingFile || draggingFolder) && dragBackgroundCanvas) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(dragBackgroundCanvas, 0, 0);
+        ctx.restore();
+        drawDragOverlays();
+        return;
+    }
 
     if (!data) {
         drawStatus();
@@ -1942,12 +2022,31 @@ function render() {
     const rootCellW = availableW / gridCols;
     const rootCellH = availableH / gridRows;
 
-    // Minimum usable cell size — below this, tiles are too small to read/click,
-    // so we switch to subfolder card mode that groups files into clickable folder cards.
-    const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 32;
-    const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 28;
+    const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 60;
+    const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 40;
 
-    const rootCellsTooSmall = rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H;
+    let hasTallFileOverflow = false;
+    if (data && data.files) {
+        for (let i = 0; i < data.files.length; i++) {
+            const f = data.files[i];
+            const slot = f.slot;
+            const nCells = f.nCells || 1;
+            const fileH = rootCellH * nCells;
+            if (fileH > availableH) {
+                hasTallFileOverflow = true;
+                break;
+            }
+            if (slot && typeof slot[1] === "number") {
+                const y = GRID_TOP_MARGIN + slot[1] * rootCellH;
+                if (y + fileH > rectH || y > rectH) {
+                    hasTallFileOverflow = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    const rootCellsTooSmall = rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H || hasTallFileOverflow;
 
     // If root tiles are NOT too small (rootCellsTooSmall === false), individual file tiles
     // are visible in their stable root grid slots — selecting a directory lowlights non-selected files.
@@ -1967,7 +2066,7 @@ function render() {
 
     const extraCols = (data && data.extraCols) || 0;
     const extraRows = (data && data.extraRows) || 0;
-    const isSpanningMode = data && data.layoutMode === "spanning_grid";
+    const isSpanningMode = data && (data.mode === "spanning_grid" || data.layoutMode === "spanning_grid");
 
     if (shouldOpenFolder) {
         const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
@@ -1975,9 +2074,24 @@ function render() {
             localSpanningLayout = buildSpanningGridLocal(scopedFiles, overviewAspect, folderOrder, extraCols, extraRows);
             folderCellW = availableW / Math.max(1, localSpanningLayout.cols);
             folderCellH = availableH / Math.max(1, localSpanningLayout.rows);
-            cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
+            let hasDrillDownOverflow = false;
+            for (const p of localSpanningLayout.placements) {
+                const pfH = p.nCells * folderCellH;
+                if (pfH > availableH || GRID_TOP_MARGIN + (p.row + p.nCells) * folderCellH > rectH) {
+                    hasDrillDownOverflow = true;
+                    break;
+                }
+            }
+            cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H || hasDrillDownOverflow;
         } else {
-            const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
+            let totalSlots = scopedFiles.length;
+            if (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0) {
+                const seenIds = new Set(folderOrder.filter(Boolean));
+                const newFilesCount = scopedFiles.filter(f => !seenIds.has(f.id)).length;
+                const holesCount = folderOrder.filter(id => !id).length;
+                const appendCount = Math.max(0, newFilesCount - holesCount);
+                totalSlots = Math.max(scopedFiles.length, folderOrder.length + appendCount);
+            }
             localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
             const folderCols = localFolderGrid.cols + extraCols;
             const folderRows = localFolderGrid.rows + extraRows;
@@ -2158,7 +2272,7 @@ function render() {
                             ctx.strokeStyle = isSearchMatch
                                 ? ACCENT_SEARCH
                                 : (isActive
-                                    ? getThemeColor("--vscode-focusBorder", "#007fd4")
+                                    ? (BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4")
                                     : (isOpen
                                         ? ACCENT_RECENCY
                                         : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
@@ -2177,8 +2291,8 @@ function render() {
                                 }
                             } else if (miniFileH >= 4 && miniCellW >= 4 && pf.gitStatus) {
                                 ctx.fillStyle = pf.gitStatus === "modified"
-                                    ? getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", "#e2c08d")
-                                    : getThemeColor("--vscode-gitDecoration-untrackedResourceForeground", "#73c991");
+                                    ? (TILE_LABEL_COLOR.modified || "#e2c08d")
+                                    : (TILE_LABEL_COLOR.added || "#73c991");
                                 ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniFileH - 2));
                             }
                         }
@@ -2225,7 +2339,7 @@ function render() {
                             ctx.strokeStyle = isSearchMatch
                                 ? ACCENT_SEARCH
                                 : (isActive
-                                    ? getThemeColor("--vscode-focusBorder", "#007fd4")
+                                    ? (BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4")
                                     : (isOpen
                                         ? ACCENT_RECENCY
                                         : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
@@ -2244,8 +2358,8 @@ function render() {
                                 }
                             } else if (miniCellH >= 4 && miniCellW >= 4 && pf.gitStatus) {
                                 ctx.fillStyle = pf.gitStatus === "modified"
-                                    ? getThemeColor("--vscode-gitDecoration-modifiedResourceForeground", "#e2c08d")
-                                    : getThemeColor("--vscode-gitDecoration-untrackedResourceForeground", "#73c991");
+                                    ? (TILE_LABEL_COLOR.modified || "#e2c08d")
+                                    : (TILE_LABEL_COLOR.added || "#73c991");
                                 ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniFileH - 2));
                             }
                         }
@@ -2288,6 +2402,7 @@ function render() {
             activeRenderGrid = {
                 cols: localSpanningLayout.cols,
                 rows: localSpanningLayout.rows,
+                wrapRows: localSpanningLayout.wrapRows,
                 cellW: folderCellW,
                 cellH: folderCellH,
                 isFolderView: true,
@@ -2314,7 +2429,25 @@ function render() {
                 drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
             }
         } else {
-            const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
+            let orderToIterate = [];
+            if (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0) {
+                orderToIterate = [...folderOrder];
+                const seenIds = new Set(folderOrder.filter(Boolean));
+                const newFiles = scopedFiles.filter(f => !seenIds.has(f.id));
+                let newIdx = 0;
+                for (let i = 0; i < orderToIterate.length && newIdx < newFiles.length; i++) {
+                    if (!orderToIterate[i]) {
+                        orderToIterate[i] = newFiles[newIdx++].id;
+                    }
+                }
+                while (newIdx < newFiles.length) {
+                    orderToIterate.push(newFiles[newIdx++].id);
+                }
+            } else {
+                orderToIterate = scopedFiles.map(f => f.id);
+            }
+
+            const totalSlots = Math.max(scopedFiles.length, orderToIterate.length);
             localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
 
             const folderCols = (localFolderGrid ? localFolderGrid.cols : 1) + extraCols;
@@ -2334,49 +2467,27 @@ function render() {
             const slots = localFolderGrid ? localFolderGrid.slots : [];
             const scopedFilesById = new Map(scopedFiles.map(f => [f.id, f]));
 
-            if (folderOrder && folderOrder.length > 0) {
-                for (let i = 0; i < folderOrder.length && i < slots.length; i++) {
-                    const fid = folderOrder[i];
-                    if (!fid) continue;
-                    const file = scopedFilesById.get(fid);
-                    if (!file) continue;
-                    const slot = slots[i];
-                    if (!slot) continue;
+            for (let i = 0; i < orderToIterate.length && i < slots.length; i++) {
+                const fid = orderToIterate[i];
+                if (!fid) continue;
+                const file = scopedFilesById.get(fid);
+                if (!file) continue;
+                const slot = slots[i];
+                if (!slot) continue;
 
-                    const col = slot[0];
-                    const row = slot[1];
+                const col = slot[0];
+                const row = slot[1];
 
-                    const x = GRID_SIDE_MARGIN + col * cellW;
-                    const y = GRID_TOP_MARGIN + row * cellH;
-                    const fileH = cellH;
+                const x = GRID_SIDE_MARGIN + col * cellW;
+                const y = GRID_TOP_MARGIN + row * cellH;
+                const fileH = cellH;
 
-                    file._cell = { x, y, w: cellW, h: fileH };
+                file._cell = { x, y, w: cellW, h: fileH };
 
-                    if (y + fileH < -50 || y > rectH + 50) continue;
+                if (y + fileH < -50 || y > rectH + 50) continue;
 
-                    const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
-                    drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
-                }
-            } else {
-                for (let i = 0; i < scopedFiles.length; i++) {
-                    const file = scopedFiles[i];
-                    const slot = slots[i];
-                    if (!slot) continue;
-
-                    const col = slot[0];
-                    const row = slot[1];
-
-                    const x = GRID_SIDE_MARGIN + col * cellW;
-                    const y = GRID_TOP_MARGIN + row * cellH;
-                    const fileH = cellH;
-
-                    file._cell = { x, y, w: cellW, h: fileH };
-
-                    if (y + fileH < -50 || y > rectH + 50) continue;
-
-                    const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
-                    drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
-                }
+                const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
             }
         }
     } else {
@@ -2389,7 +2500,8 @@ function render() {
             rows: gridRows,
             cellW: rootCellW,
             cellH: rootCellH,
-            isRootView: true
+            isRootView: true,
+            layout: data.layout
         };
 
         for (let i = 0; i < filteredFiles.length; i++) {
@@ -2424,6 +2536,25 @@ function render() {
         }
     }
 
+    if ((draggingFile || draggingFolder) && !dragBackgroundCanvas && typeof document !== "undefined") {
+        if (!cachedDragBackgroundCanvas) {
+            cachedDragBackgroundCanvas = document.createElement("canvas");
+        }
+        if (cachedDragBackgroundCanvas.width !== canvas.width || cachedDragBackgroundCanvas.height !== canvas.height) {
+            cachedDragBackgroundCanvas.width = canvas.width;
+            cachedDragBackgroundCanvas.height = canvas.height;
+        }
+        const bgCtx = cachedDragBackgroundCanvas.getContext ? cachedDragBackgroundCanvas.getContext("2d") : null;
+        if (bgCtx) {
+            bgCtx.drawImage(canvas, 0, 0);
+        }
+        dragBackgroundCanvas = cachedDragBackgroundCanvas;
+    }
+
+    drawDragOverlays();
+}
+
+function drawDragOverlays() {
     if (draggingFolder) {
         const ghostW = draggingFolder.w || (activeRenderGrid ? activeRenderGrid.cellW : 120);
         const ghostH = draggingFolder.h || (activeRenderGrid ? activeRenderGrid.cellH : 80);
@@ -2440,7 +2571,7 @@ function render() {
 
         // drop-target outline
         if (dragTarget) {
-            ctx.strokeStyle = getThemeColor("--vscode-focusBorder", "#007fd4");
+            ctx.strokeStyle = BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4";
             ctx.lineWidth = 2;
             if (dragTarget.file && dragTarget.file._cell) {
                 ctx.strokeRect(
@@ -2476,7 +2607,7 @@ function render() {
 
         // drop-target outline
         if (dragTarget) {
-            ctx.strokeStyle = getThemeColor("--vscode-focusBorder", "#007fd4");
+            ctx.strokeStyle = BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4";
             ctx.lineWidth = 2;
             if (dragTarget.file && dragTarget.file._cell) {
                 ctx.strokeRect(
@@ -2484,7 +2615,7 @@ function render() {
                     dragTarget.file._cell.y,
                     dragTarget.file._cell.w,
                     dragTarget.file._cell.h
-                );  
+                );
             } else {
                 ctx.strokeRect(
                     GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
@@ -3048,6 +3179,7 @@ canvas.addEventListener("mousemove", event => {
         if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
             draggingFolder = candidateFolder.card;
             candidateFolder = null;
+            dragBackgroundCanvas = null;
         }
     }
 
@@ -3059,6 +3191,7 @@ canvas.addEventListener("mousemove", event => {
         if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
             draggingFile = candidateFile.file;
             candidateFile = null;
+            dragBackgroundCanvas = null;
         }
     }
     if (draggingFile || draggingFolder) {
@@ -3174,6 +3307,7 @@ canvas.addEventListener("mouseup", event => {
                 targetSlotIdx: slotIdx,
                 targetGridCols: dragTarget.gridCols || data.layout.cols,
                 targetGridRows: (activeRenderGrid && activeRenderGrid.rows) || data.layout.rows,
+                targetWrapRows: (activeRenderGrid && activeRenderGrid.wrapRows) || undefined,
                 focusedFolder: focusedFolder || ""
             });
         }
@@ -3459,10 +3593,13 @@ canvas.addEventListener("contextmenu", event => {
         };
         document.getElementById("menu-ignore").onclick = () => {
             hideContextMenu();
-            if (targetFile && targetFile.path && !currentIgnorePatterns.includes(targetFile.path)) {
-                currentIgnorePatterns.push(targetFile.path);
+            if (targetFile && targetFile.path && !isPatternIgnored(targetFile.path)) {
+                currentIgnorePatterns.unshift(targetFile.path);
+                optimisticPatternCounts[targetFile.path] = 1;
                 updateIgnoresPopover();
                 updateFoldersPopover();
+                const ignoresListEl = document.getElementById("ignores-list");
+                if (ignoresListEl) ignoresListEl.scrollTop = 0;
             }
             vscode.postMessage({ command: "ignoreFile", uri: targetFile.uri, path: targetFile.path });
         };
@@ -3541,10 +3678,15 @@ canvas.addEventListener("contextmenu", event => {
         document.getElementById("menu-ignore-folder").onclick = () => {
             hideContextMenu();
             const fp = targetFolderCard && targetFolderCard.folderPath;
-            if (fp && !currentIgnorePatterns.includes(fp)) {
-                currentIgnorePatterns.push(fp);
+            if (fp && !isPatternIgnored(fp)) {
+                currentIgnorePatterns.unshift(fp);
+                if (targetFolderCard.files && targetFolderCard.files.length) {
+                    optimisticPatternCounts[fp] = targetFolderCard.files.length;
+                }
                 updateIgnoresPopover();
                 updateFoldersPopover();
+                const ignoresListEl = document.getElementById("ignores-list");
+                if (ignoresListEl) ignoresListEl.scrollTop = 0;
             }
             vscode.postMessage({ command: "ignoreFolder", folderPath: targetFolderCard.folderPath });
         };
@@ -3595,7 +3737,7 @@ canvas.addEventListener("contextmenu", event => {
         } else {
             document.getElementById("menu-space-refresh").onclick = () => {
                 hideContextMenu();
-                render();
+                vscode.postMessage({ command: "refresh" });
             };
         }
     }
@@ -3618,6 +3760,7 @@ canvas.addEventListener("contextmenu", event => {
 
 // Re-render canvas automatically when user switches VS Code color theme
 const themeObserver = new MutationObserver(() => {
+    themeTokensDirty = true;
     refreshThemeTokens();
     render();
 });
@@ -3705,9 +3848,12 @@ function updateIgnoresPopover() {
         const iconHtml = isFolder ? ICONS.ignoreFolder : ICONS.ignoreFile;
         const kindBadge = `<span class="pattern-type-badge">${isFolder ? "folder" : "pattern"}</span>`;
 
-        const matchedCount = (data && data.ignorePatternCounts && typeof data.ignorePatternCounts[pat] === "number")
-            ? data.ignorePatternCounts[pat]
-            : 0;
+        let matchedCount = 0;
+        if (data && data.ignorePatternCounts && typeof data.ignorePatternCounts[pat] === "number") {
+            matchedCount = data.ignorePatternCounts[pat];
+        } else if (optimisticPatternCounts && typeof optimisticPatternCounts[pat] === "number") {
+            matchedCount = optimisticPatternCounts[pat];
+        }
         const matchedFiles = (data && data.ignoredFilesMap && data.ignoredFilesMap[pat]) || [];
         const countBadge = `<span class="popover-item-count" style="margin-right: 6px; font-size: 10px;" title="${matchedCount} file${matchedCount === 1 ? '' : 's'} matching pattern">${matchedCount} file${matchedCount === 1 ? '' : 's'}</span>`;
 
@@ -3724,7 +3870,8 @@ function updateIgnoresPopover() {
         removeBtn.innerHTML = ICONS.remove;
         removeBtn.onclick = (e) => {
             e.stopPropagation();
-            currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== pat);
+            currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== pat && p.replace(/\/+$/, "") !== pat.replace(/\/+$/, ""));
+            if (optimisticPatternCounts) delete optimisticPatternCounts[pat];
             updateIgnoresPopover();
             updateFoldersPopover();
             vscode.postMessage({ command: "removeIgnorePattern", pattern: pat });
@@ -3734,6 +3881,7 @@ function updateIgnoresPopover() {
         list.appendChild(item);
     }
 }
+
 
 function updateFoldersPopover() {
     const list = document.getElementById("folders-list");
@@ -3750,10 +3898,9 @@ function updateFoldersPopover() {
     };
     list.appendChild(allItem);
 
-    // 2. Root Directory Files Only
+    // 2. Root Directory Files Only (pseudo-folder for loose root files)
     const rootOnlyFiles = data.files.filter(f => f.path && !f.path.includes("/"));
     if (rootOnlyFiles.length > 0) {
-        const isRootExpanded = expandedNavigatorFolders.has("__root__");
         const rootItem = document.createElement("div");
         rootItem.className = "popover-item" + (focusedFolder === "(root files)/" ? " active" : "");
 
@@ -3764,26 +3911,12 @@ function updateFoldersPopover() {
         titleDiv.style.flex = "1";
         titleDiv.style.minWidth = "0";
 
-        const chevronBtn = document.createElement("button");
-        chevronBtn.className = "popover-chevron-btn";
-        chevronBtn.style.background = "transparent";
-        chevronBtn.style.border = "none";
-        chevronBtn.style.padding = "0";
-        chevronBtn.style.cursor = "pointer";
-        chevronBtn.style.display = "flex";
-        chevronBtn.style.alignItems = "center";
-        chevronBtn.innerHTML = isRootExpanded ? ICONS.chevronDown : ICONS.chevronRight;
-        chevronBtn.title = isRootExpanded ? "Collapse root files" : "Expand root files";
-        chevronBtn.onclick = (e) => {
-            e.stopPropagation();
-            if (isRootExpanded) {
-                expandedNavigatorFolders.delete("__root__");
-            } else {
-                expandedNavigatorFolders.add("__root__");
-            }
-            updateFoldersPopover();
-        };
-        titleDiv.appendChild(chevronBtn);
+        const spacer = document.createElement("span");
+        spacer.style.display = "inline-block";
+        spacer.style.width = "18px";
+        spacer.style.marginRight = "2px";
+        spacer.style.flexShrink = "0";
+        titleDiv.appendChild(spacer);
 
         const labelSpan = document.createElement("span");
         labelSpan.className = "item-icon-label";
@@ -3807,6 +3940,7 @@ function updateFoldersPopover() {
             ignoreBtn.onclick = (e) => {
                 e.stopPropagation();
                 currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== "(root files)/");
+                if (optimisticPatternCounts) delete optimisticPatternCounts["(root files)/"];
                 updateIgnoresPopover();
                 updateFoldersPopover();
                 vscode.postMessage({ command: "removeIgnorePattern", pattern: "(root files)/" });
@@ -3816,10 +3950,13 @@ function updateFoldersPopover() {
             ignoreBtn.title = "Ignore root directory files in Thumbview";
             ignoreBtn.onclick = (e) => {
                 e.stopPropagation();
-                if (!currentIgnorePatterns.includes("(root files)/")) {
-                    currentIgnorePatterns.push("(root files)/");
+                if (!isPatternIgnored("(root files)/")) {
+                    currentIgnorePatterns.unshift("(root files)/");
+                    optimisticPatternCounts["(root files)/"] = rootOnlyFiles.length;
                     updateIgnoresPopover();
                     updateFoldersPopover();
+                    const ignoresListEl = document.getElementById("ignores-list");
+                    if (ignoresListEl) ignoresListEl.scrollTop = 0;
                 }
                 vscode.postMessage({ command: "addIgnorePattern", pattern: "(root files)/" });
             };
@@ -3831,54 +3968,6 @@ function updateFoldersPopover() {
             closeAllPopovers();
         };
         list.appendChild(rootItem);
-
-        if (isRootExpanded) {
-            for (const f of rootOnlyFiles) {
-                const fileItem = document.createElement("div");
-                fileItem.className = "popover-item";
-                fileItem.style.paddingLeft = "26px";
-
-                const fileLabel = document.createElement("div");
-                fileLabel.className = "item-icon-label";
-                fileLabel.innerHTML = `${ICONS.file} <span title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>`;
-                fileItem.appendChild(fileLabel);
-
-                const isFileIgnored = isPatternIgnored(f.path);
-                const fileIgnoreBtn = document.createElement("button");
-                fileIgnoreBtn.className = "popover-action-btn";
-                if (isFileIgnored) {
-                    fileIgnoreBtn.textContent = "Unignore";
-                    fileIgnoreBtn.title = `Unignore file '${f.path}'`;
-                    fileIgnoreBtn.style.color = "var(--vscode-errorForeground, #f87171)";
-                    fileIgnoreBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== f.path);
-                        updateIgnoresPopover();
-                        updateFoldersPopover();
-                        vscode.postMessage({ command: "removeIgnorePattern", pattern: f.path });
-                    };
-                } else {
-                    fileIgnoreBtn.textContent = "Ignore";
-                    fileIgnoreBtn.title = `Ignore file '${f.path}' in Thumbview`;
-                    fileIgnoreBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        if (!currentIgnorePatterns.includes(f.path)) {
-                            currentIgnorePatterns.push(f.path);
-                            updateIgnoresPopover();
-                            updateFoldersPopover();
-                        }
-                        vscode.postMessage({ command: "ignoreFile", uri: f.uri, path: f.path });
-                    };
-                }
-                fileItem.appendChild(fileIgnoreBtn);
-
-                fileItem.onclick = () => {
-                    vscode.postMessage({ command: "openFile", uri: f.uri });
-                    closeAllPopovers();
-                };
-                list.appendChild(fileItem);
-            }
-        }
     }
 
     // 3. Collect directory paths and counts
@@ -3895,55 +3984,78 @@ function updateFoldersPopover() {
         }
     }
 
-    const sortedFolders = Array.from(folderCounts.keys()).sort();
+    const sortedFolders = Array.from(folderCounts.keys()).sort((a, b) => a.localeCompare(b));
+    const subfoldersByParent = new Map();
+    for (const fp of sortedFolders) {
+        const parent = getParentFolderPath(fp);
+        if (parent) {
+            if (!subfoldersByParent.has(parent)) subfoldersByParent.set(parent, []);
+            subfoldersByParent.get(parent).push(fp);
+        }
+    }
+
     const countEl = document.getElementById("shown-folders-count");
     if (countEl) {
         countEl.textContent = sortedFolders.length + (rootOnlyFiles.length > 0 ? 1 : 0);
     }
 
     for (const folderPath of sortedFolders) {
-        const count = folderCounts.get(folderPath);
-        const isFolderExpanded = expandedNavigatorFolders.has(folderPath);
-        const directFiles = data.files.filter(f => f.path && f.path.startsWith(folderPath) && !f.path.slice(folderPath.length).includes("/"));
-        
+        if (!isFolderVisibleInTree(folderPath, collapsedNavigatorFolders)) {
+            continue;
+        }
+
+        const count = folderCounts.get(folderPath) || 0;
+        const subfolders = subfoldersByParent.get(folderPath) || [];
+        const hasSubfolders = subfolders.length > 0;
+        const isCollapsed = collapsedNavigatorFolders.has(folderPath);
+
+        const depth = folderPath.split("/").length - 1;
+        const indent = Math.max(0, (depth - 1) * 16);
+
         const item = document.createElement("div");
         item.className = "popover-item" + (focusedFolder === folderPath ? " active" : "");
-        
-        const indent = Math.max(0, (folderPath.split("/").length - 2) * 12);
         item.style.paddingLeft = `${8 + indent}px`;
-        
+
         const titleDiv = document.createElement("div");
         titleDiv.style.display = "flex";
         titleDiv.style.alignItems = "center";
-        titleDiv.style.gap = "6px";
+        titleDiv.style.gap = "4px";
         titleDiv.style.flex = "1";
         titleDiv.style.minWidth = "0";
 
-        if (directFiles.length > 0) {
+        if (hasSubfolders) {
             const chevronBtn = document.createElement("button");
             chevronBtn.className = "popover-chevron-btn";
+            chevronBtn.style.color = "var(--vscode-foreground, #cccccc)";
+            chevronBtn.style.width = "18px";
+            chevronBtn.style.height = "18px";
+            chevronBtn.style.display = "inline-flex";
+            chevronBtn.style.alignItems = "center";
+            chevronBtn.style.justifyContent = "center";
             chevronBtn.style.background = "transparent";
             chevronBtn.style.border = "none";
             chevronBtn.style.padding = "0";
+            chevronBtn.style.margin = "0 2px 0 0";
             chevronBtn.style.cursor = "pointer";
-            chevronBtn.style.display = "flex";
-            chevronBtn.style.alignItems = "center";
-            chevronBtn.innerHTML = isFolderExpanded ? ICONS.chevronDown : ICONS.chevronRight;
-            chevronBtn.title = isFolderExpanded ? `Collapse ${folderPath}` : `Expand ${folderPath}`;
+            chevronBtn.style.flexShrink = "0";
+            chevronBtn.innerHTML = isCollapsed ? ICONS.chevronRight : ICONS.chevronDown;
+            chevronBtn.title = isCollapsed ? `Expand ${folderPath}` : `Collapse ${folderPath}`;
             chevronBtn.onclick = (e) => {
                 e.stopPropagation();
-                if (isFolderExpanded) {
-                    expandedNavigatorFolders.delete(folderPath);
+                if (isCollapsed) {
+                    collapsedNavigatorFolders.delete(folderPath);
                 } else {
-                    expandedNavigatorFolders.add(folderPath);
+                    collapsedNavigatorFolders.add(folderPath);
                 }
                 updateFoldersPopover();
             };
             titleDiv.appendChild(chevronBtn);
         } else {
             const spacer = document.createElement("span");
-            spacer.style.width = "12px";
             spacer.style.display = "inline-block";
+            spacer.style.width = "18px";
+            spacer.style.marginRight = "2px";
+            spacer.style.flexShrink = "0";
             titleDiv.appendChild(spacer);
         }
 
@@ -3952,7 +4064,8 @@ function updateFoldersPopover() {
         labelSpan.style.overflow = "hidden";
         labelSpan.style.textOverflow = "ellipsis";
         labelSpan.style.whiteSpace = "nowrap";
-        labelSpan.innerHTML = `${ICONS.folder} <span class="folder-name-text">${formatFolderPath(folderPath)}</span>`;
+        const displayName = getFolderSegmentName(folderPath);
+        labelSpan.innerHTML = `${ICONS.folder} <span class="folder-name-text" title="${escapeHtml(folderPath)}">${escapeHtml(displayName)}</span>`;
         titleDiv.appendChild(labelSpan);
 
         const countSpan = document.createElement("span");
@@ -3981,10 +4094,15 @@ function updateFoldersPopover() {
             ignoreBtn.title = `Ignore folder '${folderPath}' in Thumbview`;
             ignoreBtn.onclick = (e) => {
                 e.stopPropagation();
-                if (!currentIgnorePatterns.includes(folderPath)) {
-                    currentIgnorePatterns.push(folderPath);
+                if (!isPatternIgnored(folderPath)) {
+                    currentIgnorePatterns.unshift(folderPath);
+                    if (typeof count === "number") {
+                        optimisticPatternCounts[folderPath] = count;
+                    }
                     updateIgnoresPopover();
                     updateFoldersPopover();
+                    const ignoresListEl = document.getElementById("ignores-list");
+                    if (ignoresListEl) ignoresListEl.scrollTop = 0;
                 }
                 vscode.postMessage({ command: "addIgnorePattern", pattern: folderPath });
             };
@@ -3996,55 +4114,6 @@ function updateFoldersPopover() {
             closeAllPopovers();
         };
         list.appendChild(item);
-
-        if (isFolderExpanded && directFiles.length > 0) {
-            for (const f of directFiles) {
-                const fileItem = document.createElement("div");
-                fileItem.className = "popover-item";
-                fileItem.style.paddingLeft = `${8 + indent + 20}px`;
-
-                const fileName = f.path.slice(folderPath.length);
-                const fileLabel = document.createElement("div");
-                fileLabel.className = "item-icon-label";
-                fileLabel.innerHTML = `${ICONS.file} <span title="${escapeHtml(f.path)}">${escapeHtml(fileName)}</span>`;
-                fileItem.appendChild(fileLabel);
-
-                const isFileIgnored = isPatternIgnored(f.path);
-                const fileIgnoreBtn = document.createElement("button");
-                fileIgnoreBtn.className = "popover-action-btn";
-                if (isFileIgnored) {
-                    fileIgnoreBtn.textContent = "Unignore";
-                    fileIgnoreBtn.title = `Unignore file '${f.path}'`;
-                    fileIgnoreBtn.style.color = "var(--vscode-errorForeground, #f87171)";
-                    fileIgnoreBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        currentIgnorePatterns = currentIgnorePatterns.filter(p => p !== f.path);
-                        updateIgnoresPopover();
-                        updateFoldersPopover();
-                        vscode.postMessage({ command: "removeIgnorePattern", pattern: f.path });
-                    };
-                } else {
-                    fileIgnoreBtn.textContent = "Ignore";
-                    fileIgnoreBtn.title = `Ignore file '${f.path}' in Thumbview`;
-                    fileIgnoreBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        if (!currentIgnorePatterns.includes(f.path)) {
-                            currentIgnorePatterns.push(f.path);
-                            updateIgnoresPopover();
-                            updateFoldersPopover();
-                        }
-                        vscode.postMessage({ command: "ignoreFile", uri: f.uri, path: f.path });
-                    };
-                }
-                fileItem.appendChild(fileIgnoreBtn);
-
-                fileItem.onclick = () => {
-                    vscode.postMessage({ command: "openFile", uri: f.uri });
-                    closeAllPopovers();
-                };
-                list.appendChild(fileItem);
-            }
-        }
     }
 }
 
@@ -4090,10 +4159,12 @@ function handleAddIgnore() {
     if (!addIgnoreInput) return;
     const val = addIgnoreInput.value.trim();
     if (val) {
-        if (!currentIgnorePatterns.includes(val)) {
-            currentIgnorePatterns.push(val);
+        if (!isPatternIgnored(val)) {
+            currentIgnorePatterns.unshift(val);
             updateIgnoresPopover();
             updateFoldersPopover();
+            const ignoresListEl = document.getElementById("ignores-list");
+            if (ignoresListEl) ignoresListEl.scrollTop = 0;
         }
         vscode.postMessage({ command: "addIgnorePattern", pattern: val });
         addIgnoreInput.value = "";

@@ -147,14 +147,14 @@ export function reorderSpanningItems(
     const placementById = new Map<string, { id: string; col: number; row: number; nCells: number }>();
 
     for (const id of currentOrder) {
-        if (!id) {
-            currRow += 1;
-            continue;
-        }
-        const nCells = allocations[id] || 1;
+        const nCells = id ? (allocations[id] || 1) : 1;
         if (currRow > 0 && currRow + nCells > wrapRows) {
             currCol++;
             currRow = 0;
+        }
+        if (!id) {
+            currRow += 1;
+            continue;
         }
         const p = { id, col: currCol, row: currRow, nCells };
         placements.push(p);

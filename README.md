@@ -24,7 +24,7 @@ Tune behavior later via **File → Preferences → Settings → Thumbview** (see
 ## Reading the Grid
 
 - **Layouts**: `thumbview.layoutMode` selects `"spanning_grid"` (default - tall files span multiple vertical cells, so file length is visible at a glance) or `"uniform_grid"` (one equal cell per file). Switch any time from the top toolbar **⚙ Settings** modal, Command Palette (`Thumbview: Use Uniform/Spanning Grid Layout`), or the sidebar.
-- **Folder cards**: when tiles would shrink below the minimum cell size (`thumbview.minCellWidth: 32` / `thumbview.minCellHeight: 28` px), files group into clickable folder cards. Click a card to drill into that subfolder; use the breadcrumbs at the top to navigate back.
+- **Folder cards**: when tiles would shrink below the minimum cell size (`thumbview.minCellWidth: 60` / `thumbview.minCellHeight: 40` px), files group into clickable folder cards. Click a card to drill into that subfolder; use the breadcrumbs at the top to navigate back.
 - **Directory Navigation & Ignored Items**: click the **📁 Folders & Ignored** button in the top toolbar to view shown folders alongside ignored patterns, focus any subdirectory, isolate root files, add custom glob patterns, or unignore items in one click.
 - **Reflow**: run `Thumbview: Reflow Layout` or click **Reflow Grid** in the **⚙ Settings** modal to re-fit the grid after resizing the panel or window.
 
@@ -68,5 +68,5 @@ All shortcuts and interactive settings are available in the in-app **⚙ Setting
 | `thumbview.dragReorderMode` | `swap` | `swap`: swap positions with target slot. `shift`: shift adjacent tiles. |
 | `thumbview.autoIgnoreThreshold` | `30` | Auto-ignore subfolders with more than this many files (`0` disables). |
 | `thumbview.renderMediaThumbnails` | `true` | Render image and PDF thumbnails inside tiles. |
-| `thumbview.minCellWidth` | `32` | Minimum tile width (px) before files group into folder cards. |
-| `thumbview.minCellHeight` | `28` | Minimum tile height (px) before files group into folder cards. |
+| `thumbview.minCellWidth` | `60` | Minimum tile width (px) before files group into folder cards. |
+| `thumbview.minCellHeight` | `40` | Minimum tile height (px) before files group into folder cards. |

@@ -5,9 +5,19 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Position Stability on Folder Unignore**: Existing file cards strictly maintain their original `(col, row)` coordinates when unignoring folders. Newly unignored files populate remaining empty rows below existing cards before adding new columns to the right.
+- **Tall File Vertical Overflow Protection**: Tall spanning files that exceed available vertical canvas space automatically trigger subfolder cards mode, preventing files from clipping offscreen or disappearing when vertical height shrinks.
+- **Drag-and-Drop Interaction Performance**: Added pre-tokenized line caching (`fileTokenCache`) and reusable offscreen background canvas buffers (`cachedDragBackgroundCanvas`), eliminating synchronous re-tokenization lag during file card pickup and drop gestures.
+- **Folder Cards Empty Space Targeting**: Dragging and dropping files into empty spaces within folder card overviews and folder drill-downs preserves exact target slot indexes, preventing cards from jumping to the far right.
+
 ## [0.4.6] - 2026-09-03
 
 ### Fixed
+- **Spanning Grid Layout Row Balancing on Unignore**: Fixed an issue where unignoring large folders placed all newly visible tiles into distant columns to the right of existing rows instead of distributing across rows and columns. Reset persisted spanning row state upon unignoring and allowed wrap rows to scale with large item counts.
+- **Subfolder Card Threshold Restoration**: Restored default minimum cell dimensions to 60x40px so large workspaces collapse into subfolder cards when cells become too dense rather than shrinking tiles excessively.
 - **Empty Space Drag and Drop with Collapsed Folders**: Enabled dropping file tiles and folder cards onto empty slots both in the overview subfolder cards mode and within folder drill-down views, preserving gaps and relative positions without unintended reflows.
 - **Strict Grid Space Bounds on Drag**: Dragging files to empty spaces now strictly stays within existing grid capacity without increasing rows or columns. Right click > Expand Grid Space is enforced as the sole mechanism for expanding grid space.
 - **Expand / Reduce Grid Buttons in Collapsed Folders**: Extended subfolder card slot generation to cover full expanded grid dimensions (`cardCols * cardRows`), fixing non-functional expand/reduce space buttons when collapsed folders are present.

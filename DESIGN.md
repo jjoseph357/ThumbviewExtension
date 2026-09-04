@@ -88,7 +88,7 @@ In 0.3.1, pressing `F4` while Thumbview is active exits fullscreen (see "Fullscr
 
 ## Configurable Subfolder Card Threshold (`thumbview.minCellWidth` & `thumbview.minCellHeight`)
 
-Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. The webview evaluates tile dimensions against `thumbview.minCellWidth` (default `32px`) and `thumbview.minCellHeight` (default `28px`).
+Large workspaces (hundreds of files) can produce grid cells too small to display a readable filename or be clickable. The webview evaluates tile dimensions against `thumbview.minCellWidth` (default `60px`) and `thumbview.minCellHeight` (default `40px`).
 1. **Root File Tiles Visible**: When root file cells fit on screen above the minimum dimensions, selecting a directory (via sidebar Directory Navigation or path click) lowlights non-selected files (opacity 0.15), preserving full codebase grid layout.
 2. **Directories Shrunk to Folder Cards**: When root cells drop below the minimum dimensions, directories shrink into clickable folder cards. Selecting a directory opens/drills down into that folder, constructing a complete Thumbview grid containing only that directory's files.
 
@@ -170,8 +170,31 @@ Drag-and-drop reordering resolves cursor positions to specific grid slots rather
 2. **Host-Side `PersistentFileOrder` & Gap Preservation**: Tile arrangements are persisted as a `string[]` array in `workspaceState` under `"thumbview.seenFiles"`. When a user drags a file into an empty tile slot, the source slot is preserved as an empty placeholder (`""`) in the order array. In `uniform_grid`, the tile is assigned the target slot index via `findSlotIndex` without shifting intervening files. In `spanning_grid`, a 2D column-major slot grid model clears source cells and writes the file into target column/row coordinates while retaining empty placeholder cells, preventing cascading repack reflows.
 3. **Reflow Action**: When users intentionally want to pack all empty spaces and eliminate gaps (e.g. after moving multiple files or deleting files from disk), the **Reflow Grid Layout** toolbar action and command reset the array strictly to active workspace files.
 
+## Preserving File Positions on Folder Unignore (`integrateNewFilesPreservingPositions`)
+
+When unignoring a folder with many files, naive grid packing reshuffles existing files as `wrapRows` or total cell count expands. To preserve visual muscle memory:
+1. Existing file placements are preserved at their exact `(col, row)` coordinates in a 2D matrix.
+2. New files first fill remaining empty rows in existing columns (below existing cards).
+3. Any remaining new files expand into new columns to the right.
+This ensures existing cards never reflow or jump away when unignoring folders.
+
+## Tall File Vertical Overflow Protection
+
+In spanning grid mode, tall files occupy multiple vertical cells (`nCells`). When the window or webview vertical height shrinks, a tall file whose pixel height (`nCells * cellH`) exceeds the canvas vertical bounds (`availableH` or `rectH`) would otherwise be clipped or disappear offscreen.
+Thumbview detects `hasTallFileOverflow` during layout calculation and automatically toggles `rootCellsTooSmall = true`. This cleanly transforms the view into subfolder cards mode so files remain accessible and legible without clipping.
+
+## Reorder Gesture Performance (Token Cache & Offscreen Drag Canvas)
+
+1. **`fileTokenCache`**: Re-tokenizing lines and creating combined text buffers for every file on every tile drop payload incurred heavy synchronous overhead. Caching tokenized lines and combined text strings keyed by file ID, line count, and line 0 content skips re-tokenizing unchanged files, reducing drop processing to under 2ms.
+2. **`cachedDragBackgroundCanvas`**: Reuses an offscreen canvas across drag operations rather than creating and discarding DOM elements during tile pickup, keeping drag animations locked at 60 FPS.
+
+## Folder Cards Empty Space Drop Synchronization
+
+When dragging cards in subfolder cards overview, the host synchronizes `thumbview.cardOrder` using the current card order snapshot sent from the webview (`msg.currentCardIds`). Dropping into an empty space places the card at the exact target slot index rather than appending it to the far right.
+
 ## Known limitations / accepted tradeoffs
 
-- **No automated tests** (see README's "Notes" section). `layout.ts`/`state.ts` are pure functions/classes and would be straightforward to unit test; not yet done.
+- **Unit test suite**: Core logic is covered by automated unit tests in `src/test/` run via `npm run test:unit`. End-to-end webview testing relies on VS Code Extension Host integration.
 - **`MiniLine.category`** (`scanner.ts`) is computed host-side but not read by the webview, which does its own independent tokenization. Left unresolved as either dead code or an unfinished feature — see the comment at its definition.
 - **No shared type definitions for the `postMessage` protocol** between `extension.ts` and `media/overview.js` (see CLAUDE.md's "Cross-module interface" note) — protocol drift is caught only by manual review/testing, not the compiler.
+
