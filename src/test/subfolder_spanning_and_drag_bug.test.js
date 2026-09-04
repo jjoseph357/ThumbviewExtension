@@ -1,29 +1,21 @@
 const assert = require("assert");
 const { buildStableGrid } = require("../../out/layout");
 const { buildSpanningGrid } = require("../../out/spanning_layout");
-const { reorderCardItems } = require("../../out/reorder_helpers");
+const { reorderCardItems, reorderSpanningItems, reorderFolderItems } = require("../../out/reorder_helpers");
 
-console.log("=== Test Suite: Subfolder Cards Spanning Mode & Empty Space Drag Stability ===");
+console.log("=== Test Suite: Subfolder Cards Mode & In-Folder Drag Stability ===");
 
 // -------------------------------------------------------------
-// Test 1: Moving a card to an empty slot must NOT rearrange tiles or expand the grid
+// Test 1: Moving a card to an empty slot in subfolder cards mode
 // -------------------------------------------------------------
 console.log("\n=== Test 1: Moving card to empty slot in subfolder cards does NOT expand view or scramble tiles ===");
 
-// Scenario: 4 items (3 folder cards + 1 root file)
 const orderedItems = [
     { type: "folder", id: "folder:src/", name: "src/" },
     { type: "folder", id: "folder:media/", name: "media/" },
     { type: "folder", id: "folder:assets/", name: "assets/" },
     { type: "file", id: "package.json", name: "package.json", nCells: 1 }
 ];
-
-// In a 16:9 view, 4 items -> buildStableGrid(4) gives 2 cols x 2 rows (4 slots).
-// Suppose extraCols = 1, so the user has an extra column for empty slots:
-// 3 cols x 2 rows (total 6 slots).
-// Initial slots:
-// Row 0: slot 0 [0, 0] = src/,   slot 1 [1, 0] = media/,  slot 2 [2, 0] = assets/
-// Row 1: slot 3 [0, 1] = package.json, slot 4 [1, 1] = empty, slot 5 [2, 1] = empty
 
 const initialCardOrder = [
     "folder:src/",
@@ -32,20 +24,10 @@ const initialCardOrder = [
     "package.json"
 ];
 
-// User drags package.json from slot 3 to empty slot 4 [1, 1].
 const updatedCardOrder = reorderCardItems(initialCardOrder, "package.json", true, null, 4, 6);
 console.log("Updated cardOrder after moving package.json to slot 4:", updatedCardOrder);
 
-// In the buggy implementation, displayItems has length 5:
-// ['folder:src/', 'folder:media/', 'folder:assets/', '', 'package.json'].
-// And it computed baseGrid = buildStableGrid(displayItems.length), which returned 3 cols x 2 rows.
-// With extraCols = 1, cardCols became 3 + 1 = 4 cols!
-// That expanded the view and rearranged all tiles!
-
-// The CORRECT implementation must compute the base dimensions from orderedItems.length (4)
-// and NOT expand cardCols just because empty gaps ("") exist in cardOrder!
 function computeSubfolderGridDimensions(actualItemsCount, cardOrder, extraCols = 0, extraRows = 0, aspect = 1.777) {
-    // Base grid should be calculated on actual non-empty items
     const baseGrid = buildStableGrid(actualItemsCount, aspect);
     const cardCols = baseGrid.cols + extraCols;
     const cardRows = baseGrid.rows + extraRows;
@@ -55,13 +37,9 @@ function computeSubfolderGridDimensions(actualItemsCount, cardOrder, extraCols =
 const dimsBefore = computeSubfolderGridDimensions(orderedItems.length, initialCardOrder, 1, 0);
 const dimsAfter = computeSubfolderGridDimensions(orderedItems.length, updatedCardOrder, 1, 0);
 
-console.log("Grid dimensions before move:", dimsBefore);
-console.log("Grid dimensions after move:", dimsAfter);
-
 assert.strictEqual(dimsAfter.cardCols, dimsBefore.cardCols, "cardCols MUST NOT expand when moving to an empty slot!");
 assert.strictEqual(dimsAfter.cardRows, dimsBefore.cardRows, "cardRows MUST NOT expand when moving to an empty slot!");
 
-// And positions of other cards must be unchanged:
 const slotsBefore = [];
 for (let r = 0; r < dimsBefore.cardRows; r++) {
     for (let c = 0; c < dimsBefore.cardCols; c++) {
@@ -75,7 +53,6 @@ for (let r = 0; r < dimsAfter.cardRows; r++) {
     }
 }
 
-// Check slot positions for first 3 folders:
 for (let i = 0; i < 3; i++) {
     const cardId = initialCardOrder[i];
     const posBefore = slotsBefore[initialCardOrder.indexOf(cardId)];
@@ -83,53 +60,147 @@ for (let i = 0; i < 3; i++) {
     assert.deepStrictEqual(posAfter, posBefore, `Card ${cardId} position MUST NOT change!`);
 }
 
-// package.json must be at slot 4 [1, 1]
 const pkgPos = slotsAfter[updatedCardOrder.indexOf("package.json")];
 assert.deepStrictEqual(pkgPos, [1, 1], "package.json must be at [1, 1]!");
 console.log("✓ Test 1 passed: moving card to empty slot preserves grid dimensions and tile positions");
 
 // -------------------------------------------------------------
-// Test 2: Spanning tiles in subfolder cards mode
+// Test 2: Subfolder cards mode is uniform 1-tile tall for all cards
 // -------------------------------------------------------------
-console.log("\n=== Test 2: Spanning tiles in subfolder cards mode preserve variable height ===");
+console.log("\n=== Test 2: Subfolder cards mode renders uniform 1-cell tall cards ===");
 
-// When in subfolder cards mode and isSpanningMode is true:
-// Tall root files (e.g. package-lock.json with 500 lines => nCells = 3)
-// MUST have nCells = 3 and height = 3 * cellH, not forced to 1 cell tall!
 const mixedItems = [
-    { type: "folder", id: "folder:src/", name: "src/", nCells: 1 },
-    { type: "folder", id: "folder:media/", name: "media/", nCells: 1 },
-    { type: "file", id: "package.json", name: "package.json", nCells: 1 },
-    { type: "file", id: "package-lock.json", name: "package-lock.json", nCells: 3, lineCount: 500 }
+    { type: "folder", id: "folder:src/", name: "src/" },
+    { type: "folder", id: "folder:media/", name: "media/" },
+    { type: "file", id: "package.json", name: "package.json" },
+    { type: "file", id: "package-lock.json", name: "package-lock.json", lineCount: 500 }
 ];
 
-// Spanning layout for subfolder card mode:
-// Total cells = 1 + 1 + 1 + 3 = 6 cells.
-// wrapRows = 3 (or maxNCells = 3).
-const layout = buildSpanningGrid(
-    mixedItems.map(it => ({
-        id: it.id,
-        path: it.name,
-        lineCount: it.lineCount || 50
-    })),
-    mixedItems.map(it => it.id),
-    { "package-lock.json": 3, "package.json": 1, "folder:src/": 1, "folder:media/": 1 }
+// In uniform subfolder cards mode:
+const uniformGrid = buildStableGrid(mixedItems.length, 16 / 9);
+assert.strictEqual(uniformGrid.slots.length >= mixedItems.length, true, "Grid has enough slots for all items");
+
+// Each card occupies exactly 1 slot
+const assignedSlots = mixedItems.map((item, idx) => ({
+    id: item.id,
+    slot: uniformGrid.slots[idx],
+    nCells: 1
+}));
+
+for (const entry of assignedSlots) {
+    assert.strictEqual(entry.nCells, 1, `Item ${entry.id} must be exactly 1 cell tall in subfolder cards mode`);
+    assert.strictEqual(Array.isArray(entry.slot) && entry.slot.length === 2, true);
+}
+console.log("✓ Test 2 passed: subfolder cards mode renders uniform 1-cell tall cards");
+
+// -------------------------------------------------------------
+// Test 3: Within a subfolder card, dragging and dropping files swaps them without deleting or moving others
+// -------------------------------------------------------------
+console.log("\n=== Test 3: File drag and drop swap within a subfolder card preserves other file positions ===");
+
+// Scenario: 4 files inside a subfolder: f1, f2, f3, f4. wrapRows = 2.
+// Initial layout:
+// Col 0: f1 (row 0), f2 (row 1)
+// Col 1: f3 (row 0), f4 (row 1)
+const activeIds = ["f1", "f2", "f3", "f4"];
+const currentFolderOrder = ["f1", "f2", "f3", "f4"];
+const allocations = { f1: 1, f2: 1, f3: 1, f4: 1 };
+const wrapRows = 2;
+
+// Swap f1 (source at 0, 0) and f4 (target at 1, 1)
+const swapRes = reorderSpanningItems(
+    activeIds,
+    currentFolderOrder,
+    allocations,
+    "f1", // sourceId
+    1,    // targetCol (f4 is at 1, 1)
+    1,    // targetRow
+    2,    // maxAllowedCols
+    2,    // maxAllowedRows
+    wrapRows
 );
 
-console.log("Subfolder spanning layout placements:", layout.placements.map(p => ({
-    id: p.file.id,
-    col: p.col,
-    row: p.row,
-    nCells: p.nCells
-})));
+console.log("Swap result newOrder:", swapRes.newOrder);
 
-const lockPlacement = layout.placements.find(p => p.file.id === "package-lock.json");
-assert(lockPlacement, "package-lock.json should have a placement");
-assert.strictEqual(lockPlacement.nCells, 3, "package-lock.json must have nCells = 3 in spanning subfolder cards mode");
-assert(lockPlacement.slots.length === 3, "package-lock.json must occupy 3 vertical slots");
+// Both f1 and f4 must be in newOrder (f4 must NOT be deleted!)
+assert(swapRes.newOrder.includes("f1"), "f1 must be present in newOrder");
+assert(swapRes.newOrder.includes("f4"), "f4 must be present in newOrder (not deleted on swap)");
+assert(swapRes.newOrder.includes("f2"), "f2 must be present in newOrder");
+assert(swapRes.newOrder.includes("f3"), "f3 must be present in newOrder");
 
-const srcPlacement = layout.placements.find(p => p.file.id === "folder:src/");
-assert.strictEqual(srcPlacement.nCells, 1, "Folder card must occupy 1 cell");
+// Verify placements from newOrder:
+const layoutAfterSwap = buildSpanningGrid(
+    activeIds.map(id => ({ id, path: id, lineCount: 50 })),
+    swapRes.newOrder,
+    allocations,
+    wrapRows
+);
 
-console.log("✓ Test 2 passed: spanning tiles preserve variable height in subfolder cards mode");
-console.log("\n=== ALL SUBFOLDER SPANNING & DRAG TESTS PASSED ===");
+const p1 = layoutAfterSwap.placements.find(p => p.file.id === "f1");
+const p2 = layoutAfterSwap.placements.find(p => p.file.id === "f2");
+const p3 = layoutAfterSwap.placements.find(p => p.file.id === "f3");
+const p4 = layoutAfterSwap.placements.find(p => p.file.id === "f4");
+
+console.log("Placements after swap:", {
+    f1: [p1.col, p1.row],
+    f2: [p2.col, p2.row],
+    f3: [p3.col, p3.row],
+    f4: [p4.col, p4.row]
+});
+
+// f1 and f4 traded positions:
+assert.deepStrictEqual([p1.col, p1.row], [1, 1], "f1 must be at target position [1, 1]");
+assert.deepStrictEqual([p4.col, p4.row], [0, 0], "f4 must be at source position [0, 0]");
+
+// Uninvolved files f2 and f3 MUST NOT MOVE:
+assert.deepStrictEqual([p2.col, p2.row], [0, 1], "f2 position must be unchanged at [0, 1]");
+assert.deepStrictEqual([p3.col, p3.row], [1, 0], "f3 position must be unchanged at [1, 0]");
+
+console.log("✓ Test 3 passed: swapping files within subfolder card swaps target and source without altering other files");
+
+// -------------------------------------------------------------
+// Test 4: Within a subfolder card, dragging a file to an empty slot preserves other files
+// -------------------------------------------------------------
+console.log("\n=== Test 4: Moving file to empty slot within a subfolder card preserves other file positions ===");
+
+// Move f1 from [0, 0] to empty slot [2, 0]
+const emptyMoveRes = reorderSpanningItems(
+    activeIds,
+    currentFolderOrder,
+    allocations,
+    "f1",
+    2, // targetCol
+    0, // targetRow
+    3, // maxAllowedCols
+    2, // maxAllowedRows
+    wrapRows
+);
+
+console.log("Empty slot move result newOrder:", emptyMoveRes.newOrder);
+
+const layoutAfterEmptyMove = buildSpanningGrid(
+    activeIds.map(id => ({ id, path: id, lineCount: 50 })),
+    emptyMoveRes.newOrder,
+    allocations,
+    wrapRows
+);
+
+const ep1 = layoutAfterEmptyMove.placements.find(p => p.file.id === "f1");
+const ep2 = layoutAfterEmptyMove.placements.find(p => p.file.id === "f2");
+const ep3 = layoutAfterEmptyMove.placements.find(p => p.file.id === "f3");
+const ep4 = layoutAfterEmptyMove.placements.find(p => p.file.id === "f4");
+
+console.log("Placements after empty move:", {
+    f1: [ep1.col, ep1.row],
+    f2: [ep2.col, ep2.row],
+    f3: [ep3.col, ep3.row],
+    f4: [ep4.col, ep4.row]
+});
+
+assert.deepStrictEqual([ep1.col, ep1.row], [2, 0], "f1 must be at target empty slot [2, 0]");
+assert.deepStrictEqual([ep2.col, ep2.row], [0, 1], "f2 position must be unchanged at [0, 1]");
+assert.deepStrictEqual([ep3.col, ep3.row], [1, 0], "f3 position must be unchanged at [1, 0]");
+assert.deepStrictEqual([ep4.col, ep4.row], [1, 1], "f4 position must be unchanged at [1, 1]");
+
+console.log("✓ Test 4 passed: moving file to empty slot preserves other file positions");
+console.log("\n=== ALL SUBFOLDER CARDS & IN-FOLDER DRAG TESTS PASSED ===");

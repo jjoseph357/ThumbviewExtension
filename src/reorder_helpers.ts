@@ -168,21 +168,18 @@ export function reorderSpanningItems(
     const sourcePlacement = placementById.get(sourceId);
     const sourceCells = allocations[sourceId] || 1;
     const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
+    const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
 
     let targetPlacement = placementBySlot.get(`${targetCol},${targetRow}`);
     if (targetPlacement && targetPlacement.id === sourceId) {
         targetPlacement = undefined;
     }
 
-    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
+    const gridRows = wrapRows;
+    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, gridRows);
+    const maxAllowedRow = Math.max(0, gridRows - sourceCells);
     const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
-    const finalTargetRow = targetPlacement ? targetPlacement.row : clamped.row;
-
-    let reqRows = wrapRows;
-    for (const p of placements) {
-        reqRows = Math.max(reqRows, p.row + p.nCells);
-    }
-    const gridRows = Math.min(maxAllowedRows, Math.max(reqRows, finalTargetRow + sourceCells));
+    const finalTargetRow = targetPlacement ? Math.min(targetPlacement.row, maxAllowedRow) : clamped.row;
     const maxCol = Math.min(maxAllowedCols - 1, Math.max(currCol, finalTargetCol, sourceCol));
 
     const grid: string[][] = [];
@@ -201,6 +198,24 @@ export function reorderSpanningItems(
         for (let r = 0; r < gridRows; r++) {
             if (grid[c][r] === sourceId) {
                 grid[c][r] = "";
+            }
+        }
+    }
+
+    if (targetPlacement) {
+        const targetId = targetPlacement.id;
+        const targetCells = targetPlacement.nCells;
+        const safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - targetCells));
+        for (let c = 0; c <= maxCol; c++) {
+            for (let r = 0; r < gridRows; r++) {
+                if (grid[c][r] === targetId) {
+                    grid[c][r] = "";
+                }
+            }
+        }
+        for (let i = 0; i < targetCells; i++) {
+            if (sourceCol <= maxCol && safeSourceRow + i < gridRows) {
+                grid[sourceCol][safeSourceRow + i] = targetId;
             }
         }
     }

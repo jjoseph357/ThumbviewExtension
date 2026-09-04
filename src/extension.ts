@@ -1641,12 +1641,9 @@ export async function activate(context: vscode.ExtensionContext) {
                             folderOrders[msg.focusedFolder] = currentFolderOrder;
                             await context.workspaceState.update("thumbview.folderOrders", folderOrders);
 
-                            const orderedScopedIds = currentFolderOrder.filter(Boolean);
-                            const scopedIndices = scopedFiles.map(f => fullOrder.indexOf(f.id)).filter(idx => idx !== -1).sort((a, b) => a - b);
-                            for (let i = 0; i < scopedIndices.length && i < orderedScopedIds.length; i++) {
-                                fullOrder[scopedIndices[i]] = orderedScopedIds[i];
+                            if (activePanel) {
+                                updateLayoutFromCache(activePanel);
                             }
-                            fileOrder.setOrder(fullOrder);
                         } else if (layoutMode === "spanning_grid") {
                             const { ignorePatterns } = getIgnoreState();
                             const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
@@ -1965,41 +1962,8 @@ export async function activate(context: vscode.ExtensionContext) {
                         }
 
                         if (msg.targetIsEmpty) {
-                            if (msg.isSpanning) {
-                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                                const allocations: { [id: string]: number } = {};
-                                const validCards = cardOrder.filter(Boolean);
-                                for (const cid of validCards) {
-                                    if (cid.startsWith("folder:")) {
-                                        allocations[cid] = 1;
-                                    } else {
-                                        const f = (cachedScannedFiles || []).find(file => file.id === cid);
-                                        allocations[cid] = savedAllocations[cid] || (f && (f as any).nCells) || (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
-                                    }
-                                }
-                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
-                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                                const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(validCards.length, 1) / (16 / 9))));
-                                const wrapRows = msg.targetWrapRows || msg.targetGridRows || baseWrapRows;
-                                const maxAllowedCols = Math.max(2, (msg.targetGridCols || 2) + extraCols);
-                                const maxAllowedRows = Math.max(1, wrapRows + extraRows);
-
-                                const res = reorderSpanningItems(
-                                    validCards,
-                                    cardOrder,
-                                    allocations,
-                                    msg.sourceId,
-                                    msg.targetCol,
-                                    msg.targetRow,
-                                    maxAllowedCols,
-                                    maxAllowedRows,
-                                    wrapRows
-                                );
-                                cardOrder = res.newOrder;
-                            } else {
-                                const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
-                                cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
-                            }
+                            const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
+                            cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
                             await context.workspaceState.update("thumbview.cardOrder", cardOrder);
 
                             if (activePanel) {

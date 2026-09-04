@@ -320,21 +320,11 @@ function findNearestSlot(px, py) {
 
     let file = null;
     let item = null;
-    if (grid.isFolderCards) {
-        if (grid.isSpanning && grid.layout && grid.layout.placements) {
-            for (const p of grid.layout.placements) {
-                if (p.slots && p.slots.some(s => s[0] === col_clamped && s[1] === row_clamped)) {
-                    item = p.item || null;
-                    if (item && item.type === "file") file = item.file;
-                    break;
-                }
-            }
-        } else if (grid.orderedItems && grid.layout && grid.layout.slots) {
-            const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
-            if (slotIdx !== -1 && slotIdx < grid.orderedItems.length && grid.orderedItems[slotIdx]) {
-                item = grid.orderedItems[slotIdx];
-                if (item.type === "file") file = item.file;
-            }
+    if (grid.isFolderCards && grid.orderedItems && grid.layout && grid.layout.slots) {
+        const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
+        if (slotIdx !== -1 && slotIdx < grid.orderedItems.length && grid.orderedItems[slotIdx]) {
+            item = grid.orderedItems[slotIdx];
+            if (item.type === "file") file = item.file;
         }
     } else if (grid.isFolderView && grid.files) {
         if (grid.layout && grid.layout.placements) {
@@ -2103,14 +2093,7 @@ function render() {
             }
             cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H || hasDrillDownOverflow;
         } else {
-            let totalSlots = scopedFiles.length;
-            if (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0) {
-                const seenIds = new Set(folderOrder.filter(Boolean));
-                const newFilesCount = scopedFiles.filter(f => !seenIds.has(f.id)).length;
-                const holesCount = folderOrder.filter(id => !id).length;
-                const appendCount = Math.max(0, newFilesCount - holesCount);
-                totalSlots = Math.max(scopedFiles.length, folderOrder.length + appendCount);
-            }
+            const totalSlots = scopedFiles.length;
             localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
             const folderCols = localFolderGrid.cols + extraCols;
             const folderRows = localFolderGrid.rows + extraRows;
@@ -2165,116 +2148,44 @@ function render() {
         const totalItems = orderedItems.length;
         if (totalItems === 0) return;
 
-        let renderEntries = [];
-        let cardCols = 1;
-        let cardRows = 1;
-        let localCellW = availableW;
-        let localCellH = availableH;
+        const baseGrid = buildStableGrid(totalItems, overviewAspect);
+        const cardCols = baseGrid.cols + extraCols;
+        const cardRows = baseGrid.rows + extraRows;
+        const localCellW = availableW / Math.max(1, cardCols);
+        const localCellH = availableH / Math.max(1, cardRows);
 
-        if (isSpanningMode) {
-            const spanningItems = orderedItems.map(it => {
-                if (it.type === "folder") {
-                    return {
-                        id: it.id,
-                        type: "folder",
-                        item: it,
-                        card: it.card,
-                        nCells: 1
-                    };
-                } else {
-                    const nCells = it.file.nCells || (it.file.lineCount ? cellsNeeded(it.file.lineCount) : 1);
-                    return {
-                        id: it.id,
-                        type: "file",
-                        item: it,
-                        file: it.file,
-                        nCells: nCells,
-                        lineCount: it.file.lineCount
-                    };
-                }
-            });
-
-            const localSpanningLayout = buildSpanningGridLocal(spanningItems, overviewAspect, data.cardOrder, extraCols, extraRows);
-            cardCols = localSpanningLayout.cols;
-            cardRows = localSpanningLayout.rows;
-            localCellW = availableW / Math.max(1, cardCols);
-            localCellH = availableH / Math.max(1, cardRows);
-
-            activeRenderGrid = {
-                cols: cardCols,
-                rows: cardRows,
-                wrapRows: localSpanningLayout.wrapRows,
-                cellW: localCellW,
-                cellH: localCellH,
-                isFolderCards: true,
-                isSpanning: true,
-                layout: localSpanningLayout,
-                orderedItems: displayItems
-            };
-
-            for (const placement of localSpanningLayout.placements) {
-                const it = placement.item || placement.file;
-                renderEntries.push({
-                    item: it,
-                    col: placement.col,
-                    row: placement.row,
-                    nCells: placement.nCells,
-                    slots: placement.slots
-                });
-            }
-        } else {
-            const baseGrid = buildStableGrid(totalItems, overviewAspect);
-            cardCols = baseGrid.cols + extraCols;
-            cardRows = baseGrid.rows + extraRows;
-            localCellW = availableW / Math.max(1, cardCols);
-            localCellH = availableH / Math.max(1, cardRows);
-
-            const cardSlots = [];
-            for (let r = 0; r < cardRows; r++) {
-                for (let c = 0; c < cardCols; c++) {
-                    cardSlots.push([c, r]);
-                }
-            }
-
-            const localGrid = {
-                cols: cardCols,
-                rows: cardRows,
-                slots: cardSlots
-            };
-
-            activeRenderGrid = {
-                cols: cardCols,
-                rows: cardRows,
-                cellW: localCellW,
-                cellH: localCellH,
-                isFolderCards: true,
-                isSpanning: false,
-                layout: localGrid,
-                orderedItems: displayItems
-            };
-
-            let slotIdx = 0;
-            for (const it of displayItems) {
-                if (slotIdx >= cardSlots.length) break;
-                const slot = cardSlots[slotIdx++];
-                if (!it) continue;
-                renderEntries.push({
-                    item: it,
-                    col: slot[0],
-                    row: slot[1],
-                    nCells: 1,
-                    slots: [slot]
-                });
+        const cardSlots = [];
+        for (let r = 0; r < cardRows; r++) {
+            for (let c = 0; c < cardCols; c++) {
+                cardSlots.push([c, r]);
             }
         }
 
-        for (const entry of renderEntries) {
-            const item = entry.item;
+        const localGrid = {
+            cols: cardCols,
+            rows: cardRows,
+            slots: cardSlots
+        };
+
+        activeRenderGrid = {
+            cols: cardCols,
+            rows: cardRows,
+            cellW: localCellW,
+            cellH: localCellH,
+            isFolderCards: true,
+            isSpanning: false,
+            layout: localGrid,
+            orderedItems: displayItems
+        };
+
+        let slotIdx = 0;
+
+        for (const item of displayItems) {
+            if (slotIdx >= cardSlots.length) break;
+            const slot = cardSlots[slotIdx++];
             if (!item) continue;
-            const slot = [entry.col, entry.row];
-            const x = GRID_SIDE_MARGIN + entry.col * localCellW;
-            const y = GRID_TOP_MARGIN + entry.row * localCellH;
-            const itemH = localCellH * entry.nCells;
+            const x = GRID_SIDE_MARGIN + slot[0] * localCellW;
+            const y = GRID_TOP_MARGIN + slot[1] * localCellH;
 
             if (item.type === "folder") {
                 const group = item.card;
@@ -2473,8 +2384,8 @@ function render() {
                 ctx.restore();
             } else {
                 const file = item.file;
-                const fileH = itemH;
-                file._cell = { id: item.id, x, y, w: localCellW, h: fileH, _slot: slot, nCells: entry.nCells, slots: entry.slots };
+                const fileH = localCellH;
+                file._cell = { id: item.id, x, y, w: localCellW, h: fileH, _slot: slot };
 
                 if (y + fileH < -50 || y > rectH + 50) continue;
 
@@ -2539,7 +2450,7 @@ function render() {
                 orderToIterate = scopedFiles.map(f => f.id);
             }
 
-            const totalSlots = Math.max(scopedFiles.length, orderToIterate.length);
+            const totalSlots = scopedFiles.length;
             localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
 
             const folderCols = (localFolderGrid ? localFolderGrid.cols : 1) + extraCols;
@@ -3356,8 +3267,7 @@ canvas.addEventListener("mouseup", event => {
                     command: "swapCardItems",
                     sourceId: "folder:" + draggingFolder.folderPath,
                     targetId: dragTarget.item.id,
-                    currentCardIds,
-                    isSpanning: !!activeRenderGrid.isSpanning
+                    currentCardIds
                 });
             } else if (dragTarget && !dragTarget.item) {
                 const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
@@ -3370,13 +3280,7 @@ canvas.addEventListener("mouseup", event => {
                     targetIsEmpty: true,
                     targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
                     maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
-                    currentCardIds,
-                    targetCol: dragTarget.col,
-                    targetRow: dragTarget.row,
-                    targetGridCols: activeRenderGrid.cols,
-                    targetGridRows: activeRenderGrid.rows,
-                    targetWrapRows: activeRenderGrid.wrapRows,
-                    isSpanning: !!activeRenderGrid.isSpanning
+                    currentCardIds
                 });
             }
         } else if (dragTarget) {
@@ -3406,8 +3310,7 @@ canvas.addEventListener("mouseup", event => {
                     command: "swapCardItems",
                     sourceId: draggingFile.id,
                     targetId: dragTarget.item.id,
-                    currentCardIds,
-                    isSpanning: !!activeRenderGrid.isSpanning
+                    currentCardIds
                 });
             } else if (dragTarget && !dragTarget.item) {
                 const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
@@ -3420,13 +3323,7 @@ canvas.addEventListener("mouseup", event => {
                     targetIsEmpty: true,
                     targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
                     maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
-                    currentCardIds,
-                    targetCol: dragTarget.col,
-                    targetRow: dragTarget.row,
-                    targetGridCols: activeRenderGrid.cols,
-                    targetGridRows: activeRenderGrid.rows,
-                    targetWrapRows: activeRenderGrid.wrapRows,
-                    isSpanning: !!activeRenderGrid.isSpanning
+                    currentCardIds
                 });
             }
         } else if (dragTarget) {

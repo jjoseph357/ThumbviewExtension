@@ -192,12 +192,10 @@ Thumbview detects `hasTallFileOverflow` during layout calculation and automatica
 
 When dragging cards in subfolder cards overview, the host synchronizes `thumbview.cardOrder` using the current card order snapshot sent from the webview (`msg.currentCardIds`). Dropping into an empty space places the card at the exact target slot index rather than appending it to the far right.
 
-## Spanning Grid in Subfolder Cards Mode
+## Subfolder Cards Mode Uniform Layout & In-Folder Drag Stability
 
-In subfolder cards mode (`cellsTooSmall === true`), workspace files are partitioned into folder thumbnail cards and root file tiles. When spanning grid layout mode is active:
-1. **Variable height root files**: Root files maintain their calculated multi-cell spanning height (`nCells * localCellH`), while folder cards occupy 1 unit cell.
-2. **Deterministic column packing**: `buildSpanningGridLocal` packs folder cards and spanning root files into columns bounded by `wrapRows`.
-3. **Empty space drag stability**: Moving items to empty slots computes the base grid from active item count rather than array length with holes, preventing spurious grid expansion. The host applies `reorderSpanningItems` directly to `thumbview.cardOrder` without mutating root `fileOrder`.
+1. **Uniform 1-cell layout**: In subfolder cards mode (`cellsTooSmall === true`), all folder cards and root file tiles render with uniform 1-cell dimensions (`localCellH = availableH / cardRows`). This maintains a clean, uniform visual hierarchy and predictable grid alignment across all cards.
+2. **In-Folder Drag Stability**: Within a subfolder card or folder drill-down view (`focusedFolder`), dragging and dropping files strictly respects the layout's column wrap stride (`gridRows = wrapRows`). Swapping two files places the target item into the source file's vacated slot so neither file is lost or shifted. Moving a file to an empty space preserves the exact coordinates of all other files in the folder without cascading downstream tiles into adjacent columns. Folder file reorders update `thumbview.folderOrders` without mutating the workspace-wide `fileOrder`.
 
 ## Known limitations / accepted tradeoffs
 

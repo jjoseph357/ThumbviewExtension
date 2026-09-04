@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tall File Vertical Overflow Protection**: Tall spanning files that exceed available vertical canvas space automatically trigger subfolder cards mode, preventing files from clipping offscreen or disappearing when vertical height shrinks.
 - **Drag-and-Drop Interaction Performance**: Added pre-tokenized line caching (`fileTokenCache`) and reusable offscreen background canvas buffers (`cachedDragBackgroundCanvas`), eliminating synchronous re-tokenization lag during file card pickup and drop gestures.
 - **Folder Cards Empty Space Targeting**: Dragging and dropping files into empty spaces within folder card overviews and folder drill-downs preserves exact target slot indexes, preventing cards from jumping to the far right.
-- **Spanning Tiles in Subfolder Cards Mode**: File cards now render with their full multi-cell spanning height in subfolder cards mode when spanning grid layout is enabled, while folder cards remain 1 unit tall.
-- **Subfolder Cards Drag Stability**: Empty space drag operations in subfolder cards mode compute base dimensions from active items count, preventing card repositioning from altering column counts, rearranging neighboring tiles, or expanding the view. Empty slot repositioning now uses 2D spanning reordering without mutating global file order.
+- **Subfolder Cards Mode Uniform Layout**: Reverted spanning grid in subfolder cards mode back to a uniform 1-cell height for all cards and files, ensuring consistent visual alignment.
+- **In-Folder Drag and Drop Stability**: Fixed an issue where dragging and dropping files within a subfolder card or folder drill-down view changed the position of all other files. `reorderSpanningItems` now preserves target file positions on tile swaps without deleting items from the order array, and bounds row heights to `wrapRows` so column wrapping stride is preserved. Folder file moves update `thumbview.folderOrders` without corrupting workspace `fileOrder`.
 
 ## [0.4.5] - 2026-08-31
 
