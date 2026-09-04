@@ -192,6 +192,13 @@ Thumbview detects `hasTallFileOverflow` during layout calculation and automatica
 
 When dragging cards in subfolder cards overview, the host synchronizes `thumbview.cardOrder` using the current card order snapshot sent from the webview (`msg.currentCardIds`). Dropping into an empty space places the card at the exact target slot index rather than appending it to the far right.
 
+## Spanning Grid in Subfolder Cards Mode
+
+In subfolder cards mode (`cellsTooSmall === true`), workspace files are partitioned into folder thumbnail cards and root file tiles. When spanning grid layout mode is active:
+1. **Variable height root files**: Root files maintain their calculated multi-cell spanning height (`nCells * localCellH`), while folder cards occupy 1 unit cell.
+2. **Deterministic column packing**: `buildSpanningGridLocal` packs folder cards and spanning root files into columns bounded by `wrapRows`.
+3. **Empty space drag stability**: Moving items to empty slots computes the base grid from active item count rather than array length with holes, preventing spurious grid expansion. The host applies `reorderSpanningItems` directly to `thumbview.cardOrder` without mutating root `fileOrder`.
+
 ## Known limitations / accepted tradeoffs
 
 - **Unit test suite**: Core logic is covered by automated unit tests in `src/test/` run via `npm run test:unit`. End-to-end webview testing relies on VS Code Extension Host integration.

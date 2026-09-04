@@ -5,14 +5,6 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-- **Position Stability on Folder Unignore**: Existing file cards strictly maintain their original `(col, row)` coordinates when unignoring folders. Newly unignored files populate remaining empty rows below existing cards before adding new columns to the right.
-- **Tall File Vertical Overflow Protection**: Tall spanning files that exceed available vertical canvas space automatically trigger subfolder cards mode, preventing files from clipping offscreen or disappearing when vertical height shrinks.
-- **Drag-and-Drop Interaction Performance**: Added pre-tokenized line caching (`fileTokenCache`) and reusable offscreen background canvas buffers (`cachedDragBackgroundCanvas`), eliminating synchronous re-tokenization lag during file card pickup and drop gestures.
-- **Folder Cards Empty Space Targeting**: Dragging and dropping files into empty spaces within folder card overviews and folder drill-downs preserves exact target slot indexes, preventing cards from jumping to the far right.
-
 ## [0.4.6] - 2026-09-03
 
 ### Fixed
@@ -27,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ignored Patterns File Counts**: Displayed matching workspace file count badges and tooltips in both the sidebar TreeView and the webview ignored patterns list.
 - **Mouse Side Button Breadcrumb Navigation**: Mapped mouse buttons 3 and 4 to step backward and forward through folder drill-down history.
 - **Top Toolbar & Ignore Filter Consistency**: Added SVGs for toolbar actions and excluded compiler and test cache directories from automatic dense folder scanning.
+- **Position Stability on Folder Unignore**: Existing file cards strictly maintain their original `(col, row)` coordinates when unignoring folders. Newly unignored files populate remaining empty rows below existing cards before adding new columns to the right.
+- **Tall File Vertical Overflow Protection**: Tall spanning files that exceed available vertical canvas space automatically trigger subfolder cards mode, preventing files from clipping offscreen or disappearing when vertical height shrinks.
+- **Drag-and-Drop Interaction Performance**: Added pre-tokenized line caching (`fileTokenCache`) and reusable offscreen background canvas buffers (`cachedDragBackgroundCanvas`), eliminating synchronous re-tokenization lag during file card pickup and drop gestures.
+- **Folder Cards Empty Space Targeting**: Dragging and dropping files into empty spaces within folder card overviews and folder drill-downs preserves exact target slot indexes, preventing cards from jumping to the far right.
+- **Spanning Tiles in Subfolder Cards Mode**: File cards now render with their full multi-cell spanning height in subfolder cards mode when spanning grid layout is enabled, while folder cards remain 1 unit tall.
+- **Subfolder Cards Drag Stability**: Empty space drag operations in subfolder cards mode compute base dimensions from active items count, preventing card repositioning from altering column counts, rearranging neighboring tiles, or expanding the view. Empty slot repositioning now uses 2D spanning reordering without mutating global file order.
 
 ## [0.4.5] - 2026-08-31
 

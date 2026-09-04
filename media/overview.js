@@ -320,11 +320,21 @@ function findNearestSlot(px, py) {
 
     let file = null;
     let item = null;
-    if (grid.isFolderCards && grid.orderedItems && grid.layout && grid.layout.slots) {
-        const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
-        if (slotIdx !== -1 && slotIdx < grid.orderedItems.length && grid.orderedItems[slotIdx]) {
-            item = grid.orderedItems[slotIdx];
-            if (item.type === "file") file = item.file;
+    if (grid.isFolderCards) {
+        if (grid.isSpanning && grid.layout && grid.layout.placements) {
+            for (const p of grid.layout.placements) {
+                if (p.slots && p.slots.some(s => s[0] === col_clamped && s[1] === row_clamped)) {
+                    item = p.item || null;
+                    if (item && item.type === "file") file = item.file;
+                    break;
+                }
+            }
+        } else if (grid.orderedItems && grid.layout && grid.layout.slots) {
+            const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
+            if (slotIdx !== -1 && slotIdx < grid.orderedItems.length && grid.orderedItems[slotIdx]) {
+                item = grid.orderedItems[slotIdx];
+                if (item.type === "file") file = item.file;
+            }
         }
     } else if (grid.isFolderView && grid.files) {
         if (grid.layout && grid.layout.placements) {
@@ -924,7 +934,8 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
             }
 
             placements.push({
-                file,
+                file: file.file || file,
+                item: file.item || file,
                 col: currCol,
                 row: currRow,
                 nCells,
@@ -942,11 +953,19 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     const finalRows = Math.max(1, maxRowUsed) + extraRows;
     const finalCols = Math.max(2, reqCols, Math.ceil(finalRows * targetAspect)) + extraCols;
 
+    const gridSlots = [];
+    for (let r = 0; r < finalRows; r++) {
+        for (let c = 0; c < finalCols; c++) {
+            gridSlots.push([c, r]);
+        }
+    }
+
     return {
         rows: finalRows,
         cols: finalCols,
         wrapRows: wrapRows,
-        placements
+        placements,
+        slots: gridSlots
     };
 }
 
@@ -2143,46 +2162,119 @@ function render() {
             displayItems = orderedItems;
         }
 
-        const totalItems = displayItems.length;
+        const totalItems = orderedItems.length;
         if (totalItems === 0) return;
 
-        const baseGrid = buildStableGrid(totalItems, overviewAspect);
-        const cardCols = baseGrid.cols + extraCols;
-        const cardRows = baseGrid.rows + extraRows;
-        const localCellW = availableW / Math.max(1, cardCols);
-        const localCellH = availableH / Math.max(1, cardRows);
+        let renderEntries = [];
+        let cardCols = 1;
+        let cardRows = 1;
+        let localCellW = availableW;
+        let localCellH = availableH;
 
-        const cardSlots = [];
-        for (let r = 0; r < cardRows; r++) {
-            for (let c = 0; c < cardCols; c++) {
-                cardSlots.push([c, r]);
+        if (isSpanningMode) {
+            const spanningItems = orderedItems.map(it => {
+                if (it.type === "folder") {
+                    return {
+                        id: it.id,
+                        type: "folder",
+                        item: it,
+                        card: it.card,
+                        nCells: 1
+                    };
+                } else {
+                    const nCells = it.file.nCells || (it.file.lineCount ? cellsNeeded(it.file.lineCount) : 1);
+                    return {
+                        id: it.id,
+                        type: "file",
+                        item: it,
+                        file: it.file,
+                        nCells: nCells,
+                        lineCount: it.file.lineCount
+                    };
+                }
+            });
+
+            const localSpanningLayout = buildSpanningGridLocal(spanningItems, overviewAspect, data.cardOrder, extraCols, extraRows);
+            cardCols = localSpanningLayout.cols;
+            cardRows = localSpanningLayout.rows;
+            localCellW = availableW / Math.max(1, cardCols);
+            localCellH = availableH / Math.max(1, cardRows);
+
+            activeRenderGrid = {
+                cols: cardCols,
+                rows: cardRows,
+                wrapRows: localSpanningLayout.wrapRows,
+                cellW: localCellW,
+                cellH: localCellH,
+                isFolderCards: true,
+                isSpanning: true,
+                layout: localSpanningLayout,
+                orderedItems: displayItems
+            };
+
+            for (const placement of localSpanningLayout.placements) {
+                const it = placement.item || placement.file;
+                renderEntries.push({
+                    item: it,
+                    col: placement.col,
+                    row: placement.row,
+                    nCells: placement.nCells,
+                    slots: placement.slots
+                });
+            }
+        } else {
+            const baseGrid = buildStableGrid(totalItems, overviewAspect);
+            cardCols = baseGrid.cols + extraCols;
+            cardRows = baseGrid.rows + extraRows;
+            localCellW = availableW / Math.max(1, cardCols);
+            localCellH = availableH / Math.max(1, cardRows);
+
+            const cardSlots = [];
+            for (let r = 0; r < cardRows; r++) {
+                for (let c = 0; c < cardCols; c++) {
+                    cardSlots.push([c, r]);
+                }
+            }
+
+            const localGrid = {
+                cols: cardCols,
+                rows: cardRows,
+                slots: cardSlots
+            };
+
+            activeRenderGrid = {
+                cols: cardCols,
+                rows: cardRows,
+                cellW: localCellW,
+                cellH: localCellH,
+                isFolderCards: true,
+                isSpanning: false,
+                layout: localGrid,
+                orderedItems: displayItems
+            };
+
+            let slotIdx = 0;
+            for (const it of displayItems) {
+                if (slotIdx >= cardSlots.length) break;
+                const slot = cardSlots[slotIdx++];
+                if (!it) continue;
+                renderEntries.push({
+                    item: it,
+                    col: slot[0],
+                    row: slot[1],
+                    nCells: 1,
+                    slots: [slot]
+                });
             }
         }
 
-        const localGrid = {
-            cols: cardCols,
-            rows: cardRows,
-            slots: cardSlots
-        };
-
-        activeRenderGrid = {
-            cols: cardCols,
-            rows: cardRows,
-            cellW: localCellW,
-            cellH: localCellH,
-            isFolderCards: true,
-            layout: localGrid,
-            orderedItems: displayItems
-        };
-
-        let slotIdx = 0;
-
-        for (const item of displayItems) {
-            if (slotIdx >= cardSlots.length) break;
-            const slot = cardSlots[slotIdx++];
+        for (const entry of renderEntries) {
+            const item = entry.item;
             if (!item) continue;
-            const x = GRID_SIDE_MARGIN + slot[0] * localCellW;
-            const y = GRID_TOP_MARGIN + slot[1] * localCellH;
+            const slot = [entry.col, entry.row];
+            const x = GRID_SIDE_MARGIN + entry.col * localCellW;
+            const y = GRID_TOP_MARGIN + entry.row * localCellH;
+            const itemH = localCellH * entry.nCells;
 
             if (item.type === "folder") {
                 const group = item.card;
@@ -2381,8 +2473,8 @@ function render() {
                 ctx.restore();
             } else {
                 const file = item.file;
-                const fileH = localCellH;
-                file._cell = { id: item.id, x, y, w: localCellW, h: fileH, _slot: slot };
+                const fileH = itemH;
+                file._cell = { id: item.id, x, y, w: localCellW, h: fileH, _slot: slot, nCells: entry.nCells, slots: entry.slots };
 
                 if (y + fileH < -50 || y > rectH + 50) continue;
 
@@ -2580,6 +2672,18 @@ function drawDragOverlays() {
                     dragTarget.file._cell.w,
                     dragTarget.file._cell.h
                 );
+            } else if (dragTarget.item && dragTarget.item.type === "folder") {
+                const fc = data._folderCards && data._folderCards.find(c => c.id === dragTarget.item.id);
+                if (fc) {
+                    ctx.strokeRect(fc.x, fc.y, fc.w, fc.h);
+                } else {
+                    ctx.strokeRect(
+                        GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
+                        GRID_TOP_MARGIN + dragTarget.row * dragTarget.cellH,
+                        dragTarget.cellW,
+                        dragTarget.cellH
+                    );
+                }
             } else {
                 ctx.strokeRect(
                     GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
@@ -2616,6 +2720,18 @@ function drawDragOverlays() {
                     dragTarget.file._cell.w,
                     dragTarget.file._cell.h
                 );
+            } else if (dragTarget.item && dragTarget.item.type === "folder") {
+                const fc = data._folderCards && data._folderCards.find(c => c.id === dragTarget.item.id);
+                if (fc) {
+                    ctx.strokeRect(fc.x, fc.y, fc.w, fc.h);
+                } else {
+                    ctx.strokeRect(
+                        GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
+                        GRID_TOP_MARGIN + dragTarget.row * dragTarget.cellH,
+                        dragTarget.cellW,
+                        dragTarget.cellH
+                    );
+                }
             } else {
                 ctx.strokeRect(
                     GRID_SIDE_MARGIN + dragTarget.col * dragTarget.cellW,
@@ -3232,17 +3348,21 @@ canvas.addEventListener("mouseup", event => {
         updateDragTarget();
 
         if (activeRenderGrid && activeRenderGrid.isFolderCards) {
+            const currentCardIds = (data.cardOrder && data.cardOrder.length > 0)
+                ? data.cardOrder
+                : activeRenderGrid.orderedItems.map(it => it ? it.id : "");
             if (dragTarget && dragTarget.item && dragTarget.item.id !== ("folder:" + draggingFolder.folderPath)) {
                 vscode.postMessage({
                     command: "swapCardItems",
                     sourceId: "folder:" + draggingFolder.folderPath,
-                    targetId: dragTarget.item.id
+                    targetId: dragTarget.item.id,
+                    currentCardIds,
+                    isSpanning: !!activeRenderGrid.isSpanning
                 });
             } else if (dragTarget && !dragTarget.item) {
                 const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
                     ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
                     : -1;
-                const currentCardIds = activeRenderGrid.orderedItems.map(it => it ? it.id : "");
                 vscode.postMessage({
                     command: "swapCardItems",
                     sourceId: "folder:" + draggingFolder.folderPath,
@@ -3250,7 +3370,13 @@ canvas.addEventListener("mouseup", event => {
                     targetIsEmpty: true,
                     targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
                     maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
-                    currentCardIds
+                    currentCardIds,
+                    targetCol: dragTarget.col,
+                    targetRow: dragTarget.row,
+                    targetGridCols: activeRenderGrid.cols,
+                    targetGridRows: activeRenderGrid.rows,
+                    targetWrapRows: activeRenderGrid.wrapRows,
+                    isSpanning: !!activeRenderGrid.isSpanning
                 });
             }
         } else if (dragTarget) {
@@ -3272,17 +3398,21 @@ canvas.addEventListener("mouseup", event => {
         updateDragTarget();
 
         if (activeRenderGrid && activeRenderGrid.isFolderCards) {
+            const currentCardIds = (data.cardOrder && data.cardOrder.length > 0)
+                ? data.cardOrder
+                : activeRenderGrid.orderedItems.map(it => it ? it.id : "");
             if (dragTarget && dragTarget.item && dragTarget.item.id !== draggingFile.id) {
                 vscode.postMessage({
                     command: "swapCardItems",
                     sourceId: draggingFile.id,
-                    targetId: dragTarget.item.id
+                    targetId: dragTarget.item.id,
+                    currentCardIds,
+                    isSpanning: !!activeRenderGrid.isSpanning
                 });
             } else if (dragTarget && !dragTarget.item) {
                 const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
                     ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
                     : -1;
-                const currentCardIds = activeRenderGrid.orderedItems.map(it => it ? it.id : "");
                 vscode.postMessage({
                     command: "swapCardItems",
                     sourceId: draggingFile.id,
@@ -3290,7 +3420,13 @@ canvas.addEventListener("mouseup", event => {
                     targetIsEmpty: true,
                     targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
                     maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
-                    currentCardIds
+                    currentCardIds,
+                    targetCol: dragTarget.col,
+                    targetRow: dragTarget.row,
+                    targetGridCols: activeRenderGrid.cols,
+                    targetGridRows: activeRenderGrid.rows,
+                    targetWrapRows: activeRenderGrid.wrapRows,
+                    isSpanning: !!activeRenderGrid.isSpanning
                 });
             }
         } else if (dragTarget) {

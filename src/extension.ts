@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache } from "./scanner";
 import { buildStableGrid, slotToIndex, findSlotIndex } from "./layout";
-import { buildSpanningGrid, integrateNewFilesPreservingPositions, SpanningPlacement } from "./spanning_layout";
+import { buildSpanningGrid, cellsNeeded, integrateNewFilesPreservingPositions, SpanningPlacement } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
 import { IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeItem } from "./directoryProvider";
@@ -1965,31 +1965,43 @@ export async function activate(context: vscode.ExtensionContext) {
                         }
 
                         if (msg.targetIsEmpty) {
-                            const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
-                            cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
-                            await context.workspaceState.update("thumbview.cardOrder", cardOrder);
-
-                            const srcIds = getIdsForItem(msg.sourceId);
-                            if (srcIds.length > 0) {
-                                const remaining = fullOrder.filter(id => !srcIds.includes(id));
+                            if (msg.isSpanning) {
+                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                                const allocations: { [id: string]: number } = {};
                                 const validCards = cardOrder.filter(Boolean);
-                                const cardPos = validCards.indexOf(msg.sourceId);
-                                if (cardPos <= 0) {
-                                    remaining.unshift(...srcIds);
-                                } else if (cardPos >= validCards.length - 1) {
-                                    remaining.push(...srcIds);
-                                } else {
-                                    const prevCard = validCards[cardPos - 1];
-                                    const prevIds = getIdsForItem(prevCard);
-                                    const prevLastIdx = prevIds.length > 0 ? remaining.indexOf(prevIds[prevIds.length - 1]) : -1;
-                                    if (prevLastIdx !== -1) {
-                                        remaining.splice(prevLastIdx + 1, 0, ...srcIds);
+                                for (const cid of validCards) {
+                                    if (cid.startsWith("folder:")) {
+                                        allocations[cid] = 1;
                                     } else {
-                                        remaining.push(...srcIds);
+                                        const f = (cachedScannedFiles || []).find(file => file.id === cid);
+                                        allocations[cid] = savedAllocations[cid] || (f && (f as any).nCells) || (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
                                     }
                                 }
-                                fileOrder.setOrder(remaining);
+                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                                const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(validCards.length, 1) / (16 / 9))));
+                                const wrapRows = msg.targetWrapRows || msg.targetGridRows || baseWrapRows;
+                                const maxAllowedCols = Math.max(2, (msg.targetGridCols || 2) + extraCols);
+                                const maxAllowedRows = Math.max(1, wrapRows + extraRows);
+
+                                const res = reorderSpanningItems(
+                                    validCards,
+                                    cardOrder,
+                                    allocations,
+                                    msg.sourceId,
+                                    msg.targetCol,
+                                    msg.targetRow,
+                                    maxAllowedCols,
+                                    maxAllowedRows,
+                                    wrapRows
+                                );
+                                cardOrder = res.newOrder;
+                            } else {
+                                const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
+                                cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
                             }
+                            await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+
                             if (activePanel) {
                                 updateLayoutFromCache(activePanel);
                             }

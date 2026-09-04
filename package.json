@@ -182,7 +182,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js"
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
