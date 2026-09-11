@@ -5,18 +5,29 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.6] - 2026-09-09
+## [0.4.7] - 2026-09-11
+
+### Fixed
+- Reflow ghost columns: Eliminated empty columns on the right after reflowing spanning grid layouts by sizing grid columns strictly from total required cells and row wrapping rather than padding empty columns to match canvas aspect ratio.
+- Root view drag explosion on grid expansion/reduction: Fixed root view losing `wrapRows` metadata during tile drag operations, which previously caused Expand/Reduce Grid Space to repack tiles under an incorrect 2-row fallback and corrupt tile positions.
+- Column stride preservation on extra-row drops: Ensured tile reordering serializes positions using effective wrap rows so dropping files into bottom padding rows does not shift subsequent columns diagonally.
+- Gap preservation on grid expansion/reduction: Fixed an issue where expanding or reducing grid size caused files to shift into deliberate gaps left by previously moved files by omitting empty string tokens from cell counts, preventing tile drops beyond reduced column bounds, and retaining file order across webview data messages.
+
+## [0.4.6] - 2026-09-11
 
 ### Added
 - Mouse buttons 3 and 4 support to step backward and forward through folder drill-down history.
 - Expandable directory tree and file counts in the ignored patterns popover.
+- Configurable settings in the settings modal and VS Code configuration: compression percentage (`thumbview.compressionPercentage`), tile size before collapsing into folder cards (`thumbview.minCellWidth` and `thumbview.minCellHeight`), and auto-ignore threshold (`thumbview.autoIgnoreThreshold`).
 
 ### Changed
+- Removed Grid Space controls from the settings modal. Expanding and reducing grid space remains available through the right-click context menu and command palette.
 - Grid space expansion and reduction now scale rows and columns like a camera zoom. Existing tiles shrink toward the top left while new rows and columns appear on the bottom and right, preserving relative positions without reflow.
 - Grid expansion is scoped per folder, so adding space inside a subdirectory leaves the root view untouched.
 - Folder card previews mirror the drill-down view, including line-height spanning tiles and nested subfolder cards.
 
 ### Fixed
+- Rebounding and layout jitter when changing compression percentage by resetting stale spanning rows and synchronizing slots in memory.
 - Folder view aspect ratio and right-side void after reflow.
 - Grid row height freeze when expanding space inside a reflowed folder view.
 - Rapid successive drag swaps by updating slot occupancy in memory immediately upon drop.

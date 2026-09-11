@@ -4,6 +4,7 @@ import { RepoFile } from "./scanner";
 
 export const DEFAULT_BASE_LINES_PER_CELL = 60;
 export const DEFAULT_COMPRESSION_PCT = 0.05;
+export const MAX_COMPRESSION_PCT = 0.25;
 export const DEFAULT_TARGET_ASPECT = 16 / 9;
 export const MIN_GRID_ROWS = 1;
 export const MIN_GRID_COLS = 2;
@@ -29,10 +30,11 @@ export function cellsNeeded(
     baseLinesPerCell = DEFAULT_BASE_LINES_PER_CELL,
     compressionPct = DEFAULT_COMPRESSION_PCT
 ): number {
-    if (lineCount <= baseLinesPerCell) {
+    if (lineCount <= baseLinesPerCell || compressionPct <= 0) {
         return 1;
     }
-    const repLines = Math.max(lineCount * compressionPct, baseLinesPerCell);
+    const clampedPct = Math.min(compressionPct, MAX_COMPRESSION_PCT);
+    const repLines = Math.max(lineCount * clampedPct, baseLinesPerCell);
     return Math.ceil(repLines / baseLinesPerCell);
 }
 
@@ -56,7 +58,6 @@ export function buildSpanningGrid(
     let maxNCells = 1;
     for (const fid of seenFileOrder) {
         if (!fid) {
-            totalCells += 1;
             continue;
         }
         if (!allocations[fid]) {
@@ -117,9 +118,19 @@ export function buildSpanningGrid(
         }
     }
 
-    const reqCols = currCol + 1;
-    const finalRows = Math.max(MIN_GRID_ROWS, maxRowUsed);
-    const finalCols = Math.max(MIN_GRID_COLS, reqCols, Math.ceil(finalRows * targetAspect));
+    let maxPlacementCol = 0;
+    let maxPlacementRow = 0;
+    for (const p of placements) {
+        if (p.col > maxPlacementCol) maxPlacementCol = p.col;
+        const bottom = p.row + p.nCells;
+        if (bottom > maxPlacementRow) maxPlacementRow = bottom;
+    }
+    const reqCols = placements.length > 0 ? (maxPlacementCol + 1) : (currCol + 1);
+    const reqRows = placements.length > 0 ? maxPlacementRow : maxRowUsed;
+    const naturalColsNeeded = Math.ceil(totalCells / wrapRows);
+    const baseCols = Math.max(MIN_GRID_COLS, naturalColsNeeded);
+    const finalRows = Math.max(MIN_GRID_ROWS, reqRows);
+    const finalCols = Math.max(baseCols, reqCols);
 
     return {
         rows: finalRows,

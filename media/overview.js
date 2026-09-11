@@ -900,15 +900,31 @@ function buildStableGrid(nCells, targetAspect = 1.777) {
     };
 }
 
-function cellsNeeded(lineCount, baseLinesPerCell = 60, compressionPct = 0.05) {
-    if (lineCount <= baseLinesPerCell) {
+function getCompressionPct() {
+    if (typeof data !== "undefined" && data) {
+        if (typeof data.compressionPercentage === "number") {
+            if (data.compressionPercentage <= 0) return 0;
+            const pct = data.compressionPercentage >= 1 ? data.compressionPercentage / 100 : data.compressionPercentage;
+            return Math.max(0, Math.min(0.25, pct));
+        }
+        if (typeof data.compressionPct === "number") {
+            if (data.compressionPct <= 0) return 0;
+            return Math.max(0, Math.min(0.25, data.compressionPct));
+        }
+    }
+    return 0.05;
+}
+
+function cellsNeeded(lineCount, baseLinesPerCell = 60, compressionPct = (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05)) {
+    if (lineCount <= baseLinesPerCell || compressionPct <= 0) {
         return 1;
     }
-    const repLines = Math.max(lineCount * compressionPct, baseLinesPerCell);
+    const clampedPct = Math.min(compressionPct, 0.25);
+    const repLines = Math.max(lineCount * clampedPct, baseLinesPerCell);
     return Math.ceil(repLines / baseLinesPerCell);
 }
 
-function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, extraCols = 0, extraRows = 0, baseLinesPerCell = 60, compressionPct = 0.05, savedWrapRows = null) {
+function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, extraCols = 0, extraRows = 0, baseLinesPerCell = 60, compressionPct = (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), savedWrapRows = null) {
     const allocations = {};
     let actualCells = 0;
     let maxNCells = 1;
@@ -1157,8 +1173,24 @@ function reorderSpanningItemsLocal(
     maxAllowedRows,
     wrapRows
 ) {
-    const gridRows = maxAllowedRows;
-    const maxCol = maxAllowedCols - 1;
+    let maxColUsed = maxAllowedCols - 1;
+    let scanCol = 0;
+    let scanRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (scanRow > 0 && scanRow + nCells > wrapRows) {
+            scanCol++;
+            scanRow = 0;
+        }
+        if (id && scanCol > maxColUsed) {
+            maxColUsed = scanCol;
+        }
+        scanRow += nCells;
+    }
+
+    const maxCol = Math.max(maxAllowedCols - 1, maxColUsed);
+    const sourceCells = allocations[sourceId] || 1;
+    const gridRows = Math.max(maxAllowedRows, wrapRows);
 
     let currCol = 0;
     let currRow = 0;
@@ -1189,7 +1221,6 @@ function reorderSpanningItemsLocal(
     }
 
     const sourcePlacement = placementById.get(sourceId);
-    const sourceCells = allocations[sourceId] || 1;
     const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
     const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
 
@@ -1278,10 +1309,12 @@ function reorderSpanningItemsLocal(
         }
     }
 
+    const effectiveWrapRows = Math.max(wrapRows, finalTargetRow + sourceCells);
+
     const newOrder = [];
     for (let c = 0; c <= maxCol; c++) {
         let r = 0;
-        while (r < gridRows) {
+        while (r < effectiveWrapRows) {
             const cell = grid[c][r];
             if (cell) {
                 newOrder.push(cell);
@@ -1300,8 +1333,8 @@ function reorderSpanningItemsLocal(
 
     return {
         newOrder,
-        rows: gridRows,
-        cols: maxAllowedCols,
+        rows: effectiveWrapRows,
+        cols: Math.max(maxAllowedCols, maxCol + 1),
         finalTargetCol,
         finalTargetRow,
         sourceCol,
@@ -2495,7 +2528,7 @@ function render() {
         const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
         const folderWrapRows = (data && data.folderWrapRows && data.folderWrapRows[focusedFolder]) || null;
         if (isSpanningMode) {
-            localSpanningLayout = buildSpanningGridLocal(scopedFiles, BASE_GRID_ASPECT, folderOrder, extraCols, extraRows, 60, 0.05, folderWrapRows);
+            localSpanningLayout = buildSpanningGridLocal(scopedFiles, BASE_GRID_ASPECT, folderOrder, extraCols, extraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), folderWrapRows);
             folderCellW = availableW / Math.max(1, localSpanningLayout.cols);
             folderCellH = availableH / Math.max(1, localSpanningLayout.rows);
         } else {
@@ -2586,7 +2619,7 @@ function render() {
                 extraCols,
                 extraRows,
                 60,
-                0.05,
+                (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05),
                 cardWrapRows
             );
 
@@ -2753,7 +2786,7 @@ function render() {
                         const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
                             ? data.folderExtraRows[group.path]
                             : 0;
-                        const spanningLayout = buildSpanningGridLocal(itemsToLayout, BASE_GRID_ASPECT, groupFolderOrder, groupFolderExtraCols, groupFolderExtraRows, 60, 0.05, groupFolderWrapRows);
+                        const spanningLayout = buildSpanningGridLocal(itemsToLayout, BASE_GRID_ASPECT, groupFolderOrder, groupFolderExtraCols, groupFolderExtraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), groupFolderWrapRows);
                         const miniCols = spanningLayout.cols;
                         const miniRows = spanningLayout.rows;
                         const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
@@ -3077,6 +3110,7 @@ function render() {
         activeRenderGrid = {
             cols: gridCols,
             rows: gridRows,
+            wrapRows: (data.layout && data.layout.wrapRows) || data.layout.rows,
             cellW: rootCellW,
             cellH: rootCellH,
             isRootView: true,
@@ -3913,7 +3947,7 @@ canvas.addEventListener("mouseup", event => {
                         allocations[it.id] = (f && f.nCells && f.nCells > 1) ? f.nCells : (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
                     }
                 }
-                const wrapRows = activeRenderGrid.wrapRows || 2;
+                const wrapRows = activeRenderGrid.wrapRows || (data.layout && data.layout.wrapRows) || (data.layout && data.layout.rows) || 1;
                 const maxAllowedCols = activeRenderGrid.cols;
                 const maxAllowedRows = activeRenderGrid.rows;
 
@@ -4051,7 +4085,7 @@ canvas.addEventListener("mouseup", event => {
                         allocations[it.id] = (f && f.nCells && f.nCells > 1) ? f.nCells : (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
                     }
                 }
-                const wrapRows = activeRenderGrid.wrapRows || 2;
+                const wrapRows = activeRenderGrid.wrapRows || (data.layout && data.layout.wrapRows) || (data.layout && data.layout.rows) || 1;
                 const maxAllowedCols = activeRenderGrid.cols;
                 const maxAllowedRows = activeRenderGrid.rows;
 
@@ -4171,7 +4205,7 @@ canvas.addEventListener("mouseup", event => {
                 for (const f of scopedFiles) {
                     allocations[f.id] = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
                 }
-                const wrapRows = (activeRenderGrid && activeRenderGrid.wrapRows) || (data.layout && data.layout.wrapRows) || 2;
+                const wrapRows = (activeRenderGrid && activeRenderGrid.wrapRows) || (data.layout && data.layout.wrapRows) || (data.layout && data.layout.rows) || 1;
                 const maxAllowedCols = (activeRenderGrid && activeRenderGrid.cols) || (data.layout && data.layout.cols) || 2;
                 const maxAllowedRows = (activeRenderGrid && activeRenderGrid.rows) || (data.layout && data.layout.rows) || 2;
 
@@ -4846,6 +4880,26 @@ function updateSettingsModalState() {
     if (mediaToggle) {
         mediaToggle.checked = data.renderMediaThumbnails !== false;
     }
+
+    const compInput = document.getElementById("compression-percentage-input");
+    if (compInput && document.activeElement !== compInput) {
+        compInput.value = (typeof data.compressionPercentage === "number") ? data.compressionPercentage : 5;
+    }
+
+    const minWInput = document.getElementById("min-cell-width-input");
+    if (minWInput && document.activeElement !== minWInput) {
+        minWInput.value = (typeof data.minCellWidth === "number") ? data.minCellWidth : 60;
+    }
+
+    const minHInput = document.getElementById("min-cell-height-input");
+    if (minHInput && document.activeElement !== minHInput) {
+        minHInput.value = (typeof data.minCellHeight === "number") ? data.minCellHeight : 40;
+    }
+
+    const autoIgnoreInput = document.getElementById("auto-ignore-threshold-input");
+    if (autoIgnoreInput && document.activeElement !== autoIgnoreInput) {
+        autoIgnoreInput.value = (typeof data.autoIgnoreThreshold === "number") ? data.autoIgnoreThreshold : 30;
+    }
 }
 
 function escapeHtml(s) {
@@ -5352,18 +5406,132 @@ function triggerReduceSpace() {
     });
 }
 
-const expandGridBtn = document.getElementById("expand-grid-btn");
-if (expandGridBtn) {
-    expandGridBtn.onclick = () => {
-        triggerExpandSpace();
-    };
+function applyLocalSpanningCompression(pct) {
+    if (!data || !data.files || (data.mode !== "spanning_grid" && data.layoutMode !== "spanning_grid")) return;
+    const clampedPct = Math.max(0, Math.min(0.25, pct));
+    for (const f of data.files) {
+        f.nCells = f.lineCount ? cellsNeeded(f.lineCount, 60, clampedPct) : 1;
+    }
+    const order = data.files.map(f => f.id);
+    const extraCols = data.extraCols || 0;
+    const extraRows = data.extraRows || 0;
+    const layout = buildSpanningGridLocal(data.files, BASE_GRID_ASPECT, order, extraCols, extraRows, 60, clampedPct, null);
+    if (layout && layout.placements) {
+        data.layout = {
+            cols: layout.cols,
+            rows: layout.rows
+        };
+        const slotMap = new Map(layout.placements.map(p => [p.file.id, [p.col, p.row]]));
+        const cellsMap = new Map(layout.placements.map(p => [p.file.id, p.nCells]));
+        const slotsMap = new Map(layout.placements.map(p => [p.file.id, p.slots]));
+        slotOccupancy.clear();
+        for (const f of data.files) {
+            if (slotMap.has(f.id)) {
+                f.slot = slotMap.get(f.id);
+            }
+            if (cellsMap.has(f.id)) {
+                f.nCells = cellsMap.get(f.id);
+            }
+            if (slotsMap.has(f.id)) {
+                f.slots = slotsMap.get(f.id);
+                for (const [col, row] of f.slots) {
+                    slotOccupancy.set(`${col},${row}`, f);
+                }
+            }
+        }
+    }
+    userReorderedFileSlots.clear();
 }
 
-const reduceGridBtn = document.getElementById("reduce-grid-btn");
-if (reduceGridBtn) {
-    reduceGridBtn.onclick = () => {
-        triggerReduceSpace();
+const compPercentageInput = document.getElementById("compression-percentage-input");
+if (compPercentageInput) {
+    const handleCompCommit = () => {
+        let val = parseInt(compPercentageInput.value, 10);
+        if (isNaN(val)) val = 0;
+        val = Math.max(0, Math.min(25, val));
+        compPercentageInput.value = val;
+        if (data && data.compressionPercentage === val) {
+            return;
+        }
+        if (data) {
+            data.compressionPercentage = val;
+        }
+        vscode.postMessage({ command: "setCompressionPercentage", value: val });
     };
+
+    compPercentageInput.addEventListener("change", handleCompCommit);
+    compPercentageInput.addEventListener("blur", handleCompCommit);
+    compPercentageInput.addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+            compPercentageInput.blur();
+        }
+    });
+}
+
+let dimDebounceTimer = null;
+const minCellWInput = document.getElementById("min-cell-width-input");
+const minCellHInput = document.getElementById("min-cell-height-input");
+if (minCellWInput && minCellHInput) {
+    const handleDimInput = () => {
+        let w = parseInt(minCellWInput.value, 10);
+        let h = parseInt(minCellHInput.value, 10);
+        if (!isNaN(w) && w >= 10 && !isNaN(h) && h >= 10) {
+            if (data) {
+                data.minCellWidth = w;
+                data.minCellHeight = h;
+                render();
+            }
+            clearTimeout(dimDebounceTimer);
+            dimDebounceTimer = setTimeout(() => {
+                vscode.postMessage({ command: "setMinCellDimensions", minCellWidth: w, minCellHeight: h });
+            }, 300);
+        }
+    };
+
+    const handleDimCommit = () => {
+        let w = parseInt(minCellWInput.value, 10);
+        let h = parseInt(minCellHInput.value, 10);
+        if (isNaN(w) || w < 10) w = 10;
+        if (w > 500) w = 500;
+        if (isNaN(h) || h < 10) h = 10;
+        if (h > 500) h = 500;
+        minCellWInput.value = w;
+        minCellHInput.value = h;
+        if (data) {
+            data.minCellWidth = w;
+            data.minCellHeight = h;
+            render();
+        }
+        clearTimeout(dimDebounceTimer);
+        vscode.postMessage({ command: "setMinCellDimensions", minCellWidth: w, minCellHeight: h });
+    };
+
+    minCellWInput.addEventListener("input", handleDimInput);
+    minCellHInput.addEventListener("input", handleDimInput);
+    minCellWInput.addEventListener("change", handleDimCommit);
+    minCellHInput.addEventListener("change", handleDimCommit);
+    minCellWInput.addEventListener("blur", handleDimCommit);
+    minCellHInput.addEventListener("blur", handleDimCommit);
+    minCellWInput.addEventListener("keydown", e => { if (e.key === "Enter") minCellWInput.blur(); });
+    minCellHInput.addEventListener("keydown", e => { if (e.key === "Enter") minCellHInput.blur(); });
+}
+
+const autoIgnoreInput = document.getElementById("auto-ignore-threshold-input");
+if (autoIgnoreInput) {
+    const handleAutoIgnoreChange = () => {
+        let val = parseInt(autoIgnoreInput.value, 10);
+        if (isNaN(val) || val < 0) val = 0;
+        if (val > 10000) val = 10000;
+        autoIgnoreInput.value = val;
+        if (data) data.autoIgnoreThreshold = val;
+        vscode.postMessage({ command: "setAutoIgnoreThreshold", threshold: val });
+    };
+    autoIgnoreInput.addEventListener("change", handleAutoIgnoreChange);
+    autoIgnoreInput.addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+            autoIgnoreInput.blur();
+        }
+    });
 }
 
 // Side mouse button navigation on breadcrumbs:

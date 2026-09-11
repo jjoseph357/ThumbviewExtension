@@ -295,8 +295,24 @@ export function reorderSpanningItems(
     targetPlacement?: { id: string; col: number; row: number; nCells: number };
     safeSourceRow: number;
 } {
-    const gridRows = maxAllowedRows;
-    const maxCol = maxAllowedCols - 1;
+    let maxColUsed = maxAllowedCols - 1;
+    let scanCol = 0;
+    let scanRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (scanRow > 0 && scanRow + nCells > wrapRows) {
+            scanCol++;
+            scanRow = 0;
+        }
+        if (id && scanCol > maxColUsed) {
+            maxColUsed = scanCol;
+        }
+        scanRow += nCells;
+    }
+
+    const maxCol = Math.max(maxAllowedCols - 1, maxColUsed);
+    const sourceCells = allocations[sourceId] || 1;
+    const gridRows = Math.max(maxAllowedRows, wrapRows);
 
     let currCol = 0;
     let currRow = 0;
@@ -327,7 +343,6 @@ export function reorderSpanningItems(
     }
 
     const sourcePlacement = placementById.get(sourceId);
-    const sourceCells = allocations[sourceId] || 1;
     const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
     const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
 
@@ -416,10 +431,12 @@ export function reorderSpanningItems(
         }
     }
 
+    const effectiveWrapRows = Math.max(wrapRows, finalTargetRow + sourceCells);
+
     const newOrder: string[] = [];
     for (let c = 0; c <= maxCol; c++) {
         let r = 0;
-        while (r < gridRows) {
+        while (r < effectiveWrapRows) {
             const cell = grid[c][r];
             if (cell) {
                 newOrder.push(cell);
@@ -438,8 +455,8 @@ export function reorderSpanningItems(
 
     return {
         newOrder,
-        rows: gridRows,
-        cols: maxAllowedCols,
+        rows: effectiveWrapRows,
+        cols: Math.max(maxAllowedCols, maxCol + 1),
         finalTargetCol,
         finalTargetRow,
         sourceCol,

@@ -69,5 +69,7 @@ Shortcuts and layout toggles are also accessible from the settings modal in the 
 | `thumbview.dragReorderMode` | `swap` | `swap`: swap positions with target slot. `shift`: shift adjacent tiles. |
 | `thumbview.autoIgnoreThreshold` | `30` | Auto-ignore subfolders with more than this many files (`0` disables). |
 | `thumbview.renderMediaThumbnails` | `true` | Render image and PDF thumbnails inside tiles. |
+| `thumbview.compressionPercentage` | `5` | Compression threshold: when code shrinks to this percentage of its height in a cell, the tile expands one cell taller (0% disables, 1% to 20% recommended, max 25%). |
 | `thumbview.minCellWidth` | `60` | Minimum tile width (px) before files group into folder cards. |
 | `thumbview.minCellHeight` | `40` | Minimum tile height (px) before files group into folder cards. |
+

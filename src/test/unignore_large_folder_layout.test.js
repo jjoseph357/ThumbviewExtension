@@ -204,9 +204,9 @@ const overviewPath = path.join(__dirname, "../../media/overview.js");
 const code = fs.readFileSync(overviewPath, "utf8");
 eval(code);
 
-// Create 200 files grouped into 4 folders
+// Create 220 files grouped into 4 folders
 const workspaceFiles = [];
-for (let i = 0; i < 200; i++) {
+for (let i = 0; i < 220; i++) {
     const folder = `folder_${i % 4}/`;
     workspaceFiles.push({
         id: `file_${i}`,
@@ -218,8 +218,8 @@ for (let i = 0; i < 200; i++) {
     });
 }
 
-// Generate layout for 200 files
-const spanningLayout200 = buildSpanningGrid(workspaceFiles, workspaceFiles.map(f => f.id));
+// Generate layout for 220 files
+const spanningLayout220 = buildSpanningGrid(workspaceFiles, workspaceFiles.map(f => f.id));
 const msgHandler = windowListeners["message"];
 assert(msgHandler, "Window message listener should be registered");
 
@@ -228,12 +228,12 @@ const samplePayload = {
     mode: "spanning_grid",
     files: workspaceFiles.map((f, i) => ({
         ...f,
-        slot: [spanningLayout200.placements[i]?.col ?? 0, spanningLayout200.placements[i]?.row ?? 0],
-        slots: spanningLayout200.placements[i]?.slots ?? [[0, 0]]
+        slot: [spanningLayout220.placements[i]?.col ?? 0, spanningLayout220.placements[i]?.row ?? 0],
+        slots: spanningLayout220.placements[i]?.slots ?? [[0, 0]]
     })),
     layout: {
-        cols: spanningLayout200.cols,
-        rows: spanningLayout200.rows
+        cols: spanningLayout220.cols,
+        rows: spanningLayout220.rows
     },
     openFiles: [],
     activeFile: null
@@ -242,10 +242,10 @@ const samplePayload = {
 msgHandler({ data: samplePayload });
 
 const folderCards = samplePayload._folderCards || [];
-console.log("Folder cards generated for 200 files with default settings:", folderCards.length);
+console.log("Folder cards generated for 220 files with default settings:", folderCards.length);
 assert(
     folderCards.length >= 4,
-    `Expected at least 4 folder cards for 200 files across 4 folders, got: ${folderCards.length}`
+    `Expected at least 4 folder cards for 220 files across 4 folders, got: ${folderCards.length}`
 );
 
 console.log("✓ Test 2 passed: subfolder cards generated for large file count");

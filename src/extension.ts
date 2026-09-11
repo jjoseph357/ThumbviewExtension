@@ -1,8 +1,15 @@
 import * as vscode from "vscode";
 import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache } from "./scanner";
 import { buildStableGrid, slotToIndex, findSlotIndex, MIN_GRID_COLS, MIN_GRID_ROWS } from "./layout";
-import { buildSpanningGrid, cellsNeeded, integrateNewFilesPreservingPositions, SpanningPlacement } from "./spanning_layout";
+import { buildSpanningGrid, cellsNeeded, integrateNewFilesPreservingPositions, SpanningPlacement, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
+
+function getCompressionPct(): number {
+    const raw = vscode.workspace.getConfiguration("thumbview").get<number>("compressionPercentage") ?? 5;
+    if (raw <= 0) return 0;
+    const pct = raw >= 1 ? raw / 100 : raw;
+    return Math.max(0, Math.min(0.25, pct));
+}
 import { IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeItem } from "./directoryProvider";
 import { fetchWorkspaceGitDiff, getCachedGitDiff } from "./git";
@@ -463,6 +470,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
                 let savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
 
+                const config = vscode.workspace.getConfiguration("thumbview");
+                const compressionPct = getCompressionPct();
+
                 if (lastSpanningPlacements.length > 0) {
                     const prevIds = new Set(lastSpanningPlacements.map(p => p.file.id));
                     const newIds = activeFileIds.filter(id => !prevIds.has(id));
@@ -470,7 +480,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         const validPrevPlacements = lastSpanningPlacements.filter(p => activeFileIds.includes(p.file.id));
                         const currentAllocations = { ...savedAllocations };
                         for (const f of activeFiles) {
-                            currentAllocations[f.id] = cellsNeeded(f.lineCount);
+                            currentAllocations[f.id] = cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, compressionPct);
                         }
                         const integrated = integrateNewFilesPreservingPositions(validPrevPlacements, newIds, currentAllocations, 16 / 9);
                         fileOrder.setOrder(integrated.newOrder);
@@ -493,6 +503,9 @@ export async function activate(context: vscode.ExtensionContext) {
             const renderMediaThumbnails = config.get<boolean>("renderMediaThumbnails") ?? true;
             const minCellWidth = config.get<number>("minCellWidth") ?? 60;
             const minCellHeight = config.get<number>("minCellHeight") ?? 40;
+            const autoIgnoreThreshold = config.get<number>("autoIgnoreThreshold") ?? 30;
+            const compressionPercentage = config.get<number>("compressionPercentage") ?? 5;
+            const compressionPct = getCompressionPct();
             const openKeybinding = getOpenKeybindingLabel();
             const gitDiff = getCachedGitDiff();
             fetchWorkspaceGitDiff().catch(() => {});
@@ -528,10 +541,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 const currentAllocations: { [id: string]: number } = { ...savedAllocations };
                 for (const f of filesWithWebviewUris) {
-                    currentAllocations[f.id] = cellsNeeded(f.lineCount);
+                    currentAllocations[f.id] = cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, compressionPct);
                 }
 
-                const layout = buildSpanningGrid(filesWithWebviewUris, order, currentAllocations, savedRows, forceBreakBeforeId ?? null);
+                const layout = buildSpanningGrid(filesWithWebviewUris, order, currentAllocations, savedRows, forceBreakBeforeId ?? null, 16 / 9, DEFAULT_BASE_LINES_PER_CELL, compressionPct);
                 lastSpanningPlacements = layout.placements;
 
                 await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
@@ -549,6 +562,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     mode: "spanning_grid",
                     dragReorderMode,
                     renderMediaThumbnails,
+                    compressionPercentage,
+                    autoIgnoreThreshold,
                     minCellWidth,
                     minCellHeight,
                     openKeybinding,
@@ -565,10 +580,12 @@ export async function activate(context: vscode.ExtensionContext) {
                     folderWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {},
                     folderExtraCols: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {},
                     folderExtraRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {},
+                    fileOrder: order,
                     files: filesWithSlots,
                     layout: {
                         cols: layout.cols + extraCols,
-                        rows: layout.rows + extraRows
+                        rows: layout.rows + extraRows,
+                        wrapRows: layout.wrapRows
                     }
                 });
             } else { // uniform grid (default)
@@ -598,6 +615,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     mode: "uniform_grid",
                     dragReorderMode,
                     renderMediaThumbnails,
+                    compressionPercentage,
+                    autoIgnoreThreshold,
                     minCellWidth,
                     minCellHeight,
                     openKeybinding,
@@ -614,6 +633,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     folderWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {},
                     folderExtraCols: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {},
                     folderExtraRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {},
+                    fileOrder: order,
                     files: filesWithSlots,
                     layout: {
                         cols: Math.max(layout.cols + extraCols, ugMaxCol + 1),
@@ -1649,7 +1669,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
                                     const currentAllocations: { [id: string]: number } = { ...savedAllocations };
                                     for (const f of scopedFiles) {
-                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount);
+                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, getCompressionPct());
                                     }
 
                                     const res = reorderSpanningItems(
@@ -1717,7 +1737,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
                                     const currentAllocations: { [id: string]: number } = { ...savedAllocations };
                                     for (const f of activeFiles) {
-                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount);
+                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, getCompressionPct());
                                     }
 
                                     const res = reorderSpanningItems(
@@ -2022,6 +2042,48 @@ export async function activate(context: vscode.ExtensionContext) {
                         }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to set media thumbnails: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "setCompressionPercentage") {
+                    try {
+                        const val = Math.max(0, Math.min(25, Math.round(Number(msg.value) || 0)));
+                        const config = vscode.workspace.getConfiguration("thumbview");
+                        await context.workspaceState.update("thumbview.spanningRows", undefined);
+                        await context.workspaceState.update("thumbview.spanningAllocations", undefined);
+                        lastSpanningPlacements = [];
+                        await config.update("compressionPercentage", val, vscode.ConfigurationTarget.Global);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to set compression percentage: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "setMinCellDimensions") {
+                    try {
+                        const w = Math.max(10, Math.min(500, Math.round(Number(msg.minCellWidth) || 60)));
+                        const h = Math.max(10, Math.min(500, Math.round(Number(msg.minCellHeight) || 40)));
+                        const config = vscode.workspace.getConfiguration("thumbview");
+                        await config.update("minCellWidth", w, vscode.ConfigurationTarget.Global);
+                        await config.update("minCellHeight", h, vscode.ConfigurationTarget.Global);
+                        if (activePanel) {
+                            refreshThumbview(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to set tile collapse dimensions: ${err?.message ?? String(err)}`);
+                    }
+                }
+
+                if (msg.command === "setAutoIgnoreThreshold") {
+                    try {
+                        const val = Math.max(0, Math.round(Number(msg.threshold) || 0));
+                        const config = vscode.workspace.getConfiguration("thumbview");
+                        await config.update("autoIgnoreThreshold", val, vscode.ConfigurationTarget.Global);
+                        clearScanCache();
+                        if (activePanel) {
+                            refreshThumbview(activePanel);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to set auto-ignore threshold: ${err?.message ?? String(err)}`);
                     }
                 }
 
@@ -2483,8 +2545,18 @@ export async function activate(context: vscode.ExtensionContext) {
     // Watch configuration changes (ignorePatterns no longer lives in config — only
     // layoutMode, renderMediaThumbnails, and autoIgnoreThreshold are real settings)
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
-        if ((e.affectsConfiguration("thumbview.layoutMode") || e.affectsConfiguration("thumbview.renderMediaThumbnails") || e.affectsConfiguration("thumbview.minCellWidth") || e.affectsConfiguration("thumbview.minCellHeight")) && activePanel) {
+        if (!activePanel) return;
+        if (e.affectsConfiguration("thumbview.autoIgnoreThreshold")) {
+            clearScanCache();
             refreshThumbview(activePanel);
+        } else if (
+            e.affectsConfiguration("thumbview.layoutMode") ||
+            e.affectsConfiguration("thumbview.renderMediaThumbnails") ||
+            e.affectsConfiguration("thumbview.minCellWidth") ||
+            e.affectsConfiguration("thumbview.minCellHeight") ||
+            e.affectsConfiguration("thumbview.compressionPercentage")
+        ) {
+            updateLayoutFromCache(activePanel);
         }
     });
     context.subscriptions.push(configDisposable);
@@ -3479,6 +3551,64 @@ function getHtml(
             border-color: rgba(255, 255, 255, 0.2);
         }
 
+        .setting-input-wrapper {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+
+        .setting-dimension-group {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+
+        .setting-input {
+            background: var(--vscode-input-background, #1a1a1e);
+            border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.12));
+            border-radius: 4px;
+            color: var(--vscode-input-foreground, #ffffff);
+            padding: 4px 8px;
+            font-size: 12px;
+            font-family: inherit;
+            outline: none;
+            width: 58px;
+            text-align: right;
+            transition: border-color 0.12s ease;
+            box-sizing: border-box;
+            -moz-appearance: textfield;
+            appearance: textfield;
+        }
+
+        .setting-input::-webkit-outer-spin-button,
+        .setting-input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .setting-input-dim {
+            width: 50px;
+            text-align: center;
+        }
+
+        .setting-input:focus {
+            border-color: var(--vscode-focusBorder, #007fd4);
+        }
+
+        .setting-input-unit {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground, #8a8a93);
+            min-width: 14px;
+        }
+
+        .setting-dim-sep {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground, #8a8a93);
+            user-select: none;
+        }
+
         /* Clean Desktop Toggle Control with Accent */
         .toggle-control {
             position: relative;
@@ -3668,12 +3798,34 @@ function getHtml(
                     </div>
                     <div class="setting-row">
                         <div class="setting-text">
-                            <div class="setting-name">Grid Space</div>
-                            <div class="setting-desc">Add or remove empty margin rows and columns around the grid</div>
+                            <div class="setting-name">Compression Percentage</div>
+                            <div class="setting-desc">When code shrinks to this percentage of its height in a cell, the tile expands one cell taller (0% disables, 1% to 20% recommended)</div>
                         </div>
-                        <div style="display: flex; gap: 6px;">
-                            <button id="expand-grid-btn" class="action-trigger-btn">+ Expand Space</button>
-                            <button id="reduce-grid-btn" class="action-trigger-btn">− Reduce Space</button>
+                        <div class="setting-input-wrapper">
+                            <input type="number" id="compression-percentage-input" class="setting-input" min="0" max="25" step="1" value="5">
+                            <span class="setting-input-unit">%</span>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Tile Size Before Collapse</div>
+                            <div class="setting-desc">Minimum tile width and height in pixels before grouping files into folder cards</div>
+                        </div>
+                        <div class="setting-dimension-group">
+                            <input type="number" id="min-cell-width-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="60" title="Minimum width (px)">
+                            <span class="setting-dim-sep">×</span>
+                            <input type="number" id="min-cell-height-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="40" title="Minimum height (px)">
+                            <span class="setting-input-unit">px</span>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Auto-Ignore Threshold</div>
+                            <div class="setting-desc">Automatically ignore folders containing more than this number of files (0 disables)</div>
+                        </div>
+                        <div class="setting-input-wrapper">
+                            <input type="number" id="auto-ignore-threshold-input" class="setting-input" min="0" max="10000" step="5" value="30">
+                            <span class="setting-input-unit">files</span>
                         </div>
                     </div>
                     <div class="setting-row">

@@ -2,7 +2,7 @@
   "name": "thumbview",
   "displayName": "Thumbview",
   "publisher": "Thumbview",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
@@ -51,6 +51,13 @@
           "type": "boolean",
           "default": true,
           "description": "Whether image and PDF thumbnails are rendered inside Thumbview tiles."
+        },
+        "thumbview.compressionPercentage": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 25,
+          "description": "Compression threshold for spanning grid mode. When code shrinks to this percentage of its height in a cell, the tile expands one cell taller (0% disables expansion, recommended: 1% to 20%, default: 5%)."
         },
         "thumbview.minCellWidth": {
           "type": "number",
@@ -182,7 +189,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js"
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js && node src/test/settings_modal_and_config.test.js && node src/test/reflow_empty_columns_and_drag_explosion.test.js && node src/test/expand_reduce_gap_preservation.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
