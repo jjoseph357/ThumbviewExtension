@@ -126,9 +126,154 @@ export function reorderCardItems(
 }
 
 /**
+ * Expands a 2D spanning order array by adding 1 empty slot at the bottom of each column,
+ * and 1 empty column on the right.
+ * Guarantees that all existing items maintain their exact (col, row) placements with zero reflow.
+ */
+// Duplicated logic: keep in sync with media/overview.js expandSpanningGridOrderLocal and reduceSpanningGridOrderLocal
+export function expandSpanningGridOrder(
+    currentOrder: string[],
+    allocations: { [id: string]: number },
+    oldCols: number,
+    oldRows: number
+): { newOrder: string[]; cols: number; rows: number } {
+    const newCols = oldCols + 1;
+    const newRows = oldRows + 1;
+
+    const grid: string[][] = [];
+    for (let c = 0; c < oldCols; c++) {
+        grid.push(new Array(oldRows).fill(""));
+    }
+
+    let currCol = 0;
+    let currRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > oldRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol >= oldCols) break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < oldRows) {
+                grid[currCol][currRow + i] = id;
+            }
+        }
+        currRow += nCells;
+    }
+
+    const newOrder: string[] = [];
+    for (let c = 0; c < newCols; c++) {
+        let r = 0;
+        while (r < newRows) {
+            if (c < oldCols && r < oldRows) {
+                const cell = grid[c][r];
+                if (cell) {
+                    newOrder.push(cell);
+                    const n = allocations[cell] || 1;
+                    r += n;
+                } else {
+                    newOrder.push("");
+                    r += 1;
+                }
+            } else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+
+    return {
+        newOrder,
+        cols: newCols,
+        rows: newRows
+    };
+}
+
+/**
+ * Reduces a 2D spanning order array by removing 1 row from the bottom of each column,
+ * and 1 column from the right, if extra space allows.
+ */
+export function reduceSpanningGridOrder(
+    currentOrder: string[],
+    allocations: { [id: string]: number },
+    oldCols: number,
+    oldRows: number,
+    minCols: number,
+    minRows: number
+): { newOrder: string[]; cols: number; rows: number } {
+    const newCols = Math.max(minCols, oldCols - 1);
+    const newRows = Math.max(minRows, oldRows - 1);
+    if (newCols === oldCols && newRows === oldRows) {
+        return { newOrder: [...currentOrder], cols: oldCols, rows: oldRows };
+    }
+
+    const grid: string[][] = [];
+    for (let c = 0; c < oldCols; c++) {
+        grid.push(new Array(oldRows).fill(""));
+    }
+
+    let currCol = 0;
+    let currRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > oldRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol >= oldCols) break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < oldRows) {
+                grid[currCol][currRow + i] = id;
+            }
+        }
+        currRow += nCells;
+    }
+
+    const newOrder: string[] = [];
+    for (let c = 0; c < newCols; c++) {
+        let r = 0;
+        while (r < newRows) {
+            const cell = grid[c][r];
+            if (cell) {
+                newOrder.push(cell);
+                const n = allocations[cell] || 1;
+                r += n;
+            } else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+
+    return {
+        newOrder,
+        cols: newCols,
+        rows: newRows
+    };
+}
+
+/**
  * Reorders items in a 2D spanning grid layout, placing sourceId at targetCol, targetRow.
  * Preserves empty holes in the column-major grid and respects capacity constraints.
  */
+// Duplicated logic: keep in sync with media/overview.js reorderSpanningItemsLocal and clampTargetToGridCapacityLocal
 export function reorderSpanningItems(
     activeIds: string[],
     currentOrder: string[],
@@ -139,7 +284,20 @@ export function reorderSpanningItems(
     maxAllowedCols: number,
     maxAllowedRows: number,
     wrapRows: number
-): { newOrder: string[]; rows: number; cols: number } {
+): {
+    newOrder: string[];
+    rows: number;
+    cols: number;
+    finalTargetCol: number;
+    finalTargetRow: number;
+    sourceCol: number;
+    sourceRow: number;
+    targetPlacement?: { id: string; col: number; row: number; nCells: number };
+    safeSourceRow: number;
+} {
+    const gridRows = maxAllowedRows;
+    const maxCol = maxAllowedCols - 1;
+
     let currCol = 0;
     let currRow = 0;
     const placements: Array<{ id: string; col: number; row: number; nCells: number }> = [];
@@ -152,6 +310,7 @@ export function reorderSpanningItems(
             currCol++;
             currRow = 0;
         }
+        if (currCol > maxCol) break;
         if (!id) {
             currRow += 1;
             continue;
@@ -160,7 +319,9 @@ export function reorderSpanningItems(
         placements.push(p);
         placementById.set(id, p);
         for (let i = 0; i < nCells; i++) {
-            placementBySlot.set(`${currCol},${currRow + i}`, p);
+            if (currRow + i < gridRows) {
+                placementBySlot.set(`${currCol},${currRow + i}`, p);
+            }
         }
         currRow += nCells;
     }
@@ -175,12 +336,10 @@ export function reorderSpanningItems(
         targetPlacement = undefined;
     }
 
-    const gridRows = wrapRows;
-    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, gridRows);
-    const maxAllowedRow = Math.max(0, gridRows - sourceCells);
+    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
+    const maxAllowedRow = Math.max(0, maxAllowedRows - sourceCells);
     const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
     const finalTargetRow = targetPlacement ? Math.min(targetPlacement.row, maxAllowedRow) : clamped.row;
-    const maxCol = Math.min(maxAllowedCols - 1, Math.max(currCol, finalTargetCol, sourceCol));
 
     const grid: string[][] = [];
     for (let c = 0; c <= maxCol; c++) {
@@ -202,22 +361,53 @@ export function reorderSpanningItems(
         }
     }
 
-    if (targetPlacement) {
-        const targetId = targetPlacement.id;
-        const targetCells = targetPlacement.nCells;
-        const safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - targetCells));
-        for (let c = 0; c <= maxCol; c++) {
-            for (let r = 0; r < gridRows; r++) {
-                if (grid[c][r] === targetId) {
-                    grid[c][r] = "";
-                }
+    // Identify all items overlapping the target span [finalTargetRow ... finalTargetRow + sourceCells - 1] in finalTargetCol
+    const displacedPlacements: Array<{ id: string; col: number; row: number; nCells: number }> = [];
+    const seenDisplacedIds = new Set<string>();
+
+    for (let i = 0; i < sourceCells; i++) {
+        const r = finalTargetRow + i;
+        if (r < gridRows && finalTargetCol <= maxCol) {
+            const cellId = grid[finalTargetCol][r];
+            if (cellId && cellId !== sourceId && !seenDisplacedIds.has(cellId)) {
+                seenDisplacedIds.add(cellId);
+                const p = placementById.get(cellId);
+                if (p) displacedPlacements.push(p);
             }
         }
-        for (let i = 0; i < targetCells; i++) {
-            if (sourceCol <= maxCol && safeSourceRow + i < gridRows) {
-                grid[sourceCol][safeSourceRow + i] = targetId;
+    }
+    if (targetPlacement && targetPlacement.id !== sourceId && !seenDisplacedIds.has(targetPlacement.id)) {
+        seenDisplacedIds.add(targetPlacement.id);
+        displacedPlacements.push(targetPlacement);
+    }
+
+    // Clear sourceId and all displaced items from the grid
+    for (let c = 0; c <= maxCol; c++) {
+        for (let r = 0; r < gridRows; r++) {
+            if (grid[c][r] === sourceId || seenDisplacedIds.has(grid[c][r])) {
+                grid[c][r] = "";
             }
         }
+    }
+
+    // Place displaced items into sourceCol, preserving relative offsets and gaps
+    let safeSourceRow = sourceRow;
+    let curSourceR = sourceRow;
+    for (const p of displacedPlacements) {
+        const relOffset = p.row - finalTargetRow;
+        let destR = (sourceCells >= p.nCells && relOffset >= 0)
+            ? (sourceRow + relOffset)
+            : curSourceR;
+        destR = Math.min(destR, Math.max(0, gridRows - p.nCells));
+        for (let i = 0; i < p.nCells; i++) {
+            if (sourceCol <= maxCol && destR + i < gridRows) {
+                grid[sourceCol][destR + i] = p.id;
+            }
+        }
+        curSourceR = destR + p.nCells;
+    }
+    if (displacedPlacements.length > 0) {
+        safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - displacedPlacements[0].nCells));
     }
 
     for (let i = 0; i < sourceCells; i++) {
@@ -233,14 +423,15 @@ export function reorderSpanningItems(
             const cell = grid[c][r];
             if (cell) {
                 newOrder.push(cell);
-                const nCells = allocations[cell] || 1;
-                r += nCells;
+                const n = allocations[cell] || 1;
+                r += n;
             } else {
                 newOrder.push("");
                 r += 1;
             }
         }
     }
+
     while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
         newOrder.pop();
     }
@@ -248,6 +439,12 @@ export function reorderSpanningItems(
     return {
         newOrder,
         rows: gridRows,
-        cols: maxCol + 1
+        cols: maxAllowedCols,
+        finalTargetCol,
+        finalTargetRow,
+        sourceCol,
+        sourceRow,
+        targetPlacement,
+        safeSourceRow
     };
 }

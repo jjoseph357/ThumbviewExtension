@@ -2,51 +2,51 @@
 
 > Because life's too short to thumb-wrestle with the VS Code sidebar.
 
-A 2D, syntax-highlighted minimap grid of your entire VS Code workspace. Keep a thumb on your whole codebase without opening 80 tabs. See every file at once, search across all of them instantly, and jump to any line in one click.
+A 2D, syntax-highlighted minimap grid of your entire workspace. See every file at once, search across all of them, and jump to any line in one click.
 
 ## Setup
 
-1. Install the extension and open any workspace folder.
-2. Press `F4` (or run `Thumbview: Open` from the Command Palette) to open the grid. Thumbview scans your workspace automatically and requires zero configuration.
-3. Optional: open the **Thumbview** container in the Activity Bar (left edge) to access the **Actions & Settings**, **Directory Navigation**, and **Ignored Files & Directories** panels.
+1. Install the extension and open a workspace folder.
+2. Press `F4`, or run `Thumbview: Open` from the Command Palette, to open the grid. Thumbview scans your workspace automatically with zero configuration.
+3. Optional: open the **Thumbview** container in the Activity Bar to access navigation and settings panels.
 
-Tune behavior later via **File → Preferences → Settings → Thumbview** (see [Settings Reference](#settings-reference)).
+Change settings via **File > Preferences > Settings > Thumbview** (see [Settings reference](#settings-reference)).
 
-## Core Workflow
+## Core workflow
 
-- **Open the grid**: `F4`. Press it again any time to refocus the tab.
-- **Jump to a line**: left-click any line on any tile and the file opens scrolled exactly there.
-- **Identify files by shape**: each tile is a syntax-highlighted minimap of one file, so you recognize code by its visual fingerprint, not by filename. The colored strip at the top of a tile shows its path.
-- **Magnify**: hold `Left CTRL` and hover over a tile to preview full-size, readable code lines without opening the file.
-- **Search everything at once**: type in the top search bar to highlight tokens across *all visible tiles* instantly. Press `×` or clear the box to reset. Toggle **Match Case** (`Aa`), **Match Whole Word** (`ab`), or **Use Regular Expression** (`.*`) next to the search box — or `Alt+C`/`Alt+W`/`Alt+X` from anywhere in the panel — to refine what counts as a match.
-- **Close a tile tab**: middle-click it or click its `×`.
+- **Open the grid.** Press `F4` to open or refocus the tab.
+- **Jump to a line.** Click any line on a tile to open the file at that position.
+- **Visual recognition.** Tiles display syntax-highlighted minimaps. A colored strip at the top shows the file path.
+- **Magnify.** Hold `Left CTRL` and hover over a tile to preview readable code lines without opening the file.
+- **Search across all files.** Type in the top search bar to highlight matches across all tiles. Clear the box or press `×` to reset. Use `Alt+C`, `Alt+W`, or `Alt+X` to toggle match case, whole word, or regex.
+- **Close open editors.** Middle-click a tile or click its `×` icon.
 
-## Reading the Grid
+## Reading the grid
 
-- **Layouts**: `thumbview.layoutMode` selects `"spanning_grid"` (default - tall files span multiple vertical cells, so file length is visible at a glance) or `"uniform_grid"` (one equal cell per file). Switch any time from the top toolbar **⚙ Settings** modal, Command Palette (`Thumbview: Use Uniform/Spanning Grid Layout`), or the sidebar.
-- **Folder cards**: when tiles would shrink below the minimum cell size (`thumbview.minCellWidth: 60` / `thumbview.minCellHeight: 40` px), files group into clickable folder cards. Click a card to drill into that subfolder; use the breadcrumbs at the top to navigate back.
-- **Directory Navigation & Ignored Items**: click the **📁 Folders & Ignored** button in the top toolbar to view shown folders alongside ignored patterns, focus any subdirectory, isolate root files, add custom glob patterns, or unignore items in one click.
-- **Reflow**: run `Thumbview: Reflow Layout` or click **Reflow Grid** in the **⚙ Settings** modal to re-fit the grid after resizing the panel or window.
+- **Layout modes.** Spanning grid (default) gives tall files multiple vertical cells so file length is visible at a glance. Uniform grid assigns one equal cell per file. Switch modes from the settings modal, sidebar, or Command Palette.
+- **Folder cards.** When tiles shrink below the minimum size (60×40 px by default), files group into clickable folder cards with mini-mosaic previews. Click a card to drill down into that folder, and use top breadcrumbs or mouse buttons 3 and 4 to navigate back.
+- **Folders and ignored patterns.** Click **Folders & Ignored** in the toolbar to inspect active folders, isolate subdirectories, view ignored globs, and toggle patterns.
+- **Resize stability and reflow.** Resizing the window or sidebar scales tiles without reflowing files across columns. To pack empty spaces and remove gaps after moving files, run `Thumbview: Reflow Layout` or click **Reflow Grid** in settings.
 
-## Ignoring & Unignoring Files
+## Ignoring and unignoring files
 
-Keep the grid fast and relevant by hiding noise (`dist/`, generated code, vendored assets):
+Hide build output, vendor directories, and generated files to keep the grid clear:
 
-- **Manage ignores from the top bar**: click **📁 Folders & Ignored** in the top toolbar to inspect all active ignore patterns side-by-side with active folders, add custom globs with `+ Add`, or remove patterns instantly with `×`.
-- **Ignore a directory**: right-click it in **Directory Navigation** → **Ignore Directory** (or click its inline eye-closed icon, or click Ignore in **📁 Folders & Ignored**).
-- **Ignore a file**: right-click its tile in the grid → **Ignore in Thumbview**.
-- **Unignore**: click the 👁 icon next to any `(hidden)` folder in **Directory Navigation**, or click `×` in the **📁 Folders & Ignored** modal.
-- **Auto-ignore**: any subfolder with more than `thumbview.autoIgnoreThreshold` files (default 30) is hidden automatically to keep rendering fast. Set it to `0` to disable, or unhide individual folders via 👁. Manual unhides are remembered as exclusions.
-- Ignores live in workspace state, so each project keeps its own view.
+- **Toolbar controls.** Click **Folders & Ignored** in the top toolbar to view active patterns, add new globs, or remove patterns.
+- **Ignore directories.** Right-click a folder in **Directory Navigation** and select **Ignore Directory**, or click its hide icon.
+- **Ignore individual files.** Right-click any tile and select **Ignore in Thumbview**.
+- **Unignore items.** Click the eye icon next to hidden folders in **Directory Navigation**, or remove the pattern from the **Folders & Ignored** list.
+- **Auto-ignore threshold.** Folders with more files than `thumbview.autoIgnoreThreshold` (default 30) hide automatically. Set to `0` to disable. Unhiding an auto-ignored folder saves an exclusion so it stays visible.
+- Patterns save to workspace state, keeping rules isolated per repository.
 
-## More Features
+## Additional features
 
-- **Drag-to-Reorder Grid Slots**: click and drag tiles to swap positions or shift reflow across both Uniform and Spanning grid modes, or drop into empty grid slots. Configure default behavior via `thumbview.dragReorderMode` (`swap` or `shift`).
-- **Isolate a folder**: click a folder in the **📁 Folders & Ignored** popover or a tile's header strip to dim everything else (opacity 0.15). Click **All Workspace Files (Root)** or the breadcrumb root to reset. This is the fastest way to scope search and scanning to one area of the codebase.
-- **Root files only**: select **Root Directory Files Only** in the **📁 Folders & Ignored** popover to spotlight top-level files (`package.json`, `README.md`, configs) for orienting yourself in an unfamiliar repo.
-- **Full file operations from the grid**: right-click any tile for Open, Open to the Side, Open Preview, Select for Compare / Compare with Selected, Reveal in Explorer, Open Containing Folder, Cut/Copy/Paste paths, Rename, and Delete — no need to switch to the Explorer.
+- **Drag and drop reordering.** Drag tiles to swap positions, shift adjacent files, or place files into empty slots. Configure the default action with `thumbview.dragReorderMode` (`swap` or `shift`).
+- **Folder isolation.** Click a folder in the toolbar popover or a tile header to dim other files. Click the root breadcrumb to restore the full view.
+- **Root files focus.** Choose **Root Directory Files Only** in the popover to spotlight top-level files like package manifests and configuration files.
+- **File operations.** Right-click any tile to open, split, compare, rename, reveal in explorer, or delete, without switching to the file explorer.
 
-## Shortcuts Reference
+## Shortcuts reference
 
 | Action | Shortcut |
 | :--- | :--- |
@@ -57,10 +57,11 @@ Keep the grid fast and relevant by hiding noise (`dist/`, generated code, vendor
 | **Close Tile Tab** | Middle-click or `×` button |
 | **Isolate Folder** | Left-click folder or tile header strip |
 | **Context Menu** | Right-click a tile |
+| **Navigate History** | Mouse Button 3 (Back) / 4 (Forward) |
 
-All shortcuts and interactive settings are available in the in-app **⚙ Settings** modal (top-right of the grid).
+Shortcuts and layout toggles are also accessible from the settings modal in the top-right corner.
 
-## Settings Reference
+## Settings reference
 
 | Setting | Default | Description |
 | :--- | :--- | :--- |

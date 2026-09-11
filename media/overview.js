@@ -42,10 +42,10 @@ let TILE_LABEL_COLOR = {
 };
 let BORDER_STYLES = {
     searchMatch: { color: "#dc267f", width: 2.5 },
-    active:      { color: "#007fd4", width: 2.5 },
-    open:        { color: "#fe6100", width: 1.8 },
-    dragging:    { color: "#648fff", width: 1.8 },
-    default:     { color: "rgba(255, 255, 255, 0.08)", width: 1 }
+    active: { color: "#007fd4", width: 2.5 },
+    open: { color: "#fe6100", width: 1.8 },
+    dragging: { color: "#648fff", width: 1.8 },
+    default: { color: "rgba(255, 255, 255, 0.08)", width: 1 }
 };
 let CLOSE_BTN_COLOR = "#707075";
 
@@ -70,7 +70,7 @@ function refreshThemeTokens() {
     ACCENT_RECENCY = getThemeColor("--tv-accent-recency", "#fe6100");
 
     TILE_BACKGROUND = getThemeColor("--vscode-editor-background", light ? "#ffffff" : "#1e1e24");
-    
+
     TILE_LABEL_COLOR = {
         searchMatch: ACCENT_SEARCH,
         error: getThemeColor("--vscode-list-errorForeground", light ? "#e51400" : "#f14c4c"),
@@ -82,10 +82,10 @@ function refreshThemeTokens() {
 
     BORDER_STYLES = {
         searchMatch: { color: ACCENT_SEARCH, width: 2.5 },
-        active:      { color: getThemeColor("--vscode-focusBorder", "#007fd4"), width: 2.5 },
-        open:        { color: ACCENT_RECENCY, width: 1.8 },
-        dragging:    { color: "#648fff", width: 1.8 },
-        default:     { color: getThemeColor("--vscode-widget-border", light ? "rgba(0, 0, 0, 0.12)" : "rgba(255, 255, 255, 0.08)"), width: 1 }
+        active: { color: getThemeColor("--vscode-focusBorder", "#007fd4"), width: 2.5 },
+        open: { color: ACCENT_RECENCY, width: 1.8 },
+        dragging: { color: "#648fff", width: 1.8 },
+        default: { color: getThemeColor("--vscode-widget-border", light ? "rgba(0, 0, 0, 0.12)" : "rgba(255, 255, 255, 0.08)"), width: 1 }
     };
 
     CLOSE_BTN_COLOR = getThemeColor("--vscode-descriptionForeground", light ? "#616161" : "#707075");
@@ -213,8 +213,11 @@ const CLOSE_BUTTON_PADDING = 4; // px
 const GRID_TOP_MARGIN = 64;
 const GRID_BOTTOM_MARGIN = 40;
 const GRID_SIDE_MARGIN = 16;
+const BASE_GRID_ASPECT = 16 / 9;
+const REF_CANVAS_W = 1200;
+const REF_CANVAS_H = 800;
 
-const DRAG_THRESHOLD = 5; // px
+const DRAG_THRESHOLD = 3; // px
 let candidateFile = null;
 let candidateFolder = null;
 let draggingFile = null;
@@ -229,12 +232,14 @@ let dragTargetBreadcrumb = null;
 let activeRenderGrid = null;
 let dragBackgroundCanvas = null;
 let cachedDragBackgroundCanvas = null;
+let pendingDataMsg = null;
 const fileTokenCache = new Map();
 let clipboardItem = null;
 
 let hoveredFile = null;
 
 const slotOccupancy = new Map();
+const userReorderedFileSlots = new Map();
 const fileById = new Map();
 const fileByUri = new Map();
 
@@ -257,7 +262,7 @@ function getCanvasPos(event) {
 /** True if (px, py) falls inside rect's {x, y, w, h} box, optionally grown by pad px on each side. */
 function pointInRect(rect, px, py, pad = 0) {
     return rect.x - pad <= px && px <= rect.x + rect.w + pad &&
-           rect.y - pad <= py && py <= rect.y + rect.h + pad;
+        rect.y - pad <= py && py <= rect.y + rect.h + pad;
 }
 
 /** Returns the file containing px, py if it exists, else returns null. */
@@ -321,10 +326,20 @@ function findNearestSlot(px, py) {
     let file = null;
     let item = null;
     if (grid.isFolderCards && grid.orderedItems && grid.layout && grid.layout.slots) {
-        const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
-        if (slotIdx !== -1 && slotIdx < grid.orderedItems.length && grid.orderedItems[slotIdx]) {
-            item = grid.orderedItems[slotIdx];
-            if (item.type === "file") file = item.file;
+        if (grid.isSpanning && grid.layout.placements) {
+            for (const p of grid.layout.placements) {
+                if (p.slots && p.slots.some(s => s[0] === col_clamped && s[1] === row_clamped)) {
+                    item = p.item || p.file;
+                    if (item && item.type === "file") file = item.file;
+                    break;
+                }
+            }
+        } else {
+            const slotIdx = grid.layout.slots.findIndex(s => s[0] === col_clamped && s[1] === row_clamped);
+            if (slotIdx !== -1 && slotIdx < grid.orderedItems.length && grid.orderedItems[slotIdx]) {
+                item = grid.orderedItems[slotIdx];
+                if (item.type === "file") file = item.file;
+            }
         }
     } else if (grid.isFolderView && grid.files) {
         if (grid.layout && grid.layout.placements) {
@@ -391,6 +406,12 @@ function clearDragState() {
     if (dragRafId !== null) {
         cancelAnimationFrame(dragRafId);
         dragRafId = null;
+    }
+
+    if (pendingDataMsg) {
+        const msgToApply = pendingDataMsg;
+        pendingDataMsg = null;
+        applyDataMessage(msgToApply);
     }
 }
 
@@ -544,7 +565,7 @@ window.addEventListener("keydown", event => {
     // focus is on the search input or anywhere else in the webview (e.g. the canvas).
     if (event.altKey && !event.ctrlKey && !event.metaKey) {
         const cmd = event.key.toLowerCase();
-        if        (cmd === 'c') {
+        if (cmd === 'c') {
             event.preventDefault();
             toggleMatchCase();
             return;
@@ -670,8 +691,21 @@ window.addEventListener("message", event => {
         document.body.style.opacity = "1";
     }
 
-    if (msg.command === "data") {
+    function applyDataMessage(msg) {
+        if (msg.isReflow) {
+            userReorderedFileSlots.clear();
+        }
         data = msg;
+        if (userReorderedFileSlots.size > 0 && data && data.files) {
+            for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
+                const f = data.files[fIdx];
+                const saved = userReorderedFileSlots.get(f.id);
+                if (saved) {
+                    f.slot = [...saved.slot];
+                    f.slots = saved.slots ? saved.slots.map(s => [...s]) : [[...saved.slot]];
+                }
+            }
+        }
         currentIgnorePatterns = msg.ignorePatterns || [];
         for (const k of Object.keys(optimisticPatternCounts)) {
             if (data.ignorePatternCounts && typeof data.ignorePatternCounts[k] === "number") {
@@ -776,6 +810,14 @@ window.addEventListener("message", event => {
         render();
     }
 
+    if (msg.command === "data") {
+        if (draggingFile || draggingFolder) {
+            pendingDataMsg = msg;
+            return;
+        }
+        applyDataMessage(msg);
+    }
+
     if (msg.command === "activeFile") {
         activeFileUri = msg.uri;
         render();
@@ -866,13 +908,13 @@ function cellsNeeded(lineCount, baseLinesPerCell = 60, compressionPct = 0.05) {
     return Math.ceil(repLines / baseLinesPerCell);
 }
 
-function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, extraCols = 0, extraRows = 0, baseLinesPerCell = 60, compressionPct = 0.05) {
+function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, extraCols = 0, extraRows = 0, baseLinesPerCell = 60, compressionPct = 0.05, savedWrapRows = null) {
     const allocations = {};
     let actualCells = 0;
     let maxNCells = 1;
 
     for (const f of files) {
-        const nCells = f.nCells || (f.lineCount ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : 1);
+        const nCells = f.lineCount ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : (f.nCells || 1);
         allocations[f.id] = nCells;
         actualCells += nCells;
         if (nCells > maxNCells) {
@@ -880,8 +922,15 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
         }
     }
 
-    const calculatedRows = Math.max(1, Math.round(Math.sqrt(Math.max(actualCells, files.length, 1) / targetAspect)));
-    const wrapRows = Math.max(calculatedRows, maxNCells);
+    const calculatedRows = (typeof buildStableGrid === "function")
+        ? Math.max(1, buildStableGrid(Math.max(actualCells, files.length, 1), targetAspect).rows)
+        : Math.max(1, Math.round(Math.sqrt(Math.max(actualCells, files.length, 1) / targetAspect)));
+    const baseRows = Math.max(1, calculatedRows, maxNCells);
+    const naturalColsNeeded = Math.ceil(actualCells / baseRows);
+    const baseCols = Math.max(2, naturalColsNeeded);
+    const finalRows = baseRows + extraRows;
+    const finalCols = baseCols + extraCols;
+    const wrapRows = (savedWrapRows && savedWrapRows > 0) ? Math.max(savedWrapRows, maxNCells) : baseRows;
 
     const filesById = new Map(files.map(f => [f.id, f]));
     let orderToIterate = [];
@@ -939,23 +988,326 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
         }
     }
 
-    const reqCols = currCol + 1;
-    const finalRows = Math.max(1, maxRowUsed) + extraRows;
-    const finalCols = Math.max(2, reqCols, Math.ceil(finalRows * targetAspect)) + extraCols;
+    let maxPlacementCol = 0;
+    let maxPlacementRow = 0;
+    for (const p of placements) {
+        if (p.col > maxPlacementCol) maxPlacementCol = p.col;
+        const bottom = p.row + p.nCells;
+        if (bottom > maxPlacementRow) maxPlacementRow = bottom;
+    }
+    const reqCols = placements.length > 0 ? (maxPlacementCol + 1) : (currCol + 1);
+    const reqRows = placements.length > 0 ? maxPlacementRow : maxRowUsed;
+    const resolvedCols = Math.max(finalCols, reqCols);
+    const resolvedRows = Math.max(finalRows, reqRows);
 
     const gridSlots = [];
-    for (let r = 0; r < finalRows; r++) {
-        for (let c = 0; c < finalCols; c++) {
+    for (let r = 0; r < resolvedRows; r++) {
+        for (let c = 0; c < resolvedCols; c++) {
             gridSlots.push([c, r]);
         }
     }
 
     return {
-        rows: finalRows,
-        cols: finalCols,
+        rows: resolvedRows,
+        cols: resolvedCols,
         wrapRows: wrapRows,
         placements,
         slots: gridSlots
+    };
+}
+
+// Duplicated logic: keep in sync with src/reorder_helpers.ts clampTargetToGridCapacity and reorderSpanningItems
+function clampTargetToGridCapacityLocal(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows) {
+    const col = Math.max(0, Math.min(targetCol, maxAllowedCols - 1));
+    const row = Math.max(0, Math.min(targetRow, maxAllowedRows - sourceCells));
+    return { col, row };
+}
+
+// Duplicated logic: keep in sync with src/reorder_helpers.ts expandSpanningGridOrder and reduceSpanningGridOrder
+function expandSpanningGridOrderLocal(currentOrder, allocations, oldCols, oldRows) {
+    const newCols = oldCols + 1;
+    const newRows = oldRows + 1;
+
+    const grid = [];
+    for (let c = 0; c < oldCols; c++) {
+        grid.push(new Array(oldRows).fill(""));
+    }
+
+    let currCol = 0;
+    let currRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > oldRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol >= oldCols) break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < oldRows) {
+                grid[currCol][currRow + i] = id;
+            }
+        }
+        currRow += nCells;
+    }
+
+    const newOrder = [];
+    for (let c = 0; c < newCols; c++) {
+        let r = 0;
+        while (r < newRows) {
+            if (c < oldCols && r < oldRows) {
+                const cell = grid[c][r];
+                if (cell) {
+                    newOrder.push(cell);
+                    const n = allocations[cell] || 1;
+                    r += n;
+                } else {
+                    newOrder.push("");
+                    r += 1;
+                }
+            } else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+
+    return {
+        newOrder,
+        cols: newCols,
+        rows: newRows
+    };
+}
+
+function reduceSpanningGridOrderLocal(currentOrder, allocations, oldCols, oldRows, minCols, minRows) {
+    const newCols = Math.max(minCols, oldCols - 1);
+    const newRows = Math.max(minRows, oldRows - 1);
+    if (newCols === oldCols && newRows === oldRows) {
+        return { newOrder: [...currentOrder], cols: oldCols, rows: oldRows };
+    }
+
+    const grid = [];
+    for (let c = 0; c < oldCols; c++) {
+        grid.push(new Array(oldRows).fill(""));
+    }
+
+    let currCol = 0;
+    let currRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > oldRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol >= oldCols) break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < oldRows) {
+                grid[currCol][currRow + i] = id;
+            }
+        }
+        currRow += nCells;
+    }
+
+    const newOrder = [];
+    for (let c = 0; c < newCols; c++) {
+        let r = 0;
+        while (r < newRows) {
+            const cell = grid[c][r];
+            if (cell) {
+                newOrder.push(cell);
+                const n = allocations[cell] || 1;
+                r += n;
+            } else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+
+    return {
+        newOrder,
+        cols: newCols,
+        rows: newRows
+    };
+}
+
+function reorderSpanningItemsLocal(
+    activeIds,
+    currentOrder,
+    allocations,
+    sourceId,
+    targetCol,
+    targetRow,
+    maxAllowedCols,
+    maxAllowedRows,
+    wrapRows
+) {
+    const gridRows = maxAllowedRows;
+    const maxCol = maxAllowedCols - 1;
+
+    let currCol = 0;
+    let currRow = 0;
+    const placements = [];
+    const placementBySlot = new Map();
+    const placementById = new Map();
+
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > wrapRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol > maxCol) break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        const p = { id, col: currCol, row: currRow, nCells };
+        placements.push(p);
+        placementById.set(id, p);
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < gridRows) {
+                placementBySlot.set(`${currCol},${currRow + i}`, p);
+            }
+        }
+        currRow += nCells;
+    }
+
+    const sourcePlacement = placementById.get(sourceId);
+    const sourceCells = allocations[sourceId] || 1;
+    const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
+    const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
+
+    let targetPlacement = placementBySlot.get(`${targetCol},${targetRow}`);
+    if (targetPlacement && targetPlacement.id === sourceId) {
+        targetPlacement = undefined;
+    }
+
+    const clamped = clampTargetToGridCapacityLocal(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
+    const maxAllowedRow = Math.max(0, maxAllowedRows - sourceCells);
+    const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
+    const finalTargetRow = targetPlacement ? Math.min(targetPlacement.row, maxAllowedRow) : clamped.row;
+
+    const grid = [];
+    for (let c = 0; c <= maxCol; c++) {
+        grid.push(new Array(gridRows).fill(""));
+    }
+    for (const p of placements) {
+        for (let i = 0; i < p.nCells; i++) {
+            if (p.row + i < gridRows && p.col <= maxCol) {
+                grid[p.col][p.row + i] = p.id;
+            }
+        }
+    }
+
+    for (let c = 0; c <= maxCol; c++) {
+        for (let r = 0; r < gridRows; r++) {
+            if (grid[c][r] === sourceId) {
+                grid[c][r] = "";
+            }
+        }
+    }
+
+    // Identify all items overlapping the target span [finalTargetRow ... finalTargetRow + sourceCells - 1] in finalTargetCol
+    const displacedPlacements = [];
+    const seenDisplacedIds = new Set();
+
+    for (let i = 0; i < sourceCells; i++) {
+        const r = finalTargetRow + i;
+        if (r < gridRows && finalTargetCol <= maxCol) {
+            const cellId = grid[finalTargetCol][r];
+            if (cellId && cellId !== sourceId && !seenDisplacedIds.has(cellId)) {
+                seenDisplacedIds.add(cellId);
+                const p = placementById.get(cellId);
+                if (p) displacedPlacements.push(p);
+            }
+        }
+    }
+    if (targetPlacement && targetPlacement.id !== sourceId && !seenDisplacedIds.has(targetPlacement.id)) {
+        seenDisplacedIds.add(targetPlacement.id);
+        displacedPlacements.push(targetPlacement);
+    }
+
+    // Clear sourceId and all displaced items from the grid
+    for (let c = 0; c <= maxCol; c++) {
+        for (let r = 0; r < gridRows; r++) {
+            if (grid[c][r] === sourceId || seenDisplacedIds.has(grid[c][r])) {
+                grid[c][r] = "";
+            }
+        }
+    }
+
+    // Place displaced items into sourceCol, preserving relative offsets and gaps
+    let safeSourceRow = sourceRow;
+    let curSourceR = sourceRow;
+    for (const p of displacedPlacements) {
+        const relOffset = p.row - finalTargetRow;
+        let destR = (sourceCells >= p.nCells && relOffset >= 0)
+            ? (sourceRow + relOffset)
+            : curSourceR;
+        destR = Math.min(destR, Math.max(0, gridRows - p.nCells));
+        for (let i = 0; i < p.nCells; i++) {
+            if (sourceCol <= maxCol && destR + i < gridRows) {
+                grid[sourceCol][destR + i] = p.id;
+            }
+        }
+        curSourceR = destR + p.nCells;
+    }
+    if (displacedPlacements.length > 0) {
+        safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - displacedPlacements[0].nCells));
+    }
+
+    for (let i = 0; i < sourceCells; i++) {
+        if (finalTargetCol <= maxCol && finalTargetRow + i < gridRows) {
+            grid[finalTargetCol][finalTargetRow + i] = sourceId;
+        }
+    }
+
+    const newOrder = [];
+    for (let c = 0; c <= maxCol; c++) {
+        let r = 0;
+        while (r < gridRows) {
+            const cell = grid[c][r];
+            if (cell) {
+                newOrder.push(cell);
+                const n = allocations[cell] || 1;
+                r += n;
+            } else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+
+    return {
+        newOrder,
+        rows: gridRows,
+        cols: maxAllowedCols,
+        finalTargetCol,
+        finalTargetRow,
+        sourceCol,
+        sourceRow,
+        targetPlacement,
+        safeSourceRow: typeof safeSourceRow === "number" ? safeSourceRow : sourceRow
     };
 }
 
@@ -1120,6 +1472,50 @@ function getSubfolderGroups(files, basePath) {
 
     const folders = Object.values(groups).filter(g => validFolders.has(g.path));
     return { folders, rootFiles, orderedItems };
+}
+
+/**
+ * Determines whether a folder's contents collapse into subfolder cards.
+ * Uses a stable reference canvas size (REF_CANVAS_W x REF_CANVAS_H) and BASE_GRID_ASPECT
+ * so folder card previews and folder drill-down views match 100% and never reflow on window resize.
+ */
+function doesFolderCollapse(files, folderPath, isSpanning, activeW, activeH) {
+    if (!files || files.length === 0) return false;
+    const subfolderInfo = getSubfolderGroups(files, folderPath);
+    if (!subfolderInfo || subfolderInfo.folders.length === 0) {
+        return false;
+    }
+    const canvasW = (typeof activeW === "number" && activeW > 0)
+        ? activeW
+        : ((typeof canvas !== "undefined" && canvas && canvas.clientWidth) ? (canvas.clientWidth - (GRID_SIDE_MARGIN * 2)) : (REF_CANVAS_W - (GRID_SIDE_MARGIN * 2)));
+    const canvasH = (typeof activeH === "number" && activeH > 0)
+        ? activeH
+        : ((typeof canvas !== "undefined" && canvas && canvas.clientHeight) ? (canvas.clientHeight - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN) : (REF_CANVAS_H - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN));
+    const availW = Math.max(50, canvasW);
+    const availH = Math.max(50, canvasH);
+    const minW = (typeof data !== "undefined" && data && typeof data.minCellWidth === "number") ? data.minCellWidth : 60;
+    const minH = (typeof data !== "undefined" && data && typeof data.minCellHeight === "number") ? data.minCellHeight : 40;
+    const spanningMode = typeof isSpanning === "boolean"
+        ? isSpanning
+        : (typeof data !== "undefined" && data && (data.mode === "spanning_grid" || data.layoutMode === "spanning_grid"));
+    if (spanningMode) {
+        const layout = buildSpanningGridLocal(files, BASE_GRID_ASPECT);
+        const cW = availW / Math.max(1, layout.cols);
+        const cH = availH / Math.max(1, layout.rows);
+        let hasOverflow = false;
+        for (const p of layout.placements) {
+            if (p.nCells * cH > availH + 1) {
+                hasOverflow = true;
+                break;
+            }
+        }
+        return cW < minW || cH < minH || hasOverflow;
+    } else {
+        const grid = buildStableGrid(files.length, BASE_GRID_ASPECT);
+        const cW = availW / Math.max(1, grid.cols);
+        const cH = availH / Math.max(1, grid.rows);
+        return cW < minW || cH < minH;
+    }
 }
 
 /** Paints the loading/error status screen shown before repository data has arrived. */
@@ -1867,8 +2263,8 @@ const TILE_THUMBNAIL_HEIGHT_MARGIN = 34;
 function drawTileBorder(x, y, w, h, isSearchMatch, isActive, isOpen) {
     const style = isSearchMatch ? BORDER_STYLES.searchMatch
         : isActive ? BORDER_STYLES.active
-        : isOpen ? BORDER_STYLES.open
-        : BORDER_STYLES.default;
+            : isOpen ? BORDER_STYLES.open
+                : BORDER_STYLES.default;
     ctx.strokeStyle = style.color;
     ctx.lineWidth = style.width;
     ctx.strokeRect(x + TILE_PADDING, y + TILE_PADDING, w - TILE_PADDING * 2, h - TILE_PADDING * 2);
@@ -2026,7 +2422,6 @@ function render() {
 
     const availableW = rectW - (GRID_SIDE_MARGIN * 2);
     const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
-    const overviewAspect = availableW / Math.max(1, availableH);
 
     const rootCellW = availableW / gridCols;
     const rootCellH = availableH / gridRows;
@@ -2034,20 +2429,27 @@ function render() {
     const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 60;
     const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 40;
 
+    // Evaluate rootCellsTooSmall against stable reference canvas bounds (REF_CANVAS_W x REF_CANVAS_H)
+    // so resizing the window, sidebars, or terminal never flips the mode or reflows tiles into cards.
+    const refAvailableW = REF_CANVAS_W - (GRID_SIDE_MARGIN * 2);
+    const refAvailableH = REF_CANVAS_H - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
+    const refCellW = refAvailableW / gridCols;
+    const refCellH = refAvailableH / gridRows;
+
     let hasTallFileOverflow = false;
     if (data && data.files) {
         for (let i = 0; i < data.files.length; i++) {
             const f = data.files[i];
             const slot = f.slot;
             const nCells = f.nCells || 1;
-            const fileH = rootCellH * nCells;
-            if (fileH > availableH) {
+            const fileH = refCellH * nCells;
+            if (fileH > refAvailableH + 1) {
                 hasTallFileOverflow = true;
                 break;
             }
             if (slot && typeof slot[1] === "number") {
-                const y = GRID_TOP_MARGIN + slot[1] * rootCellH;
-                if (y + fileH > rectH || y > rectH) {
+                const y = GRID_TOP_MARGIN + slot[1] * refCellH;
+                if (y + fileH > REF_CANVAS_H + 1 || y > REF_CANVAS_H) {
                     hasTallFileOverflow = true;
                     break;
                 }
@@ -2055,7 +2457,7 @@ function render() {
         }
     }
 
-    const rootCellsTooSmall = rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H || hasTallFileOverflow;
+    const rootCellsTooSmall = refCellW < MIN_CELL_W || refCellH < MIN_CELL_H || hasTallFileOverflow || rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H;
 
     // If root tiles are NOT too small (rootCellsTooSmall === false), individual file tiles
     // are visible in their stable root grid slots — selecting a directory lowlights non-selected files.
@@ -2067,42 +2469,46 @@ function render() {
         ? data.files.filter(f => f.path && (focusedFolder === "(root files)/" ? !f.path.includes("/") : f.path.startsWith(focusedFolder)))
         : data.files;
 
+    const effectiveBasePath = shouldOpenFolder
+        ? (focusedFolder === "(root files)/" ? "" : focusedFolder)
+        : "";
+
+    const subfolderInfo = getSubfolderGroups(scopedFiles, effectiveBasePath);
+    const hasSubfolders = subfolderInfo.folders && subfolderInfo.folders.length > 0;
+
     let cellsTooSmall = false;
     let localFolderGrid = null;
     let localSpanningLayout = null;
     let folderCellW = rootCellW;
     let folderCellH = rootCellH;
 
-    const extraCols = (data && data.extraCols) || 0;
-    const extraRows = (data && data.extraRows) || 0;
+    const currentLayer = focusedFolder || "";
+    const extraCols = (data && data.folderExtraCols && typeof data.folderExtraCols[currentLayer] === "number")
+        ? data.folderExtraCols[currentLayer]
+        : (currentLayer === "" ? ((data && data.extraCols) || 0) : 0);
+    const extraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[currentLayer] === "number")
+        ? data.folderExtraRows[currentLayer]
+        : (currentLayer === "" ? ((data && data.extraRows) || 0) : 0);
     const isSpanningMode = data && (data.mode === "spanning_grid" || data.layoutMode === "spanning_grid");
 
     if (shouldOpenFolder) {
         const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
+        const folderWrapRows = (data && data.folderWrapRows && data.folderWrapRows[focusedFolder]) || null;
         if (isSpanningMode) {
-            localSpanningLayout = buildSpanningGridLocal(scopedFiles, overviewAspect, folderOrder, extraCols, extraRows);
+            localSpanningLayout = buildSpanningGridLocal(scopedFiles, BASE_GRID_ASPECT, folderOrder, extraCols, extraRows, 60, 0.05, folderWrapRows);
             folderCellW = availableW / Math.max(1, localSpanningLayout.cols);
             folderCellH = availableH / Math.max(1, localSpanningLayout.rows);
-            let hasDrillDownOverflow = false;
-            for (const p of localSpanningLayout.placements) {
-                const pfH = p.nCells * folderCellH;
-                if (pfH > availableH || GRID_TOP_MARGIN + (p.row + p.nCells) * folderCellH > rectH) {
-                    hasDrillDownOverflow = true;
-                    break;
-                }
-            }
-            cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H || hasDrillDownOverflow;
         } else {
-            const totalSlots = scopedFiles.length;
-            localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
+            const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
+            localFolderGrid = buildStableGrid(totalSlots, BASE_GRID_ASPECT);
             const folderCols = localFolderGrid.cols + extraCols;
             const folderRows = localFolderGrid.rows + extraRows;
             folderCellW = availableW / Math.max(1, folderCols);
             folderCellH = availableH / Math.max(1, folderRows);
-            cellsTooSmall = folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H;
         }
+        cellsTooSmall = hasSubfolders && (doesFolderCollapse(scopedFiles, effectiveBasePath, isSpanningMode, availableW, availableH) || folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H);
     } else {
-        cellsTooSmall = rootCellsTooSmall;
+        cellsTooSmall = hasSubfolders && rootCellsTooSmall;
     }
 
     const queryActive = !!searchQuery && !searchInvalid;
@@ -2117,13 +2523,16 @@ function render() {
 
     if (cellsTooSmall) {
         // Subfolder card mode: group files into immediate child folders and render each as a clickable card.
-        const { folders, rootFiles, orderedItems } = getSubfolderGroups(scopedFiles, focusedFolder === "(root files)/" ? "" : focusedFolder);
+        const { folders, rootFiles, orderedItems } = subfolderInfo;
 
         let displayItems = [];
         const itemById = new Map(orderedItems.map(it => [it.id, it]));
-        if (data.cardOrder && Array.isArray(data.cardOrder) && data.cardOrder.length > 0) {
+        const effectiveCardOrder = (shouldOpenFolder && focusedFolder && data.folderCardOrders && data.folderCardOrders[focusedFolder])
+            ? data.folderCardOrders[focusedFolder]
+            : (shouldOpenFolder ? null : data.cardOrder);
+        if (effectiveCardOrder && Array.isArray(effectiveCardOrder) && effectiveCardOrder.length > 0) {
             const seenIds = new Set();
-            for (const cid of data.cardOrder) {
+            for (const cid of effectiveCardOrder) {
                 if (!cid) {
                     displayItems.push(null);
                 } else {
@@ -2131,15 +2540,18 @@ function render() {
                     if (it) {
                         displayItems.push(it);
                         seenIds.add(cid);
-                    } else {
-                        displayItems.push(null);
                     }
+                    // IMPORTANT: If cid is NOT in itemById (e.g. stale ID or uncollapsed file ID),
+                    // do NOT push null to avoid inflating grid with invalid/stale IDs.
                 }
             }
             for (const it of orderedItems) {
                 if (!seenIds.has(it.id)) {
                     displayItems.push(it);
                 }
+            }
+            while (displayItems.length > 0 && !displayItems[displayItems.length - 1]) {
+                displayItems.pop();
             }
         } else {
             displayItems = orderedItems;
@@ -2148,41 +2560,110 @@ function render() {
         const totalItems = orderedItems.length;
         if (totalItems === 0) return;
 
-        const baseGrid = buildStableGrid(totalItems, overviewAspect);
-        const cardCols = baseGrid.cols + extraCols;
-        const cardRows = baseGrid.rows + extraRows;
-        const localCellW = availableW / Math.max(1, cardCols);
-        const localCellH = availableH / Math.max(1, cardRows);
+        const cardWrapRows = (shouldOpenFolder && focusedFolder && data.folderCardWrapRows && data.folderCardWrapRows[focusedFolder])
+            ? data.folderCardWrapRows[focusedFolder]
+            : (shouldOpenFolder ? null : (data.cardWrapRows || null));
 
-        const cardSlots = [];
-        for (let r = 0; r < cardRows; r++) {
-            for (let c = 0; c < cardCols; c++) {
-                cardSlots.push([c, r]);
+        let cardCols, cardRows, localCellW, localCellH, cardSlots;
+        let localSpanningLayout = null;
+        let itemsToRender = [];
+
+        if (isSpanningMode) {
+            const spanningItems = displayItems.map(it => {
+                if (!it) return null;
+                if (it.type === "folder") {
+                    return { id: it.id, type: "folder", item: it, card: it.card, nCells: 1 };
+                }
+                const f = it.file;
+                const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
+                return { id: it.id, type: "file", item: it, file: f, lineCount: f.lineCount, nCells };
+            }).filter(Boolean);
+
+            localSpanningLayout = buildSpanningGridLocal(
+                spanningItems,
+                BASE_GRID_ASPECT,
+                effectiveCardOrder,
+                extraCols,
+                extraRows,
+                60,
+                0.05,
+                cardWrapRows
+            );
+
+            cardCols = localSpanningLayout.cols;
+            cardRows = localSpanningLayout.rows;
+            localCellW = availableW / Math.max(1, cardCols);
+            localCellH = availableH / Math.max(1, cardRows);
+            cardSlots = localSpanningLayout.slots;
+
+            activeRenderGrid = {
+                cols: cardCols,
+                rows: cardRows,
+                wrapRows: localSpanningLayout.wrapRows,
+                cellW: localCellW,
+                cellH: localCellH,
+                isFolderCards: true,
+                isSpanning: true,
+                layout: localSpanningLayout,
+                orderedItems: displayItems,
+                spanningItems: spanningItems,
+                focusedFolder: shouldOpenFolder ? focusedFolder : null
+            };
+
+            itemsToRender = localSpanningLayout.placements.map(p => ({
+                item: p.item,
+                slot: [p.col, p.row],
+                nCells: p.nCells
+            }));
+        } else {
+            const baseGrid = buildStableGrid(totalItems, BASE_GRID_ASPECT);
+            cardCols = baseGrid.cols + extraCols;
+            cardRows = baseGrid.rows + extraRows;
+            localCellW = availableW / Math.max(1, cardCols);
+            localCellH = availableH / Math.max(1, cardRows);
+
+            cardSlots = [...baseGrid.slots];
+            const existingSlotsSet = new Set(cardSlots.map(s => `${s[0]},${s[1]}`));
+            for (let r = 0; r < cardRows; r++) {
+                for (let c = 0; c < cardCols; c++) {
+                    const key = `${c},${r}`;
+                    if (!existingSlotsSet.has(key)) {
+                        cardSlots.push([c, r]);
+                        existingSlotsSet.add(key);
+                    }
+                }
+            }
+
+            const localGrid = {
+                cols: cardCols,
+                rows: cardRows,
+                slots: cardSlots
+            };
+
+            activeRenderGrid = {
+                cols: cardCols,
+                rows: cardRows,
+                cellW: localCellW,
+                cellH: localCellH,
+                isFolderCards: true,
+                isSpanning: false,
+                layout: localGrid,
+                orderedItems: displayItems,
+                focusedFolder: shouldOpenFolder ? focusedFolder : null
+            };
+
+            let slotIdx = 0;
+            for (const item of displayItems) {
+                if (slotIdx >= cardSlots.length) break;
+                const slot = cardSlots[slotIdx++];
+                if (item) {
+                    itemsToRender.push({ item, slot, nCells: 1 });
+                }
             }
         }
 
-        const localGrid = {
-            cols: cardCols,
-            rows: cardRows,
-            slots: cardSlots
-        };
-
-        activeRenderGrid = {
-            cols: cardCols,
-            rows: cardRows,
-            cellW: localCellW,
-            cellH: localCellH,
-            isFolderCards: true,
-            isSpanning: false,
-            layout: localGrid,
-            orderedItems: displayItems
-        };
-
-        let slotIdx = 0;
-
-        for (const item of displayItems) {
-            if (slotIdx >= cardSlots.length) break;
-            const slot = cardSlots[slotIdx++];
+        for (const entry of itemsToRender) {
+            const { item, slot, nCells } = entry;
             if (!item) continue;
             const x = GRID_SIDE_MARGIN + slot[0] * localCellW;
             const y = GRID_TOP_MARGIN + slot[1] * localCellH;
@@ -2247,9 +2728,32 @@ function render() {
                 const mosaicH = localCellH - 46;
 
                 if (mosaicW >= 24 && mosaicH >= 16 && group.files && group.files.length > 0) {
-                    const groupFolderOrder = (data && data.folderOrders && data.folderOrders[group.path]) || null;
-                    if (isSpanningMode) {
-                        const spanningLayout = buildSpanningGridLocal(group.files, overviewAspect, groupFolderOrder, extraCols, extraRows);
+                    const willCollapse = doesFolderCollapse(group.files, group.path, isSpanningMode);
+                    const groupFolderOrder = willCollapse
+                        ? ((data && data.folderCardOrders && data.folderCardOrders[group.path]) || null)
+                        : ((data && data.folderOrders && data.folderOrders[group.path]) || null);
+                    const childSubfolderInfo = getSubfolderGroups(group.files, group.path);
+                    const previewItems = willCollapse
+                        ? childSubfolderInfo.orderedItems
+                        : group.files.map(f => ({ type: "file", file: f, id: f.id }));
+
+                    if (!willCollapse && isSpanningMode) {
+                        const itemsToLayout = previewItems.map(it => {
+                            if (it.type === "folder") {
+                                return { id: it.id, item: it, isFolder: true, nCells: 1 };
+                            }
+                            const f = it.file;
+                            const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
+                            return { id: it.id, item: it, file: f, lineCount: f.lineCount, nCells };
+                        });
+                        const groupFolderWrapRows = (data && data.folderWrapRows && data.folderWrapRows[group.path]) || null;
+                        const groupFolderExtraCols = (data && data.folderExtraCols && typeof data.folderExtraCols[group.path] === "number")
+                            ? data.folderExtraCols[group.path]
+                            : 0;
+                        const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
+                            ? data.folderExtraRows[group.path]
+                            : 0;
+                        const spanningLayout = buildSpanningGridLocal(itemsToLayout, BASE_GRID_ASPECT, groupFolderOrder, groupFolderExtraCols, groupFolderExtraRows, 60, 0.05, groupFolderWrapRows);
                         const miniCols = spanningLayout.cols;
                         const miniRows = spanningLayout.rows;
                         const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
@@ -2258,11 +2762,36 @@ function render() {
                         const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
 
                         for (const placement of spanningLayout.placements) {
-                            const pf = placement.file;
                             const miniX = mosaicX + placement.col * (miniCellW + gap);
                             const miniY = mosaicY + placement.row * (miniCellH + gap);
                             const miniFileH = placement.nCells * miniCellH + (placement.nCells - 1) * gap;
 
+                            if (placement.item && placement.item.type === "folder") {
+                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
+                                ctx.fillRect(miniX, miniY, miniCellW, miniFileH);
+
+                                ctx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.5);
+                                ctx.lineWidth = 1;
+                                ctx.strokeRect(miniX, miniY, miniCellW, miniFileH);
+
+                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.35);
+                                ctx.fillRect(miniX, miniY, miniCellW, Math.min(6, miniFileH));
+
+                                if (miniCellW >= 24 && miniFileH >= 12 && placement.item.card) {
+                                    ctx.fillStyle = getThemeColor("--vscode-foreground", light ? "#3730a3" : "#c4b5fd");
+                                    const miniFont = `${Math.max(6, Math.min(8, miniCellW / 8))}px system-ui, sans-serif`;
+                                    ctx.font = miniFont;
+                                    let miniLabel = placement.item.card.name;
+                                    while (miniLabel.length > 1 && ctx.measureText(miniLabel).width > miniCellW - 4) {
+                                        miniLabel = miniLabel.slice(0, -1);
+                                    }
+                                    ctx.fillText(miniLabel, miniX + 2, miniY + Math.min(10, miniFileH - 2));
+                                }
+                                continue;
+                            }
+
+                            const pf = placement.file;
+                            if (!pf) continue;
                             const isOpen = openFilesSet.has(pf.uri);
                             const isActive = pf.uri === activeFileUri;
                             const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
@@ -2300,10 +2829,16 @@ function render() {
                             }
                         }
                     } else {
-                        const totalSlots = Math.max(group.files.length, groupFolderOrder ? groupFolderOrder.length : 0);
-                        const baseMiniGrid = buildStableGrid(totalSlots, overviewAspect);
-                        const miniCols = baseMiniGrid.cols + extraCols;
-                        const miniRows = baseMiniGrid.rows + extraRows;
+                        const totalSlots = Math.max(previewItems.length, groupFolderOrder ? groupFolderOrder.length : 0);
+                        const baseMiniGrid = buildStableGrid(totalSlots, BASE_GRID_ASPECT);
+                        const groupFolderExtraCols = (data && data.folderExtraCols && typeof data.folderExtraCols[group.path] === "number")
+                            ? data.folderExtraCols[group.path]
+                            : 0;
+                        const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
+                            ? data.folderExtraRows[group.path]
+                            : 0;
+                        const miniCols = baseMiniGrid.cols + groupFolderExtraCols;
+                        const miniRows = baseMiniGrid.rows + groupFolderExtraRows;
                         const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
 
                         const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
@@ -2316,20 +2851,46 @@ function render() {
                             }
                         }
 
-                        const groupFilesById = new Map(group.files.map(f => [f.id, f]));
+                        const itemsById = new Map(previewItems.map(it => [it.id, it]));
                         const orderToUse = groupFolderOrder && groupFolderOrder.length > 0
                             ? groupFolderOrder
-                            : group.files.map(f => f.id);
+                            : previewItems.map(it => it.id);
 
                         for (let mIdx = 0; mIdx < orderToUse.length && mIdx < miniSlots.length; mIdx++) {
                             const fid = orderToUse[mIdx];
                             if (!fid) continue;
-                            const pf = groupFilesById.get(fid);
-                            if (!pf) continue;
+                            const pit = itemsById.get(fid);
+                            if (!pit) continue;
                             const miniSlot = miniSlots[mIdx];
                             const miniX = mosaicX + miniSlot[0] * (miniCellW + gap);
                             const miniY = mosaicY + miniSlot[1] * (miniCellH + gap);
 
+                            if (pit.type === "folder") {
+                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
+                                ctx.fillRect(miniX, miniY, miniCellW, miniCellH);
+
+                                ctx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.5);
+                                ctx.lineWidth = 1;
+                                ctx.strokeRect(miniX, miniY, miniCellW, miniCellH);
+
+                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.35);
+                                ctx.fillRect(miniX, miniY, miniCellW, Math.min(6, miniCellH));
+
+                                if (miniCellW >= 24 && miniCellH >= 12 && pit.card) {
+                                    ctx.fillStyle = getThemeColor("--vscode-foreground", light ? "#3730a3" : "#c4b5fd");
+                                    const miniFont = `${Math.max(6, Math.min(8, miniCellW / 8))}px system-ui, sans-serif`;
+                                    ctx.font = miniFont;
+                                    let miniLabel = pit.card.name;
+                                    while (miniLabel.length > 1 && ctx.measureText(miniLabel).width > miniCellW - 4) {
+                                        miniLabel = miniLabel.slice(0, -1);
+                                    }
+                                    ctx.fillText(miniLabel, miniX + 2, miniY + Math.min(10, miniCellH - 2));
+                                }
+                                continue;
+                            }
+
+                            const pf = pit.file;
+                            if (!pf) continue;
                             const isOpen = openFilesSet.has(pf.uri);
                             const isActive = pf.uri === activeFileUri;
                             const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
@@ -2363,7 +2924,7 @@ function render() {
                                 ctx.fillStyle = pf.gitStatus === "modified"
                                     ? (TILE_LABEL_COLOR.modified || "#e2c08d")
                                     : (TILE_LABEL_COLOR.added || "#73c991");
-                                ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniFileH - 2));
+                                ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniCellH - 2));
                             }
                         }
                     }
@@ -2384,7 +2945,7 @@ function render() {
                 ctx.restore();
             } else {
                 const file = item.file;
-                const fileH = localCellH;
+                const fileH = localCellH * nCells;
                 file._cell = { id: item.id, x, y, w: localCellW, h: fileH, _slot: slot };
 
                 if (y + fileH < -50 || y > rectH + 50) continue;
@@ -2450,11 +3011,26 @@ function render() {
                 orderToIterate = scopedFiles.map(f => f.id);
             }
 
-            const totalSlots = scopedFiles.length;
-            localFolderGrid = buildStableGrid(totalSlots, overviewAspect);
+            const totalSlots = Math.max(scopedFiles.length, folderOrder ? folderOrder.length : 0);
+            localFolderGrid = buildStableGrid(totalSlots, BASE_GRID_ASPECT);
 
             const folderCols = (localFolderGrid ? localFolderGrid.cols : 1) + extraCols;
             const folderRows = (localFolderGrid ? localFolderGrid.rows : 1) + extraRows;
+
+            const folderSlots = [...localFolderGrid.slots];
+            const existingFolderSlotsSet = new Set(folderSlots.map(s => `${s[0]},${s[1]}`));
+            for (let r = 0; r < folderRows; r++) {
+                for (let c = 0; c < folderCols; c++) {
+                    const key = `${c},${r}`;
+                    if (!existingFolderSlotsSet.has(key)) {
+                        folderSlots.push([c, r]);
+                        existingFolderSlotsSet.add(key);
+                    }
+                }
+            }
+            localFolderGrid.slots = folderSlots;
+            localFolderGrid.cols = folderCols;
+            localFolderGrid.rows = folderRows;
 
             activeRenderGrid = {
                 cols: folderCols,
@@ -2467,7 +3043,7 @@ function render() {
                 folderOrder: folderOrder
             };
 
-            const slots = localFolderGrid ? localFolderGrid.slots : [];
+            const slots = folderSlots;
             const scopedFilesById = new Map(scopedFiles.map(f => [f.id, f]));
 
             for (let i = 0; i < orderToIterate.length && i < slots.length; i++) {
@@ -2570,7 +3146,7 @@ function drawDragOverlays() {
         ctx.strokeRect(x, y, ghostW, ghostH);
         ctx.fillStyle = style.color;
         ctx.font = TILE_LABEL_FONT;
-        ctx.fillText("📁 " + (draggingFolder.name || draggingFolder.folderPath), x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
+        ctx.fillText((draggingFolder.name || draggingFolder.folderPath), x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
 
         // drop-target outline
         if (dragTarget) {
@@ -2845,7 +3421,7 @@ function updateHoverTooltip() {
 
     if (hoveredFolderCard) {
         const grp = hoveredFolderCard.group || { name: hoveredFolderCard.folderPath, path: hoveredFolderCard.folderPath, fileCount: 0, files: [] };
-        
+
         let openCount = 0;
         let modifiedCount = 0;
         let errorCount = 0;
@@ -3186,6 +3762,27 @@ canvas.addEventListener("mousedown", event => {
 
 // MARK: mousemove
 canvas.addEventListener("mousemove", event => {
+    // Fast path: if actively dragging, skip heavy hover checks, window focus, and tooltips
+    if (draggingFile || draggingFolder) {
+        if (event.buttons === 0) {
+            clearDragState();
+            render();
+            return;
+        }
+        cursorPos = getCanvasPos(event);
+        lastMousePos = { x: event.clientX, y: event.clientY };
+        if (!dragRafId) {
+            dragRafId = requestAnimationFrame(() => {
+                dragRafId = null;
+                updateDragTarget();
+                render();
+            });
+        }
+        isCtrlDown = false;
+        tooltip.style.display = "none";
+        return;
+    }
+
     checkWindowFocus();
 
     // Safety check: if no mouse button is pressed, cancel any pending candidate drag
@@ -3205,8 +3802,33 @@ canvas.addEventListener("mousemove", event => {
         // only start dragging if cursor has moved more than the threshold
         if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
             draggingFolder = candidateFolder.card;
+            if (typeof document !== "undefined") {
+                if (!cachedDragBackgroundCanvas) {
+                    cachedDragBackgroundCanvas = document.createElement("canvas");
+                }
+                if (cachedDragBackgroundCanvas.width !== canvas.width || cachedDragBackgroundCanvas.height !== canvas.height) {
+                    cachedDragBackgroundCanvas.width = canvas.width;
+                    cachedDragBackgroundCanvas.height = canvas.height;
+                }
+                const bgCtx = cachedDragBackgroundCanvas.getContext ? cachedDragBackgroundCanvas.getContext("2d") : null;
+                if (bgCtx) {
+                    bgCtx.drawImage(canvas, 0, 0);
+                    const c = candidateFolder.card;
+                    if (c && typeof c.x === "number") {
+                        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                        bgCtx.save();
+                        bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                        bgCtx.fillStyle = withAlpha(TILE_BACKGROUND, 0.7);
+                        bgCtx.fillRect(c.x, c.y, c.w, c.h);
+                        bgCtx.restore();
+                    }
+                }
+                dragBackgroundCanvas = cachedDragBackgroundCanvas;
+            }
             candidateFolder = null;
-            dragBackgroundCanvas = null;
+            updateDragTarget();
+            render();
+            return;
         }
     }
 
@@ -3217,22 +3839,34 @@ canvas.addEventListener("mousemove", event => {
         // only start dragging if cursor has moved more than the threshold
         if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
             draggingFile = candidateFile.file;
+            if (typeof document !== "undefined") {
+                if (!cachedDragBackgroundCanvas) {
+                    cachedDragBackgroundCanvas = document.createElement("canvas");
+                }
+                if (cachedDragBackgroundCanvas.width !== canvas.width || cachedDragBackgroundCanvas.height !== canvas.height) {
+                    cachedDragBackgroundCanvas.width = canvas.width;
+                    cachedDragBackgroundCanvas.height = canvas.height;
+                }
+                const bgCtx = cachedDragBackgroundCanvas.getContext ? cachedDragBackgroundCanvas.getContext("2d") : null;
+                if (bgCtx) {
+                    bgCtx.drawImage(canvas, 0, 0);
+                    const c = candidateFile.file._cell;
+                    if (c && typeof c.x === "number") {
+                        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                        bgCtx.save();
+                        bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                        bgCtx.fillStyle = withAlpha(TILE_BACKGROUND, 0.7);
+                        bgCtx.fillRect(c.x, c.y, c.w, c.h);
+                        bgCtx.restore();
+                    }
+                }
+                dragBackgroundCanvas = cachedDragBackgroundCanvas;
+            }
             candidateFile = null;
-            dragBackgroundCanvas = null;
+            updateDragTarget();
+            render();
+            return;
         }
-    }
-    if (draggingFile || draggingFolder) {
-        if (!dragRafId) {
-            dragRafId = requestAnimationFrame(() => {
-                dragRafId = null;
-                updateDragTarget();
-                render();
-            });
-        }
-
-        isCtrlDown = false;
-        tooltip.style.display = "none";
-        return;
     }
 
     if (isControlModifier(event)) {
@@ -3259,29 +3893,118 @@ canvas.addEventListener("mouseup", event => {
         updateDragTarget();
 
         if (activeRenderGrid && activeRenderGrid.isFolderCards) {
-            const currentCardIds = (data.cardOrder && data.cardOrder.length > 0)
-                ? data.cardOrder
-                : activeRenderGrid.orderedItems.map(it => it ? it.id : "");
-            if (dragTarget && dragTarget.item && dragTarget.item.id !== ("folder:" + draggingFolder.folderPath)) {
+            const targetFocusedFolder = activeRenderGrid.focusedFolder || (focusedFolder || null);
+            const currentCardIds = (targetFocusedFolder && data.folderCardOrders && data.folderCardOrders[targetFocusedFolder])
+                ? data.folderCardOrders[targetFocusedFolder]
+                : ((data.cardOrder && data.cardOrder.length > 0)
+                    ? data.cardOrder
+                    : activeRenderGrid.orderedItems.map(it => it ? it.id : ""));
+            const sourceCardId = "folder:" + draggingFolder.folderPath;
+
+            if (activeRenderGrid.isSpanning && dragTarget) {
+                const scopedItems = activeRenderGrid.spanningItems || activeRenderGrid.orderedItems.filter(Boolean);
+                const scopedIds = scopedItems.map(it => it.id);
+                const allocations = {};
+                for (const it of scopedItems) {
+                    if (it.type === "folder") {
+                        allocations[it.id] = 1;
+                    } else {
+                        const f = it.file;
+                        allocations[it.id] = (f && f.nCells && f.nCells > 1) ? f.nCells : (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
+                    }
+                }
+                const wrapRows = activeRenderGrid.wrapRows || 2;
+                const maxAllowedCols = activeRenderGrid.cols;
+                const maxAllowedRows = activeRenderGrid.rows;
+
+                const res = reorderSpanningItemsLocal(
+                    scopedIds,
+                    currentCardIds,
+                    allocations,
+                    sourceCardId,
+                    dragTarget.col,
+                    dragTarget.row,
+                    maxAllowedCols,
+                    maxAllowedRows,
+                    wrapRows
+                );
+
+                if (targetFocusedFolder) {
+                    if (!data.folderCardOrders) data.folderCardOrders = {};
+                    data.folderCardOrders[targetFocusedFolder] = res.newOrder;
+                    if (!data.folderCardWrapRows) data.folderCardWrapRows = {};
+                    data.folderCardWrapRows[targetFocusedFolder] = res.rows;
+                } else {
+                    data.cardOrder = res.newOrder;
+                    data.cardWrapRows = res.rows;
+                }
+
                 vscode.postMessage({
                     command: "swapCardItems",
-                    sourceId: "folder:" + draggingFolder.folderPath,
-                    targetId: dragTarget.item.id,
-                    currentCardIds
+                    sourceId: sourceCardId,
+                    targetId: dragTarget.item ? dragTarget.item.id : null,
+                    targetIsEmpty: !dragTarget.item,
+                    targetCol: dragTarget.col,
+                    targetRow: dragTarget.row,
+                    currentCardIds: res.newOrder,
+                    isSpanning: true,
+                    wrapRows: res.rows,
+                    focusedFolder: targetFocusedFolder || ""
                 });
-            } else if (dragTarget && !dragTarget.item) {
-                const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
-                    ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
-                    : -1;
-                vscode.postMessage({
-                    command: "swapCardItems",
-                    sourceId: "folder:" + draggingFolder.folderPath,
-                    targetId: null,
-                    targetIsEmpty: true,
-                    targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
-                    maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
-                    currentCardIds
-                });
+            } else {
+                let updatedCardOrder = [...currentCardIds];
+                const fromIdx = updatedCardOrder.indexOf(sourceCardId);
+                if (dragTarget && dragTarget.item && dragTarget.item.id !== sourceCardId) {
+                    const toIdx = updatedCardOrder.indexOf(dragTarget.item.id);
+                    if (fromIdx !== -1 && toIdx !== -1) {
+                        updatedCardOrder[fromIdx] = dragTarget.item.id;
+                        updatedCardOrder[toIdx] = sourceCardId;
+                    }
+                    if (targetFocusedFolder) {
+                        if (!data.folderCardOrders) data.folderCardOrders = {};
+                        data.folderCardOrders[targetFocusedFolder] = updatedCardOrder;
+                    } else {
+                        data.cardOrder = updatedCardOrder;
+                    }
+                    vscode.postMessage({
+                        command: "swapCardItems",
+                        sourceId: sourceCardId,
+                        targetId: dragTarget.item.id,
+                        currentCardIds: updatedCardOrder,
+                        focusedFolder: targetFocusedFolder || ""
+                    });
+                } else if (dragTarget && !dragTarget.item) {
+                    const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
+                        ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
+                        : -1;
+                    const targetSlot = slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col;
+                    if (targetSlot >= 0) {
+                        if (fromIdx !== -1) updatedCardOrder[fromIdx] = "";
+                        while (updatedCardOrder.length <= targetSlot) {
+                            updatedCardOrder.push("");
+                        }
+                        updatedCardOrder[targetSlot] = sourceCardId;
+                        while (updatedCardOrder.length > 0 && !updatedCardOrder[updatedCardOrder.length - 1]) {
+                            updatedCardOrder.pop();
+                        }
+                    }
+                    if (targetFocusedFolder) {
+                        if (!data.folderCardOrders) data.folderCardOrders = {};
+                        data.folderCardOrders[targetFocusedFolder] = updatedCardOrder;
+                    } else {
+                        data.cardOrder = updatedCardOrder;
+                    }
+                    vscode.postMessage({
+                        command: "swapCardItems",
+                        sourceId: sourceCardId,
+                        targetId: null,
+                        targetIsEmpty: true,
+                        targetSlotIdx: targetSlot,
+                        maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
+                        currentCardIds: updatedCardOrder,
+                        focusedFolder: targetFocusedFolder || ""
+                    });
+                }
             }
         } else if (dragTarget) {
             vscode.postMessage({
@@ -3302,34 +4025,305 @@ canvas.addEventListener("mouseup", event => {
         updateDragTarget();
 
         if (activeRenderGrid && activeRenderGrid.isFolderCards) {
-            const currentCardIds = (data.cardOrder && data.cardOrder.length > 0)
-                ? data.cardOrder
-                : activeRenderGrid.orderedItems.map(it => it ? it.id : "");
-            if (dragTarget && dragTarget.item && dragTarget.item.id !== draggingFile.id) {
+            const targetFocusedFolder = activeRenderGrid.focusedFolder || (focusedFolder || null);
+            const currentCardIds = (targetFocusedFolder && data.folderCardOrders && data.folderCardOrders[targetFocusedFolder])
+                ? data.folderCardOrders[targetFocusedFolder]
+                : ((data.cardOrder && data.cardOrder.length > 0)
+                    ? data.cardOrder
+                    : activeRenderGrid.orderedItems.map(it => it ? it.id : ""));
+            const sourceCardId = draggingFile.id;
+
+            if (dragTarget && dragTarget.item && dragTarget.item.id === sourceCardId) {
+                clearDragState();
+                render();
+                return;
+            }
+
+            if (activeRenderGrid.isSpanning && dragTarget) {
+                const scopedItems = activeRenderGrid.spanningItems || activeRenderGrid.orderedItems.filter(Boolean);
+                const scopedIds = scopedItems.map(it => it.id);
+                const allocations = {};
+                for (const it of scopedItems) {
+                    if (it.type === "folder") {
+                        allocations[it.id] = 1;
+                    } else {
+                        const f = it.file;
+                        allocations[it.id] = (f && f.nCells && f.nCells > 1) ? f.nCells : (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
+                    }
+                }
+                const wrapRows = activeRenderGrid.wrapRows || 2;
+                const maxAllowedCols = activeRenderGrid.cols;
+                const maxAllowedRows = activeRenderGrid.rows;
+
+                const res = reorderSpanningItemsLocal(
+                    scopedIds,
+                    currentCardIds,
+                    allocations,
+                    sourceCardId,
+                    dragTarget.col,
+                    dragTarget.row,
+                    maxAllowedCols,
+                    maxAllowedRows,
+                    wrapRows
+                );
+
+                if (targetFocusedFolder) {
+                    if (!data.folderCardOrders) data.folderCardOrders = {};
+                    data.folderCardOrders[targetFocusedFolder] = res.newOrder;
+                    if (!data.folderCardWrapRows) data.folderCardWrapRows = {};
+                    data.folderCardWrapRows[targetFocusedFolder] = res.rows;
+                } else {
+                    data.cardOrder = res.newOrder;
+                    data.cardWrapRows = res.rows;
+                }
+
                 vscode.postMessage({
                     command: "swapCardItems",
-                    sourceId: draggingFile.id,
-                    targetId: dragTarget.item.id,
-                    currentCardIds
+                    sourceId: sourceCardId,
+                    targetId: dragTarget.item ? dragTarget.item.id : null,
+                    targetIsEmpty: !dragTarget.item,
+                    targetCol: dragTarget.col,
+                    targetRow: dragTarget.row,
+                    currentCardIds: res.newOrder,
+                    isSpanning: true,
+                    wrapRows: res.rows,
+                    focusedFolder: targetFocusedFolder || ""
                 });
-            } else if (dragTarget && !dragTarget.item) {
-                const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
-                    ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
-                    : -1;
-                vscode.postMessage({
-                    command: "swapCardItems",
-                    sourceId: draggingFile.id,
-                    targetId: null,
-                    targetIsEmpty: true,
-                    targetSlotIdx: slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col,
-                    maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
-                    currentCardIds
-                });
+            } else {
+                let updatedCardOrder = [...currentCardIds];
+                const fromIdx = updatedCardOrder.indexOf(sourceCardId);
+                if (dragTarget && dragTarget.item && dragTarget.item.id !== sourceCardId) {
+                    const toIdx = updatedCardOrder.indexOf(dragTarget.item.id);
+                    if (fromIdx !== -1 && toIdx !== -1) {
+                        updatedCardOrder[fromIdx] = dragTarget.item.id;
+                        updatedCardOrder[toIdx] = sourceCardId;
+                    }
+                    if (targetFocusedFolder) {
+                        if (!data.folderCardOrders) data.folderCardOrders = {};
+                        data.folderCardOrders[targetFocusedFolder] = updatedCardOrder;
+                    } else {
+                        data.cardOrder = updatedCardOrder;
+                    }
+                    vscode.postMessage({
+                        command: "swapCardItems",
+                        sourceId: sourceCardId,
+                        targetId: dragTarget.item.id,
+                        currentCardIds: updatedCardOrder,
+                        focusedFolder: targetFocusedFolder || ""
+                    });
+                } else if (dragTarget && !dragTarget.item) {
+                    const slotIdx = activeRenderGrid.layout && activeRenderGrid.layout.slots
+                        ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
+                        : -1;
+                    const targetSlot = slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col;
+                    if (targetSlot >= 0) {
+                        if (fromIdx !== -1) updatedCardOrder[fromIdx] = "";
+                        while (updatedCardOrder.length <= targetSlot) {
+                            updatedCardOrder.push("");
+                        }
+                        updatedCardOrder[targetSlot] = sourceCardId;
+                        while (updatedCardOrder.length > 0 && !updatedCardOrder[updatedCardOrder.length - 1]) {
+                            updatedCardOrder.pop();
+                        }
+                    }
+                    if (targetFocusedFolder) {
+                        if (!data.folderCardOrders) data.folderCardOrders = {};
+                        data.folderCardOrders[targetFocusedFolder] = updatedCardOrder;
+                    } else {
+                        data.cardOrder = updatedCardOrder;
+                    }
+                    vscode.postMessage({
+                        command: "swapCardItems",
+                        sourceId: sourceCardId,
+                        targetId: null,
+                        targetIsEmpty: true,
+                        targetSlotIdx: targetSlot,
+                        maxCapacity: activeRenderGrid.cols * activeRenderGrid.rows,
+                        currentCardIds: updatedCardOrder,
+                        focusedFolder: targetFocusedFolder || ""
+                    });
+                }
             }
         } else if (dragTarget) {
+            if (dragTarget.file && dragTarget.file.id === draggingFile.id) {
+                clearDragState();
+                render();
+                return;
+            }
+
             const slotIdx = (activeRenderGrid && activeRenderGrid.layout && activeRenderGrid.layout.slots)
                 ? activeRenderGrid.layout.slots.findIndex(s => s[0] === dragTarget.col && s[1] === dragTarget.row)
                 : -1;
+            const targetSlotIdx = slotIdx !== -1 ? slotIdx : (dragTarget.row * (dragTarget.gridCols || (activeRenderGrid && activeRenderGrid.cols) || 1) + dragTarget.col);
+
+            // Optimistically update in-memory order for instant zero-latency visual response
+            const isSpanning = !!(data && (data.mode === "spanning_grid" || data.layoutMode === "spanning_grid"));
+            let spanningRes = null;
+            if (isSpanning) {
+                const scopedFiles = (activeRenderGrid && activeRenderGrid.files)
+                    ? activeRenderGrid.files
+                    : (data.files || []);
+                const scopedIds = scopedFiles.map(f => f.id);
+                const currentOrder = focusedFolder
+                    ? ((data.folderOrders && data.folderOrders[focusedFolder]) ? [...data.folderOrders[focusedFolder]] : [...scopedIds])
+                    : (data.fileOrder ? [...data.fileOrder] : [...scopedIds]);
+                const allocations = {};
+                for (const f of scopedFiles) {
+                    allocations[f.id] = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
+                }
+                const wrapRows = (activeRenderGrid && activeRenderGrid.wrapRows) || (data.layout && data.layout.wrapRows) || 2;
+                const maxAllowedCols = (activeRenderGrid && activeRenderGrid.cols) || (data.layout && data.layout.cols) || 2;
+                const maxAllowedRows = (activeRenderGrid && activeRenderGrid.rows) || (data.layout && data.layout.rows) || 2;
+
+                spanningRes = reorderSpanningItemsLocal(
+                    scopedIds,
+                    currentOrder,
+                    allocations,
+                    draggingFile.id,
+                    dragTarget.col,
+                    dragTarget.row,
+                    maxAllowedCols,
+                    maxAllowedRows,
+                    wrapRows
+                );
+
+                if (focusedFolder) {
+                    if (!data.folderOrders) data.folderOrders = {};
+                    data.folderOrders[focusedFolder] = spanningRes.newOrder;
+                    if (!data.folderWrapRows) data.folderWrapRows = {};
+                    data.folderWrapRows[focusedFolder] = spanningRes.rows;
+                } else {
+                    data.fileOrder = spanningRes.newOrder;
+                    const srcFile = data.files ? data.files.find(f => f.id === draggingFile.id) : null;
+                    const tgtFile = (spanningRes.targetPlacement && spanningRes.targetPlacement.id)
+                        ? (data.files ? data.files.find(f => f.id === spanningRes.targetPlacement.id) : null)
+                        : null;
+
+                    if (srcFile) {
+                        const oldSlots = srcFile.slots || (srcFile.slot ? [srcFile.slot] : []);
+                        for (const s of oldSlots) {
+                            if (slotOccupancy.get(`${s[0]},${s[1]}`) === srcFile) {
+                                slotOccupancy.delete(`${s[0]},${s[1]}`);
+                            }
+                        }
+                    }
+                    if (tgtFile) {
+                        const oldSlots = tgtFile.slots || (tgtFile.slot ? [tgtFile.slot] : []);
+                        for (const s of oldSlots) {
+                            if (slotOccupancy.get(`${s[0]},${s[1]}`) === tgtFile) {
+                                slotOccupancy.delete(`${s[0]},${s[1]}`);
+                            }
+                        }
+                    }
+
+                    if (srcFile) {
+                        srcFile.slot = [spanningRes.finalTargetCol, spanningRes.finalTargetRow];
+                        const nCells = allocations[srcFile.id] || srcFile.nCells || 1;
+                        srcFile.slots = [];
+                        for (let i = 0; i < nCells; i++) {
+                            const s = [spanningRes.finalTargetCol, spanningRes.finalTargetRow + i];
+                            srcFile.slots.push(s);
+                            slotOccupancy.set(`${s[0]},${s[1]}`, srcFile);
+                        }
+                        userReorderedFileSlots.set(srcFile.id, { slot: [...srcFile.slot], slots: srcFile.slots.map(s => [...s]) });
+                    }
+                    if (tgtFile) {
+                        tgtFile.slot = [spanningRes.sourceCol, spanningRes.safeSourceRow];
+                        const nCells = allocations[tgtFile.id] || tgtFile.nCells || 1;
+                        tgtFile.slots = [];
+                        for (let i = 0; i < nCells; i++) {
+                            const s = [spanningRes.sourceCol, spanningRes.safeSourceRow + i];
+                            tgtFile.slots.push(s);
+                            slotOccupancy.set(`${s[0]},${s[1]}`, tgtFile);
+                        }
+                        userReorderedFileSlots.set(tgtFile.id, { slot: [...tgtFile.slot], slots: tgtFile.slots.map(s => [...s]) });
+                    }
+                }
+            } else if (focusedFolder) {
+                if (!data.folderOrders) data.folderOrders = {};
+                let currentOrder = data.folderOrders[focusedFolder] ? [...data.folderOrders[focusedFolder]] : [];
+                if (currentOrder.length === 0 && activeRenderGrid && activeRenderGrid.files) {
+                    currentOrder = activeRenderGrid.files.map(f => f.id);
+                }
+                const srcIdx = currentOrder.indexOf(draggingFile.id);
+                if (dragTarget.file) {
+                    const tgtIdx = currentOrder.indexOf(dragTarget.file.id);
+                    if (srcIdx !== -1 && tgtIdx !== -1) {
+                        if (dragReorderMode === "shift") {
+                            const [item] = currentOrder.splice(srcIdx, 1);
+                            currentOrder.splice(tgtIdx, 0, item);
+                        } else {
+                            const tmp = currentOrder[srcIdx];
+                            currentOrder[srcIdx] = currentOrder[tgtIdx];
+                            currentOrder[tgtIdx] = tmp;
+                        }
+                    }
+                } else if (targetSlotIdx >= 0) {
+                    while (currentOrder.length <= targetSlotIdx) {
+                        currentOrder.push("");
+                    }
+                    if (srcIdx !== -1) {
+                        currentOrder[srcIdx] = "";
+                    }
+                    currentOrder[targetSlotIdx] = draggingFile.id;
+                }
+                data.folderOrders[focusedFolder] = currentOrder;
+            } else {
+                const srcFile = data.files ? data.files.find(f => f.id === draggingFile.id) : null;
+                const tgtFile = dragTarget.file ? (data.files ? data.files.find(f => f.id === dragTarget.file.id) : null) : null;
+
+                if (srcFile && tgtFile && srcFile.slot && tgtFile.slot) {
+                    const oldSrcSlot = [...srcFile.slot];
+                    const oldTgtSlot = [...tgtFile.slot];
+
+                    srcFile.slot = oldTgtSlot;
+                    srcFile.slots = [oldTgtSlot];
+
+                    tgtFile.slot = oldSrcSlot;
+                    tgtFile.slots = [oldSrcSlot];
+
+                    slotOccupancy.set(`${oldTgtSlot[0]},${oldTgtSlot[1]}`, srcFile);
+                    slotOccupancy.set(`${oldSrcSlot[0]},${oldSrcSlot[1]}`, tgtFile);
+
+                    userReorderedFileSlots.set(srcFile.id, { slot: [...srcFile.slot], slots: [[...srcFile.slot]] });
+                    userReorderedFileSlots.set(tgtFile.id, { slot: [...tgtFile.slot], slots: [[...tgtFile.slot]] });
+
+                    if (data.fileOrder && Array.isArray(data.fileOrder)) {
+                        const sIdx = data.fileOrder.indexOf(srcFile.id);
+                        const tIdx = data.fileOrder.indexOf(tgtFile.id);
+                        if (sIdx !== -1 && tIdx !== -1) {
+                            const tmp = data.fileOrder[sIdx];
+                            data.fileOrder[sIdx] = data.fileOrder[tIdx];
+                            data.fileOrder[tIdx] = tmp;
+                        }
+                    }
+                } else if (srcFile) {
+                    const oldSrcSlot = srcFile.slot ? [...srcFile.slot] : null;
+                    if (oldSrcSlot) {
+                        if (slotOccupancy.get(`${oldSrcSlot[0]},${oldSrcSlot[1]}`) === srcFile) {
+                            slotOccupancy.delete(`${oldSrcSlot[0]},${oldSrcSlot[1]}`);
+                        }
+                    }
+                    const newSlot = [dragTarget.col, dragTarget.row];
+                    srcFile.slot = newSlot;
+                    srcFile.slots = [newSlot];
+                    slotOccupancy.set(`${newSlot[0]},${newSlot[1]}`, srcFile);
+
+                    userReorderedFileSlots.set(srcFile.id, { slot: [...srcFile.slot], slots: [[...srcFile.slot]] });
+
+                    if (data.fileOrder && Array.isArray(data.fileOrder) && targetSlotIdx >= 0) {
+                        const sIdx = data.fileOrder.indexOf(srcFile.id);
+                        while (data.fileOrder.length <= targetSlotIdx) {
+                            data.fileOrder.push("");
+                        }
+                        if (sIdx !== -1) {
+                            data.fileOrder[sIdx] = "";
+                        }
+                        data.fileOrder[targetSlotIdx] = srcFile.id;
+                    }
+                }
+            }
+
             vscode.postMessage({
                 command: "reorderFile",
                 sourceId: draggingFile.id,
@@ -3337,10 +4331,12 @@ canvas.addEventListener("mouseup", event => {
                 targetIsEmpty: !dragTarget.file,
                 targetCol: dragTarget.col,
                 targetRow: dragTarget.row,
-                targetSlotIdx: slotIdx,
-                targetGridCols: dragTarget.gridCols || data.layout.cols,
+                targetSlotIdx: targetSlotIdx,
+                targetGridCols: dragTarget.gridCols || (activeRenderGrid && activeRenderGrid.cols) || data.layout.cols,
                 targetGridRows: (activeRenderGrid && activeRenderGrid.rows) || data.layout.rows,
                 targetWrapRows: (activeRenderGrid && activeRenderGrid.wrapRows) || undefined,
+                currentOrder: spanningRes ? spanningRes.newOrder : undefined,
+                wrapRows: spanningRes ? spanningRes.rows : undefined,
                 focusedFolder: focusedFolder || ""
             });
         }
@@ -3355,9 +4351,9 @@ canvas.addEventListener("mouseup", event => {
         for (const card of data._folderCards) {
             if (pointInRect(card, cursorPos.px, cursorPos.py) &&
                 card.folderPath === activeCandidateFolder.card.folderPath) {
-                    setFocusedFolderWithHistory(card.folderPath);
-                    return;
-                }
+                setFocusedFolderWithHistory(card.folderPath);
+                return;
+            }
         }
     }
 
@@ -3752,15 +4748,37 @@ canvas.addEventListener("contextmenu", event => {
         };
         document.getElementById("menu-space-expand").onclick = () => {
             hideContextMenu();
-            vscode.postMessage({ command: "expandSpace" });
+            triggerExpandSpace();
         };
         document.getElementById("menu-space-reduce").onclick = () => {
             hideContextMenu();
-            vscode.postMessage({ command: "reduceSpace" });
+            triggerReduceSpace();
         };
         document.getElementById("menu-space-reflow").onclick = () => {
             hideContextMenu();
-            vscode.postMessage({ command: "reflow" });
+            userReorderedFileSlots.clear();
+            const targetFolder = focusedFolder === "(root files)/" ? "" : (focusedFolder || "");
+            if (targetFolder) {
+                if (data) {
+                    if (data.folderOrders) delete data.folderOrders[targetFolder];
+                    if (data.folderWrapRows) delete data.folderWrapRows[targetFolder];
+                    if (data.folderCardOrders) delete data.folderCardOrders[targetFolder];
+                    if (data.folderCardWrapRows) delete data.folderCardWrapRows[targetFolder];
+                    if (data.folderExtraCols) delete data.folderExtraCols[targetFolder];
+                    if (data.folderExtraRows) delete data.folderExtraRows[targetFolder];
+                }
+            } else if (data) {
+                data.folderOrders = {};
+                data.folderWrapRows = {};
+                data.folderCardOrders = {};
+                data.folderCardWrapRows = {};
+                data.folderExtraCols = {};
+                data.folderExtraRows = {};
+                data.extraCols = 0;
+                data.extraRows = 0;
+            }
+            render();
+            vscode.postMessage({ command: "reflow", focusedFolder: targetFolder });
         };
         if (focusedFolder) {
             document.getElementById("menu-space-root").onclick = () => {
@@ -3867,7 +4885,7 @@ function updateIgnoresPopover() {
         const isFolder = pat.endsWith("/") || pat === "(root files)/" || !pat.includes(".");
         const item = document.createElement("div");
         item.className = "popover-item";
-        
+
         const label = document.createElement("div");
         label.style.display = "flex";
         label.style.alignItems = "center";
@@ -4268,17 +5286,83 @@ if (mediaThumbnailsToggle) {
     };
 }
 
+function triggerExpandSpace() {
+    const layer = focusedFolder || "";
+    if (data) {
+        if (!data.folderExtraCols) data.folderExtraCols = {};
+        if (!data.folderExtraRows) data.folderExtraRows = {};
+        const curCols = ((data.folderExtraCols[layer]) || (layer === "" ? (data.extraCols || 0) : 0));
+        const curRows = ((data.folderExtraRows[layer]) || (layer === "" ? (data.extraRows || 0) : 0));
+        data.folderExtraCols[layer] = curCols + 1;
+        data.folderExtraRows[layer] = curRows + 1;
+        if (layer === "") {
+            data.extraCols = (data.extraCols || 0) + 1;
+            data.extraRows = (data.extraRows || 0) + 1;
+            if (data.layout) {
+                data.layout.cols = (data.layout.cols || 1) + 1;
+                data.layout.rows = (data.layout.rows || 1) + 1;
+            }
+        }
+
+        render();
+    }
+    vscode.postMessage({
+        command: "expandSpace",
+        focusedFolder: layer
+    });
+}
+
+function triggerReduceSpace() {
+    const layer = focusedFolder || "";
+    if (data) {
+        if (!data.folderExtraCols) data.folderExtraCols = {};
+        if (!data.folderExtraRows) data.folderExtraRows = {};
+        const curCols = ((data.folderExtraCols[layer]) || (layer === "" ? (data.extraCols || 0) : 0));
+        const curRows = ((data.folderExtraRows[layer]) || (layer === "" ? (data.extraRows || 0) : 0));
+
+        if (curCols <= 0 && curRows <= 0) {
+            return;
+        }
+
+        const newCols = Math.max(0, curCols - 1);
+        const newRows = Math.max(0, curRows - 1);
+        data.folderExtraCols[layer] = newCols;
+        data.folderExtraRows[layer] = newRows;
+
+        if (layer === "") {
+            const oldExtraCols = data.extraCols || 0;
+            const oldExtraRows = data.extraRows || 0;
+            data.extraCols = newCols;
+            data.extraRows = newRows;
+            if (data.layout) {
+                if (oldExtraCols > 0) {
+                    data.layout.cols = Math.max(1, (data.layout.cols || 1) - (oldExtraCols - newCols));
+                }
+                if (oldExtraRows > 0) {
+                    data.layout.rows = Math.max(1, (data.layout.rows || 1) - (oldExtraRows - newRows));
+                }
+            }
+        }
+
+        render();
+    }
+    vscode.postMessage({
+        command: "reduceSpace",
+        focusedFolder: layer
+    });
+}
+
 const expandGridBtn = document.getElementById("expand-grid-btn");
 if (expandGridBtn) {
     expandGridBtn.onclick = () => {
-        vscode.postMessage({ command: "expandSpace" });
+        triggerExpandSpace();
     };
 }
 
 const reduceGridBtn = document.getElementById("reduce-grid-btn");
 if (reduceGridBtn) {
     reduceGridBtn.onclick = () => {
-        vscode.postMessage({ command: "reduceSpace" });
+        triggerReduceSpace();
     };
 }
 
@@ -4304,19 +5388,38 @@ window.addEventListener("mousedown", event => {
 });
 
 window.addEventListener("auxclick", event => {
-    if (event.button === 3) {
+    if (event.button === 3 || event.button === 4) {
         event.preventDefault();
-        handleBreadcrumbBack();
-    } else if (event.button === 4) {
-        event.preventDefault();
-        handleBreadcrumbForward();
+        event.stopPropagation();
     }
 });
 
 const reflowLayoutBtn = document.getElementById("reflow-layout-btn");
 if (reflowLayoutBtn) {
     reflowLayoutBtn.onclick = () => {
-        vscode.postMessage({ command: "reflow" });
+        userReorderedFileSlots.clear();
+        const targetFolder = focusedFolder === "(root files)/" ? "" : (focusedFolder || "");
+        if (targetFolder) {
+            if (data) {
+                if (data.folderOrders) delete data.folderOrders[targetFolder];
+                if (data.folderWrapRows) delete data.folderWrapRows[targetFolder];
+                if (data.folderCardOrders) delete data.folderCardOrders[targetFolder];
+                if (data.folderCardWrapRows) delete data.folderCardWrapRows[targetFolder];
+                if (data.folderExtraCols) delete data.folderExtraCols[targetFolder];
+                if (data.folderExtraRows) delete data.folderExtraRows[targetFolder];
+            }
+        } else if (data) {
+            data.folderOrders = {};
+            data.folderWrapRows = {};
+            data.folderCardOrders = {};
+            data.folderCardWrapRows = {};
+            data.folderExtraCols = {};
+            data.folderExtraRows = {};
+            data.extraCols = 0;
+            data.extraRows = 0;
+        }
+        render();
+        vscode.postMessage({ command: "reflow", focusedFolder: targetFolder });
     };
 }
 

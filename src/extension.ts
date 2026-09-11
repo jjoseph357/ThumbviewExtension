@@ -1,13 +1,13 @@
 import * as vscode from "vscode";
 import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache } from "./scanner";
-import { buildStableGrid, slotToIndex, findSlotIndex } from "./layout";
+import { buildStableGrid, slotToIndex, findSlotIndex, MIN_GRID_COLS, MIN_GRID_ROWS } from "./layout";
 import { buildSpanningGrid, cellsNeeded, integrateNewFilesPreservingPositions, SpanningPlacement } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
 import { IgnoreTreeItem } from "./ignoreProvider";
 import { DirectoryTreeItem } from "./directoryProvider";
 import { fetchWorkspaceGitDiff, getCachedGitDiff } from "./git";
 import { ACCENT_SEARCH, ACCENT_INSPECT, ACCENT_RECENCY, withAlpha } from "./colors";
-import { clampTargetToGridCapacity, reorderFolderItems, reorderCardItems, reorderSpanningItems } from "./reorder_helpers";
+import { clampTargetToGridCapacity, reorderFolderItems, reorderCardItems, reorderSpanningItems, expandSpanningGridOrder, reduceSpanningGridOrder } from "./reorder_helpers";
 
 import * as fs from "fs";
 import * as path from "path";
@@ -412,7 +412,14 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    let cachedIgnoreCountsKey = "";
+    let cachedIgnoreCountsResult: { counts: { [pat: string]: number }; filesMap: { [pat: string]: string[] } } | null = null;
+
     const computeIgnoreCounts = (patterns: string[], allPaths: string[]): { counts: { [pat: string]: number }; filesMap: { [pat: string]: string[] } } => {
+        const key = `${allPaths.length}:${patterns.join("|")}`;
+        if (cachedIgnoreCountsResult && cachedIgnoreCountsKey === key) {
+            return cachedIgnoreCountsResult;
+        }
         const counts: { [pat: string]: number } = {};
         const filesMap: { [pat: string]: string[] } = {};
         for (const pat of patterns) {
@@ -429,7 +436,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             }
         }
-        return { counts, filesMap };
+        cachedIgnoreCountsKey = key;
+        cachedIgnoreCountsResult = { counts, filesMap };
+        return cachedIgnoreCountsResult;
     };
 
     const updateLayoutFromCache = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
@@ -459,7 +468,11 @@ export async function activate(context: vscode.ExtensionContext) {
                     const newIds = activeFileIds.filter(id => !prevIds.has(id));
                     if (newIds.length > 0) {
                         const validPrevPlacements = lastSpanningPlacements.filter(p => activeFileIds.includes(p.file.id));
-                        const integrated = integrateNewFilesPreservingPositions(validPrevPlacements, newIds, savedAllocations, 16 / 9);
+                        const currentAllocations = { ...savedAllocations };
+                        for (const f of activeFiles) {
+                            currentAllocations[f.id] = cellsNeeded(f.lineCount);
+                        }
+                        const integrated = integrateNewFilesPreservingPositions(validPrevPlacements, newIds, currentAllocations, 16 / 9);
                         fileOrder.setOrder(integrated.newOrder);
                         savedRows = integrated.wrapRows;
                         await context.workspaceState.update("thumbview.spanningRows", integrated.wrapRows);
@@ -513,7 +526,12 @@ export async function activate(context: vscode.ExtensionContext) {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
                 let savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
 
-                const layout = buildSpanningGrid(filesWithWebviewUris, order, savedAllocations, savedRows, forceBreakBeforeId ?? null);
+                const currentAllocations: { [id: string]: number } = { ...savedAllocations };
+                for (const f of filesWithWebviewUris) {
+                    currentAllocations[f.id] = cellsNeeded(f.lineCount);
+                }
+
+                const layout = buildSpanningGrid(filesWithWebviewUris, order, currentAllocations, savedRows, forceBreakBeforeId ?? null);
                 lastSpanningPlacements = layout.placements;
 
                 await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
@@ -540,7 +558,13 @@ export async function activate(context: vscode.ExtensionContext) {
                     extraCols,
                     extraRows,
                     cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
+                    cardWrapRows: context.workspaceState.get<number>("thumbview.cardWrapRows") || null,
                     folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
+                    folderCardOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {},
+                    folderCardWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {},
+                    folderWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {},
+                    folderExtraCols: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {},
+                    folderExtraRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {},
                     files: filesWithSlots,
                     layout: {
                         cols: layout.cols + extraCols,
@@ -583,11 +607,17 @@ export async function activate(context: vscode.ExtensionContext) {
                     extraCols,
                     extraRows,
                     cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
+                    cardWrapRows: context.workspaceState.get<number>("thumbview.cardWrapRows") || null,
                     folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
+                    folderCardOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {},
+                    folderCardWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {},
+                    folderWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {},
+                    folderExtraCols: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {},
+                    folderExtraRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {},
                     files: filesWithSlots,
                     layout: {
-                        cols: Math.max(layout.cols, ugMaxCol + 1) + extraCols,
-                        rows: Math.max(layout.rows, ugMaxRow + 1) + extraRows,
+                        cols: Math.max(layout.cols + extraCols, ugMaxCol + 1),
+                        rows: Math.max(layout.rows + extraRows, ugMaxRow + 1),
                         slots: layout.slots
                     }
                 });
@@ -1599,33 +1629,53 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
 
                             if (layoutMode === "spanning_grid") {
-                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
-                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                                const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))));
-                                const wrapRows = msg.targetWrapRows || msg.targetGridRows || baseWrapRows;
-                                const maxAllowedCols = Math.max(2, (msg.targetGridCols || 2) + extraCols);
-                                const maxAllowedRows = Math.max(1, wrapRows + extraRows);
+                                const folderWrapRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {};
+                                if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
+                                    currentFolderOrder = msg.currentOrder;
+                                    if (typeof msg.wrapRows === "number") {
+                                        folderWrapRowsMap[msg.focusedFolder] = msg.wrapRows;
+                                        await context.workspaceState.update("thumbview.folderWrapRows", folderWrapRowsMap);
+                                    }
+                                } else {
+                                    const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                                    const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+                                    const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+                                    const extraCols = folderColsMap[msg.focusedFolder] || 0;
+                                    const extraRows = folderRowsMap[msg.focusedFolder] || 0;
+                                    const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))));
+                                    const wrapRows = folderWrapRowsMap[msg.focusedFolder] || msg.targetWrapRows || (baseWrapRows + extraRows);
+                                    const maxAllowedCols = Math.max(2, msg.targetGridCols || (Math.max(2, Math.ceil(Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))) * (16 / 9))) + extraCols));
+                                    const maxAllowedRows = Math.max(1, wrapRows, msg.targetGridRows || (baseWrapRows + extraRows));
 
-                                const res = reorderSpanningItems(
-                                    scopedIds,
-                                    currentFolderOrder,
-                                    savedAllocations,
-                                    msg.sourceId,
-                                    msg.targetCol,
-                                    msg.targetRow,
-                                    maxAllowedCols,
-                                    maxAllowedRows,
-                                    wrapRows
-                                );
-                                currentFolderOrder = res.newOrder;
+                                    const currentAllocations: { [id: string]: number } = { ...savedAllocations };
+                                    for (const f of scopedFiles) {
+                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount);
+                                    }
+
+                                    const res = reorderSpanningItems(
+                                        scopedIds,
+                                        currentFolderOrder,
+                                        currentAllocations,
+                                        msg.sourceId,
+                                        msg.targetCol,
+                                        msg.targetRow,
+                                        maxAllowedCols,
+                                        maxAllowedRows,
+                                        wrapRows
+                                    );
+                                    currentFolderOrder = res.newOrder;
+                                    folderWrapRowsMap[msg.focusedFolder] = res.rows;
+                                    await context.workspaceState.update("thumbview.folderWrapRows", folderWrapRowsMap);
+                                }
                             } else {
                                 const gridCols = Math.max(1, msg.targetGridCols || 1);
                                 const gridRows = Math.max(1, msg.targetGridRows || Math.ceil(currentFolderOrder.length / gridCols));
                                 const maxCapacity = gridCols * gridRows;
                                 const targetSlotIdx = (typeof msg.targetSlotIdx === "number" && msg.targetSlotIdx >= 0)
                                     ? msg.targetSlotIdx
-                                    : findSlotIndex(msg.targetCol, msg.targetRow, currentFolderOrder.length);
+                                    : (typeof msg.targetRow === "number" && typeof msg.targetCol === "number"
+                                        ? msg.targetRow * gridCols + msg.targetCol
+                                        : findSlotIndex(msg.targetCol, msg.targetRow, currentFolderOrder.length));
 
                                 currentFolderOrder = reorderFolderItems(
                                     currentFolderOrder,
@@ -1640,209 +1690,51 @@ export async function activate(context: vscode.ExtensionContext) {
 
                             folderOrders[msg.focusedFolder] = currentFolderOrder;
                             await context.workspaceState.update("thumbview.folderOrders", folderOrders);
-
-                            if (activePanel) {
-                                updateLayoutFromCache(activePanel);
-                            }
                         } else if (layoutMode === "spanning_grid") {
-                            const { ignorePatterns } = getIgnoreState();
-                            const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
-                            const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                            const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
-                            const currentLayout = buildSpanningGrid(activeFiles, fileOrder.getOrder(), savedAllocations, savedRows);
-                            const sourceCells = savedAllocations[msg.sourceId] || 1;
-                            const targetCells = msg.targetId ? (savedAllocations[msg.targetId] || 1) : 1;
-
-                            if (!msg.targetIsEmpty && mode === "shift" && sourceCells === targetCells) {
-                                fileOrder.move(msg.sourceId, msg.targetId);
+                            if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
+                                fileOrder.setOrder(msg.currentOrder);
+                                if (typeof msg.wrapRows === "number") {
+                                    await context.workspaceState.update("thumbview.spanningRows", msg.wrapRows);
+                                }
                             } else {
-                                const placementByFileId = new Map<string, (typeof currentLayout.placements)[0]>();
-                                const placementBySlot = new Map<string, (typeof currentLayout.placements)[0]>();
+                                const { ignorePatterns } = getIgnoreState();
+                                const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
+                                const activeFileIds = activeFiles.map(f => f.id);
+                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+                                const currentLayout = buildSpanningGrid(activeFiles, fileOrder.getOrder(), savedAllocations, savedRows);
+                                const sourceCells = savedAllocations[msg.sourceId] || 1;
+                                const targetCells = msg.targetId ? (savedAllocations[msg.targetId] || 1) : 1;
 
-                                for (const p of currentLayout.placements) {
-                                    placementByFileId.set(p.file.id, p);
-                                    for (const s of p.slots) {
-                                        placementBySlot.set(`${s[0]},${s[1]}`, p);
-                                    }
-                                }
-
-                                const sourcePlacement = placementByFileId.get(msg.sourceId);
-                                const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
-                                const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
-
-                                // Find if the drop lands on any occupied placement (including sub-cells of spanning files)
-                                let targetPlacement = placementBySlot.get(`${msg.targetCol},${msg.targetRow}`);
-                                if (targetPlacement && targetPlacement.file.id === msg.sourceId) {
-                                    targetPlacement = undefined;
-                                }
-
-                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
-                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                                const maxAllowedRows = Math.max(currentLayout.rows, currentLayout.wrapRows, savedRows || 0) + extraRows;
-                                const maxAllowedCols = Math.max(currentLayout.cols, 2) + extraCols;
-
-                                const clamped = clampTargetToGridCapacity(msg.targetCol, msg.targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
-                                const targetCol = targetPlacement ? targetPlacement.col : clamped.col;
-                                const targetRow = targetPlacement ? targetPlacement.row : clamped.row;
-
-                                let reqRows = currentLayout.wrapRows;
-                                for (const p of currentLayout.placements) {
-                                    reqRows = Math.max(reqRows, p.row + p.nCells);
-                                }
-                                const gridRows = Math.min(maxAllowedRows, Math.max(reqRows, targetRow + sourceCells));
-                                const maxCol = Math.min(maxAllowedCols - 1, Math.max(currentLayout.cols - 1, targetCol, sourceCol));
-
-                                // Build 2D column-major grid representing current spanning layout
-                                const grid: string[][] = [];
-                                for (let c = 0; c <= maxCol; c++) {
-                                    grid.push(new Array(gridRows).fill(""));
-                                }
-                                for (const p of currentLayout.placements) {
-                                    for (let i = 0; i < p.nCells; i++) {
-                                        if (p.row + i < gridRows && p.col <= maxCol) {
-                                            grid[p.col][p.row + i] = p.file.id;
-                                        }
-                                    }
-                                }
-
-                                // Identify all target files overlapping the incoming file span in targetCol
-                                const targetRaw = grid[targetCol].slice(targetRow, targetRow + sourceCells).filter(id => Boolean(id) && id !== msg.sourceId);
-                                const targetFileIds = Array.from(new Set(targetRaw));
-                                if (targetPlacement && !targetFileIds.includes(targetPlacement.file.id)) {
-                                    targetFileIds.push(targetPlacement.file.id);
-                                }
-
-                                if (targetFileIds.length === 0) {
-                                    for (let c = 0; c <= maxCol; c++) {
-                                        for (let r = 0; r < gridRows; r++) {
-                                            if (grid[c][r] === msg.sourceId) {
-                                                grid[c][r] = "";
-                                            }
-                                        }
-                                    }
-                                    for (let i = 0; i < sourceCells; i++) {
-                                        if (targetRow + i < gridRows) {
-                                            grid[targetCol][targetRow + i] = msg.sourceId;
-                                        }
-                                    }
-                                } else if (sourceCol === targetCol) {
-                                    for (let r = 0; r < gridRows; r++) {
-                                        if (grid[sourceCol][r] === msg.sourceId || targetFileIds.includes(grid[sourceCol][r])) {
-                                            grid[sourceCol][r] = "";
-                                        }
-                                    }
-                                    
-                                    const minRow = Math.min(sourceRow, targetRow);
-                                    if (sourceRow < targetRow) {
-                                        let curR = minRow;
-                                        for (const tid of targetFileIds) {
-                                            const tc = savedAllocations[tid] || 1;
-                                            for (let i = 0; i < tc; i++) {
-                                                if (curR + i < gridRows) grid[sourceCol][curR + i] = tid;
-                                            }
-                                            curR += tc;
-                                        }
-                                        for (let i = 0; i < sourceCells; i++) {
-                                            if (curR + i < gridRows) grid[sourceCol][curR + i] = msg.sourceId;
-                                        }
-                                    } else {
-                                        let curR = minRow;
-                                        for (let i = 0; i < sourceCells; i++) {
-                                            if (curR + i < gridRows) grid[sourceCol][curR + i] = msg.sourceId;
-                                        }
-                                        curR += sourceCells;
-                                        for (const tid of targetFileIds) {
-                                            const tc = savedAllocations[tid] || 1;
-                                            for (let i = 0; i < tc; i++) {
-                                                if (curR + i < gridRows) grid[sourceCol][curR + i] = tid;
-                                            }
-                                            curR += tc;
-                                        }
-                                    }
+                                if (!msg.targetIsEmpty && mode === "shift" && sourceCells === targetCells) {
+                                    fileOrder.move(msg.sourceId, msg.targetId);
                                 } else {
-                                    // Cross-column swap / displacement
-                                    const maxTargetSpan = targetFileIds.reduce((sum, tid) => sum + (savedAllocations[tid] || 1), 0);
-                                    const totalSpan = Math.max(sourceCells, maxTargetSpan);
+                                    const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                                    const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                                    const maxAllowedRows = msg.targetGridRows || (Math.max(currentLayout.rows, currentLayout.wrapRows, savedRows || 0) + extraRows);
+                                    const maxAllowedCols = msg.targetGridCols || (Math.max(currentLayout.cols, 2) + extraCols);
+                                    const wrapRows = savedRows || currentLayout.wrapRows;
 
-                                    let effectiveSourceRow = sourceRow;
-                                    if (sourceCells < maxTargetSpan) {
-                                        effectiveSourceRow = Math.max(0, Math.min(sourceRow, gridRows - totalSpan));
-                                        if (targetRow === 0 && sourceRow < totalSpan) {
-                                            effectiveSourceRow = 0;
-                                        }
+                                    const currentAllocations: { [id: string]: number } = { ...savedAllocations };
+                                    for (const f of activeFiles) {
+                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount);
                                     }
 
-                                    const sourceRaw = grid[sourceCol].slice(effectiveSourceRow, effectiveSourceRow + totalSpan).filter(id => Boolean(id) && !targetFileIds.includes(id));
-                                    const sourceFileIds = Array.from(new Set(sourceRaw));
-                                    if (!sourceFileIds.includes(msg.sourceId)) {
-                                        sourceFileIds.unshift(msg.sourceId);
-                                    }
+                                    const res = reorderSpanningItems(
+                                        activeFileIds,
+                                        fileOrder.getOrder(),
+                                        currentAllocations,
+                                        msg.sourceId,
+                                        msg.targetCol,
+                                        msg.targetRow,
+                                        maxAllowedCols,
+                                        maxAllowedRows,
+                                        wrapRows
+                                    );
 
-                                    // Clear sourceFileIds from sourceCol and targetFileIds from targetCol
-                                    for (let r = 0; r < gridRows; r++) {
-                                        if (sourceFileIds.includes(grid[sourceCol][r])) {
-                                            grid[sourceCol][r] = "";
-                                        }
-                                        if (targetFileIds.includes(grid[targetCol][r])) {
-                                            grid[targetCol][r] = "";
-                                        }
-                                    }
-
-                                    // Place sourceFileIds in targetCol
-                                    let curTargetR = targetRow;
-                                    for (const sid of sourceFileIds) {
-                                        const sidPlacement = placementByFileId.get(sid);
-                                        const offset = sidPlacement ? Math.max(0, sidPlacement.row - effectiveSourceRow) : (curTargetR - targetRow);
-                                        const destR = (sourceFileIds.length === 1 && sourceCells === 1) ? targetRow : (targetRow + offset);
-                                        const sc = savedAllocations[sid] || 1;
-                                        for (let i = 0; i < sc; i++) {
-                                            if (destR + i < gridRows) {
-                                                grid[targetCol][destR + i] = sid;
-                                            }
-                                        }
-                                        curTargetR += sc;
-                                    }
-
-                                    // Place targetFileIds in sourceCol
-                                    let curSourceR = effectiveSourceRow;
-                                    for (const tid of targetFileIds) {
-                                        const tidPlacement = placementByFileId.get(tid);
-                                        const offset = tidPlacement ? Math.max(0, tidPlacement.row - targetRow) : (curSourceR - effectiveSourceRow);
-                                        const destR = (targetFileIds.length === 1 && maxTargetSpan === 1 && targetPlacement && targetPlacement.row === targetRow)
-                                            ? (sourceCells === 1 ? sourceRow : effectiveSourceRow)
-                                            : (effectiveSourceRow + offset);
-                                        const tc = savedAllocations[tid] || 1;
-                                        for (let i = 0; i < tc; i++) {
-                                            if (destR + i < gridRows) {
-                                                grid[sourceCol][destR + i] = tid;
-                                            }
-                                        }
-                                        curSourceR += tc;
-                                    }
+                                    fileOrder.setOrder(res.newOrder);
+                                    await context.workspaceState.update("thumbview.spanningRows", res.rows);
                                 }
-
-                                // Reconstruct order array from grid in column-major order
-                                const newOrder: string[] = [];
-                                for (let c = 0; c <= maxCol; c++) {
-                                    let r = 0;
-                                    while (r < gridRows) {
-                                        const cell = grid[c][r];
-                                        if (cell) {
-                                            newOrder.push(cell);
-                                            const nCells = savedAllocations[cell] || 1;
-                                            r += nCells;
-                                        } else {
-                                            newOrder.push("");
-                                            r += 1;
-                                        }
-                                    }
-                                }
-                                while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
-                                    newOrder.pop();
-                                }
-
-                                await context.workspaceState.update("thumbview.spanningRows", gridRows);
-                                fileOrder.setOrder(newOrder);
                             }
                         } else {
                             if (msg.targetIsEmpty) {
@@ -1862,10 +1754,6 @@ export async function activate(context: vscode.ExtensionContext) {
                             } else {
                                 fileOrder.swap(msg.sourceId, msg.targetId);
                             }
-                        }
-
-                        if (activePanel) {
-                            updateLayoutFromCache(activePanel, forceBreakBeforeId);
                         }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to reorder file: ${err?.message ?? String(err)}`);
@@ -1951,9 +1839,15 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
                         };
 
+                        const isFolderTarget = !!msg.focusedFolder;
+                        const folderCardOrders = isFolderTarget
+                            ? (context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {})
+                            : {};
                         let cardOrder: string[] = [];
                         if (Array.isArray(msg.currentCardIds) && msg.currentCardIds.length > 0) {
                             cardOrder = [...msg.currentCardIds];
+                        } else if (isFolderTarget) {
+                            cardOrder = folderCardOrders[msg.focusedFolder] ? [...folderCardOrders[msg.focusedFolder]] : [];
                         } else {
                             cardOrder = context.workspaceState.get<string[]>("thumbview.cardOrder") || [];
                         }
@@ -1961,13 +1855,32 @@ export async function activate(context: vscode.ExtensionContext) {
                             cardOrder.push(msg.sourceId);
                         }
 
+                        if (msg.isSpanning) {
+                            if (isFolderTarget) {
+                                folderCardOrders[msg.focusedFolder] = cardOrder;
+                                if (typeof msg.wrapRows === "number") {
+                                    const folderCardWrapRows = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {};
+                                    folderCardWrapRows[msg.focusedFolder] = msg.wrapRows;
+                                    await context.workspaceState.update("thumbview.folderCardWrapRows", folderCardWrapRows);
+                                }
+                                await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
+                            } else {
+                                if (typeof msg.wrapRows === "number") {
+                                    await context.workspaceState.update("thumbview.cardWrapRows", msg.wrapRows);
+                                }
+                                await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+                            }
+                            return;
+                        }
+
                         if (msg.targetIsEmpty) {
                             const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
                             cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
-                            await context.workspaceState.update("thumbview.cardOrder", cardOrder);
-
-                            if (activePanel) {
-                                updateLayoutFromCache(activePanel);
+                            if (isFolderTarget) {
+                                folderCardOrders[msg.focusedFolder] = cardOrder;
+                                await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
+                            } else {
+                                await context.workspaceState.update("thumbview.cardOrder", cardOrder);
                             }
                             return;
                         }
@@ -1978,24 +1891,28 @@ export async function activate(context: vscode.ExtensionContext) {
                         if (srcIds.length > 0 && tgtIds.length > 0 && msg.sourceId !== msg.targetId) {
                             if (cardOrder.length > 0) {
                                 cardOrder = reorderCardItems(cardOrder, msg.sourceId, false, msg.targetId, 0, cardOrder.length);
-                                await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+                                if (isFolderTarget) {
+                                    folderCardOrders[msg.focusedFolder] = cardOrder;
+                                    await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
+                                } else {
+                                    await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+                                }
                             }
 
-                            const srcFirst = fullOrder.indexOf(srcIds[0]);
-                            const tgtFirst = fullOrder.indexOf(tgtIds[0]);
+                            if (!isFolderTarget) {
+                                const srcFirst = fullOrder.indexOf(srcIds[0]);
+                                const tgtFirst = fullOrder.indexOf(tgtIds[0]);
 
-                            if (srcFirst !== -1 && tgtFirst !== -1) {
-                                const remaining = fullOrder.filter(id => !srcIds.includes(id));
-                                const newTgtIdx = remaining.indexOf(tgtIds[0]);
-                                if (newTgtIdx !== -1) {
-                                    if (srcFirst < tgtFirst) {
-                                        remaining.splice(newTgtIdx + tgtIds.length, 0, ...srcIds);
-                                    } else {
-                                        remaining.splice(newTgtIdx, 0, ...srcIds);
-                                    }
-                                    fileOrder.setOrder(remaining);
-                                    if (activePanel) {
-                                        updateLayoutFromCache(activePanel);
+                                if (srcFirst !== -1 && tgtFirst !== -1) {
+                                    const remaining = fullOrder.filter(id => !srcIds.includes(id));
+                                    const newTgtIdx = remaining.indexOf(tgtIds[0]);
+                                    if (newTgtIdx !== -1) {
+                                        if (srcFirst < tgtFirst) {
+                                            remaining.splice(newTgtIdx + tgtIds.length, 0, ...srcIds);
+                                        } else {
+                                            remaining.splice(newTgtIdx, 0, ...srcIds);
+                                        }
+                                        fileOrder.setOrder(remaining);
                                     }
                                 }
                             }
@@ -2007,10 +1924,27 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "expandSpace") {
                     try {
-                        const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
-                        const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                        await context.workspaceState.update("thumbview.extraCols", curCols + 1);
-                        await context.workspaceState.update("thumbview.extraRows", curRows + 1);
+                        const targetFolder = typeof msg.focusedFolder === "string" ? msg.focusedFolder : "";
+                        if (targetFolder) {
+                            const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+                            const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+                            folderColsMap[targetFolder] = (folderColsMap[targetFolder] || 0) + 1;
+                            folderRowsMap[targetFolder] = (folderRowsMap[targetFolder] || 0) + 1;
+                            await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
+                            await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
+
+                        } else {
+                            const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                            const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                            await context.workspaceState.update("thumbview.extraCols", curCols + 1);
+                            await context.workspaceState.update("thumbview.extraRows", curRows + 1);
+                            const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+                            const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+                            folderColsMap[""] = curCols + 1;
+                            folderRowsMap[""] = curRows + 1;
+                            await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
+                            await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
+                        }
                         vscode.window.showInformationMessage("Expanded grid space.");
                         if (activePanel) {
                             updateLayoutFromCache(activePanel);
@@ -2022,10 +1956,28 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "reduceSpace") {
                     try {
-                        const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
-                        const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                        await context.workspaceState.update("thumbview.extraCols", Math.max(0, curCols - 1));
-                        await context.workspaceState.update("thumbview.extraRows", Math.max(0, curRows - 1));
+                        const targetFolder = typeof msg.focusedFolder === "string" ? msg.focusedFolder : "";
+                        if (targetFolder) {
+                            const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+                            const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+                            const curCols = folderColsMap[targetFolder] || 0;
+                            const curRows = folderRowsMap[targetFolder] || 0;
+                            folderColsMap[targetFolder] = Math.max(0, curCols - 1);
+                            folderRowsMap[targetFolder] = Math.max(0, curRows - 1);
+                            await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
+                            await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
+                        } else {
+                            const curCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                            const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                            await context.workspaceState.update("thumbview.extraCols", Math.max(0, curCols - 1));
+                            await context.workspaceState.update("thumbview.extraRows", Math.max(0, curRows - 1));
+                            const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+                            const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+                            folderColsMap[""] = Math.max(0, curCols - 1);
+                            folderRowsMap[""] = Math.max(0, curRows - 1);
+                            await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
+                            await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
+                        }
                         vscode.window.showInformationMessage("Reduced grid space.");
                         if (activePanel) {
                             updateLayoutFromCache(activePanel);
@@ -2089,7 +2041,35 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 if (msg.command === "reflow") {
                     try {
-                        await vscode.commands.executeCommand("thumbview.reflow");
+                        const targetFolder = typeof msg.focusedFolder === "string" ? msg.focusedFolder : "";
+                        if (targetFolder) {
+                            const folderOrders = context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {};
+                            const folderWrapRows = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {};
+                            const folderCardOrders = context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {};
+                            const folderCardWrapRows = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {};
+                            const folderExtraCols = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+                            const folderExtraRows = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+
+                            delete folderOrders[targetFolder];
+                            delete folderWrapRows[targetFolder];
+                            delete folderCardOrders[targetFolder];
+                            delete folderCardWrapRows[targetFolder];
+                            delete folderExtraCols[targetFolder];
+                            delete folderExtraRows[targetFolder];
+
+                            await context.workspaceState.update("thumbview.folderOrders", folderOrders);
+                            await context.workspaceState.update("thumbview.folderWrapRows", folderWrapRows);
+                            await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
+                            await context.workspaceState.update("thumbview.folderCardWrapRows", folderCardWrapRows);
+                            await context.workspaceState.update("thumbview.folderExtraCols", folderExtraCols);
+                            await context.workspaceState.update("thumbview.folderExtraRows", folderExtraRows);
+
+                            if (activePanel) {
+                                await updateLayoutFromCache(activePanel);
+                            }
+                        } else {
+                            await vscode.commands.executeCommand("thumbview.reflow");
+                        }
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Failed to reflow layout: ${err?.message ?? String(err)}`);
                     }
@@ -2186,9 +2166,15 @@ export async function activate(context: vscode.ExtensionContext) {
         await context.workspaceState.update("thumbview.spanningAllocations", undefined);
         await context.workspaceState.update("thumbview.spanningRows", undefined);
         await context.workspaceState.update("thumbview.cardOrder", undefined);
+        await context.workspaceState.update("thumbview.cardWrapRows", undefined);
         await context.workspaceState.update("thumbview.folderOrders", undefined);
+        await context.workspaceState.update("thumbview.folderWrapRows", undefined);
+        await context.workspaceState.update("thumbview.folderCardOrders", undefined);
+        await context.workspaceState.update("thumbview.folderCardWrapRows", undefined);
         await context.workspaceState.update("thumbview.extraCols", undefined);
         await context.workspaceState.update("thumbview.extraRows", undefined);
+        await context.workspaceState.update("thumbview.folderExtraCols", undefined);
+        await context.workspaceState.update("thumbview.folderExtraRows", undefined);
         lastSpanningPlacements = [];
 
         if (activePanel) {
@@ -2205,6 +2191,12 @@ export async function activate(context: vscode.ExtensionContext) {
         const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
         await context.workspaceState.update("thumbview.extraCols", curCols + 1);
         await context.workspaceState.update("thumbview.extraRows", curRows + 1);
+        const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+        const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+        folderColsMap[""] = curCols + 1;
+        folderRowsMap[""] = curRows + 1;
+        await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
+        await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
         vscode.window.showInformationMessage("Expanded grid space.");
         if (activePanel) {
             updateLayoutFromCache(activePanel);
@@ -2217,6 +2209,12 @@ export async function activate(context: vscode.ExtensionContext) {
         const curRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
         await context.workspaceState.update("thumbview.extraCols", Math.max(0, curCols - 1));
         await context.workspaceState.update("thumbview.extraRows", Math.max(0, curRows - 1));
+        const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+        const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+        folderColsMap[""] = Math.max(0, curCols - 1);
+        folderRowsMap[""] = Math.max(0, curRows - 1);
+        await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
+        await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
         vscode.window.showInformationMessage("Reduced grid space.");
         if (activePanel) {
             updateLayoutFromCache(activePanel);

@@ -197,9 +197,121 @@ When dragging cards in subfolder cards overview, the host synchronizes `thumbvie
 1. **Uniform 1-cell layout**: In subfolder cards mode (`cellsTooSmall === true`), all folder cards and root file tiles render with uniform 1-cell dimensions (`localCellH = availableH / cardRows`). This maintains a clean, uniform visual hierarchy and predictable grid alignment across all cards.
 2. **In-Folder Drag Stability**: Within a subfolder card or folder drill-down view (`focusedFolder`), dragging and dropping files strictly respects the layout's column wrap stride (`gridRows = wrapRows`). Swapping two files places the target item into the source file's vacated slot so neither file is lost or shifted. Moving a file to an empty space preserves the exact coordinates of all other files in the folder without cascading downstream tiles into adjacent columns. Folder file reorders update `thumbview.folderOrders` without mutating the workspace-wide `fileOrder`.
 
+## Leaf Node Folder Spanning Grid Representations
+
+When viewing or drilling down into a folder at the leaf node of subdirectories (a directory that contains only files, with no child subdirectories), subfolder cards mode cannot apply because there are no child folders to represent as cards. The files within leaf node folders strictly retain their spanning grid representation (`localSpanningLayout`) with multi-cell heights reflecting line counts. In subfolder cards overview, preview tiles inside leaf node folder cards also render spanning grid representations.
+
+## Dynamic Tile Height Expansion on Line Count Growth
+
+Adding lines to a file dynamically refreshes cell allocations via `cellsNeeded(f.lineCount)`. Stale persisted allocations in `workspaceState` are refreshed before calling `buildSpanningGrid`, allowing tiles to expand dynamically from 1 cell up to multi-cell heights (e.g. 9 cells for a 10,000 line file). Tolerances (`+ 1px`) on vertical bounds checks prevent IEEE 754 floating-point rounding errors (`(availableH / gridRows) * gridRows > availableH`) from triggering false-positive overflow collapses.
+
+## Nested Folder Cards & Variable Spanning Heights in Previews
+
+In folder cards mode, parent folder cards inspect child subdirectories using `getSubfolderGroups(group.files, group.path)`. When child subfolders exist, mini folder cards are rendered inside the preview mosaic rather than flattening all recursive files into a single flat grid. Additionally, preview files preserve variable spanning heights (`nCells` derived from `cellsNeeded(f.lineCount)`) through `buildSpanningGridLocal` so files of different lengths (e.g. 1-tile vs 3-tiles tall) accurately reflect their proportional heights within folder card previews.
+
+## In-Folder Grid Sizing & Empty Slot Targeting
+
+In folder drill-down uniform views, `localFolderGrid` generates slots spanning the entire grid dimensions (`folderCols * folderRows`), rather than capping at `scopedFiles.length`. This ensures that coordinates for empty grid slots resolve to valid slot indexes (`slotIdx !== -1`), preventing dropped tiles from defaulting to top-left positions. In both spanning and uniform folder views, drops route through `thumbview.folderOrders[focusedFolder]` with up-to-date line count allocations.
+
+## Drag-and-Drop Latency Elimination (Instant Pickup, Optimistic Release, Memoized Ignores)
+
+1. **Instant Pickup Snapshot**: When a drag gesture crosses `DRAG_THRESHOLD`, the webview immediately blits the current canvas into `cachedDragBackgroundCanvas`, dims the candidate tile, and assigns `dragBackgroundCanvas = cachedDragBackgroundCanvas`. The very first frame of dragging utilizes the snapshot blit, eliminating the full-canvas synchronous redraw that previously caused pickup stutter.
+2. **Optimistic In-Memory Drop**: On `mouseup`, `media/overview.js` updates `data.folderOrders[focusedFolder]` in memory immediately before rendering, providing instant zero-latency visual confirmation of the new position while the extension host persists changes asynchronously.
+3. **Memoized Ignore Counts**: The extension host caches `computeIgnoreCounts` results keyed by pattern set and file count, eliminating redundant $O(N \cdot M)$ regex sweeps across the workspace during drag reorders.
+
+## Folder Card Preview Fidelity with Drill-Down Views (`doesFolderCollapse`)
+
+The purpose of a folder card preview is to provide users with a 1:1 preview of what they will see when they click into that folder. Previously, preview generation unconditionally rendered nested subfolder cards if any child folders existed, even when drilling down into the folder would lay out all files individually because the file count was small enough to fit within comfortable cell dimensions.
+To ensure total visual consistency, both folder card previews and folder drill-down views rely on a shared single source of truth: `doesFolderCollapse(files, folderPath)`. If `doesFolderCollapse` returns false, the preview displays all individual files with their accurate proportional spanning heights using `buildSpanningGridLocal`. If `doesFolderCollapse` returns true (e.g. dense directories with child subfolders that would exceed readability thresholds), the preview uses the exact same row-major `buildStableGrid` layout that subfolder card mode uses, ensuring child folder cards appear in their identical positions (e.g. straight line along the bottom) rather than an artificial column-major L-shape.
+
+## Window, Sidebar, and Terminal Resize Stability & Readability Collapse
+
+Resizing VS Code's window, dragging sidebar edges, or toggling terminal panels smoothly scales the visible tiles without rearranging them into different rows or columns:
+1. **Constant Grid Aspect Ratio (`BASE_GRID_ASPECT = 16 / 9`)**: Enforcing a constant `BASE_GRID_ASPECT = 16 / 9` across `buildSpanningGridLocal` and `buildStableGrid` ensures that layout slots `(col, row)` remain invariant. Cell dimensions scale proportionally (`availableW / cols`, `availableH / rows`), eliminating reflow.
+2. **Readability-Triggered Collapse on Window Shrink**: When reducing the IDE window to the point where files become physically unreadable (`cellW < minCellWidth || cellH < minCellHeight`), views containing child subdirectories collapse into folder thumbnail cards. This allows dense or leaf folders with subdirectories to stay accessible when screen real estate is constrained, while avoiding reflow on minor window adjustments.
+
+## Folder Card Reordering, Empty Rows Below, & Grid Space Clamping
+
+1. **Capacity Allocation for Rows Below**: In subfolder cards mode, `buildStableGrid` bases its capacity on `Math.max(orderedItems.length, displayItems.length, effectiveCardOrder.length)`. This ensures that when cards are dropped into empty rows below, the grid allocates sufficient rows and slots, preventing cards from vanishing and keeping rows below fully addressable by drag-and-drop targeting.
+2. **Strict Grid Column Clamping on Drag**: The maximum column allowable during drag operations (`maxAllowedCols`) is strictly clamped to the active rendered grid columns (`targetGridCols`). It never duplicates `extraCols`, preventing rightward drags from generating phantom columns. Grid expansion is strictly preserved as a manual user action via right-click > "Expand Grid Space".
+3. **Card Reordering Scoped to Folder**: Swapping items within a folder card updates `thumbview.folderOrders[folder]` without mutating global root `fileOrder`, isolating folder-level arrangements from workspace-wide layout state.
+
+## Mouse Side Button Navigation Deduplication
+
+Mouse button 3 (Back) and button 4 (Forward) events are handled exclusively in `mouseup`. In standard browser DOM, physical clicks emit `mouseup` immediately followed by `auxclick`. Handling both resulted in double-firing `handleBreadcrumbBack()`, skipping two history levels in a single click. Suppressing the action in `auxclick` guarantees clean 1:1 step-back navigation per physical click.
+
+## Zero-Flicker 2D Spanning Drag-and-Drop Reordering
+
+Dragging files in spanning mode previously caused visual stutter: untouched files in adjacent rows/columns momentarily shifted into incorrect positions on `mouseup`, only to jump back to their correct positions a fraction of a second later when the host confirmation arrived.
+1. **Root Cause**: The webview performed a naive 1D array swap or row-major index insertion on a column-major spanning list on `mouseup`. When `buildSpanningGridLocal` repacked the list sequentially, variable-height tiles spilled across column boundaries, shifting untouched files.
+2. **Local 2D Spanning Calculation (`reorderSpanningItemsLocal`)**: The webview now mirrors the host's `reorderSpanningItems` logic directly on `mouseup`. It constructs the 2D column-major grid, swaps the source and target items without disturbing any other cell, and updates in-memory order. Untouched files remain strictly locked to their exact `(col, row)` coordinates.
+3. **Synchronous Host Dispatch**: `extension.ts` calls `updateLayoutFromCache(activePanel)` synchronously before awaiting asynchronous `context.workspaceState.update(...)` disk writes, reducing host confirmation latency from 300ms to < 2ms and matching the webview's optimistic layout with zero visual jump.
+
+## Folder Card Order & File Order State Isolation (`thumbview.folderCardOrders`)
+
+Previously, inside folder drill-downs, `thumbview.folderOrders[folder]` was shared between the uncollapsed file view (e.g. 50 files) and the collapsed folder card view (e.g. 3 cards). When a folder collapsed, `effectiveCardOrder` inherited the 50 file IDs, generating 50 items in `displayItems`. The grid was sized for 50 items (10x5 grid), causing cards to squish into tiny corner slivers and leaving 47 slots empty.
+1. **Isolated Persistence Keys**: Folder card ordering is stored in dedicated `thumbview.folderCardOrders[folder]`, while uncollapsed file ordering remains in `thumbview.folderOrders[folder]`.
+2. **Safe Card Filtering & Canvas Sizing**: When `cellsTooSmall` is active, `effectiveCardOrder` filters out stale or unmapped IDs from previous file views. `totalItems` strictly equals the count of actual subfolder cards and root files (e.g. 4), sizing the grid to 2x2 and allowing cards to expand to 100% of the available canvas width and height.
+
+## Pure Zoom Grid Expansion & Zero-Reflow Scaling
+
+The user specification requires that "Expand Grid Space" and "Reduce Grid Space" act purely as zooming out or in, adding or subtracting space symmetrically along both rows and columns to maintain the 16:9 aspect ratio, scaling all files down into the top-left corner without ever reflowing or rearranging their positions.
+1. **Root Cause of Unbalanced Reflow**: Previously, `triggerExpandSpace` and `triggerReduceSpace` invoked `expandSpanningGridOrderLocal` and `reduceSpanningGridOrderLocal`, which modified 1D order arrays, injected empty placeholders `""`, altered `wrapRows`, and in reduce mode deleted files placed beyond the reduced dimensions. Changing `wrapRows` altered the column packing stride, causing line breaks (`currRow + nCells > wrapRows`) to occur at completely different file boundaries and violently reflowing tiles.
+2. **Pure Zoom Architecture**:
+   - `triggerExpandSpace()` and `triggerReduceSpace()` purely adjust `extraCols` and `extraRows` (+1 / -1), leaving `data.fileOrder`, `data.cardOrder`, `data.folderOrders`, and all `wrapRows` 100% untouched.
+   - When expanding (zooming out), 1 column and 1 row are added (`extraCols + 1`, `extraRows + 1`). Tiles shrink slightly and move towards the top-left corner, opening empty rows and columns to the right and bottom while maintaining the aspect ratio.
+   - When reducing (zooming in), 1 column and 1 row are removed (`extraCols - 1`, `extraRows - 1`), clamped so `extraCols >= 0` and `extraRows >= 0`, never reducing below the base bounding box or cutting off placed files.
+   - Placements in `buildSpanningGridLocal` and `buildSpanningGrid` maintain identical coordinates because `wrapRows` remains stable.
+   - Spanning layout dimensions in `updateLayoutFromCache` symmetrically apply `extraCols` and `extraRows`: `cols: layout.cols + extraCols`, `rows: layout.rows + extraRows`.
+
+## Spanning Grid Representation in Folder Card Views (`cellsTooSmall`)
+
+Wherever folder cards appear in the current view (root overview or drill-down with collapsed subdirectories), Thumbview supports spanning grid mode:
+1. **Heterogeneous Item Spanning**:
+   - Folder cards occupy 1 unit tall (`nCells: 1`) to preserve clear visual boundaries and consistent card preview mosaic dimensions.
+   - Individual files expand proportionally to their line counts (`nCells = cellsNeeded(f.lineCount)`), allowing long files (e.g. 1,000+ lines) to span multiple cells tall (`localCellH * nCells`).
+2. **Unified 2D Spanning Drag & Drop**:
+   - When in spanning grid mode in folder card view, drag-and-drop operations utilize `reorderSpanningItemsLocal` with 2D coordinate stability. Dragging multi-cell files or folder cards swaps or places items in target slots without reflowing or losing 2D grid alignments.
+   - State is persisted via `thumbview.cardOrder`, `thumbview.cardWrapRows`, `thumbview.folderCardOrders`, and `thumbview.folderCardWrapRows`.
+3. **Multi-Tile Spanning Swap with Relative Gap Preservation**:
+   - When a multi-cell tile (e.g. 5 cells tall) swaps into a column overlapping multiple smaller tiles and empty spaces (e.g. `[1; 0; 1; 1; 0]`), all items overlapping the incoming target span $[finalTargetRow \dots finalTargetRow + sourceCells - 1]$ are collected.
+   - Displaced items are placed into the source column using their exact relative row offsets $\Delta r = item.row - finalTargetRow$, preserving the gaps and orientation relative to one another (e.g. `[1; 0; 1; 1; 0]`) rather than collapsing into `[1; 1; 1; 0; 0]`.
+
+## Instantaneous Drag-and-Drop Interaction Architecture
+
+File and folder drag-and-drop operations must feel completely instantaneous with zero perceptible latency.
+1. **Low-Latency Pickup Initiation**: `DRAG_THRESHOLD` is set to 3px. When crossed, the webview immediately builds the cached background canvas, calculates drag targets, and renders synchronously on the pickup frame rather than waiting for an asynchronous animation frame request.
+2. **Fast-Path Drag Move Routing**: At the very top of the `canvas` `mousemove` listener, active dragging (`draggingFile || draggingFolder`) immediately updates cursor position and schedules a requestAnimationFrame redraw, completely bypassing $O(N)$ hit-testing (`findFileAt`), window focus checks, and tooltip evaluations.
+3. **Optimistic Synchronous Reordering & Immediate `slotOccupancy` Updates**:
+   - On `mouseup`, if a tile is dropped back onto its starting slot, the gesture is instantly dismissed without sending unnecessary IPC messages to the extension host.
+   - When dropped into a new slot, the webview synchronously updates `srcFile.slot`, `srcFile.slots`, `tgtFile.slot`, `tgtFile.slots`, `slotOccupancy`, and local order arrays before rendering immediately. Synchronously updating `slotOccupancy` ensures subsequent mouse events and rapid-succession swaps hit-test against up-to-date file coordinates.
+   - Affected file positions are recorded in `userReorderedFileSlots`.
+4. **Elimination of Host Roundtrip Lag and Revert Glitch**:
+   - On `reorderFile` and `swapCardItems`, `src/extension.ts` directly updates `workspaceState` and `fileOrder` without invoking `updateLayoutFromCache`. This eliminates expensive git diff rescans, diagnostic indexing, and multi-megabyte IPC `data` serialization on every drop.
+   - When external `command: "data"` messages arrive (e.g. on file save), `applyDataMessage` checks `userReorderedFileSlots` and preserves user-reordered file positions, preventing race conditions where rapid successive swaps would revert the canvas to an earlier state before re-swapping ~2 seconds later.
+5. **Deferred IPC Data Synchronization**: Full extension host `data` broadcast processing in the webview is deferred while dragging is active (`pendingDataMsg`), preventing in-flight host payloads from interrupting user drag gestures or causing visual stutter.
+
+## Scoped Layer Grid Space Architecture (`thumbview.folderExtraCols` & `thumbview.folderExtraRows`)
+
+Expanding and reducing grid space is strictly scoped to the active layer (the root overview or a specific folder drill-down).
+1. **Per-Layer Space State Isolation**:
+   - `thumbview.extraCols` and `thumbview.extraRows` (or `folderExtraCols[""]` / `folderExtraRows[""]`) track extra dimensions for the root directory.
+   - `thumbview.folderExtraCols[folderPath]` and `thumbview.folderExtraRows[folderPath]` track extra dimensions for individual folders (e.g. `"src/"`).
+2. **Layer Switching & Space Restoration**:
+   - When the user is in the root directory, files fill available canvas space as much as possible with 0 extra empty rows/cols unless root was explicitly expanded.
+   - When expanding space inside `"src/"`, `folderExtraCols["src/"]` and `folderExtraRows["src/"]` are incremented without modifying root state or other folders.
+   - Navigating back to root restores root's default unexpanded layout. Navigating into `"src/"` restores its expanded empty row and column, allowing tiles to be dropped into those empty slots.
+   - Folder thumbnail card previews in overview isolate previews by reading `group.path`'s dimensions, preventing root expansions from affecting subfolder cards and vice-versa.
+
+## Leaf Folder Mode & Subfolder Card False-Positive Prevention
+
+Leaf folders (directories that contain only files, with zero child subdirectories) cannot collapse into subfolder cards mode.
+1. **Strict `hasSubfolders` Guard**: In `overview.js`, `cellsTooSmall` requires `hasSubfolders = subfolderInfo.folders && subfolderInfo.folders.length > 0`. Even when canvas width or height shrinks below minimum cell thresholds, a folder with 0 child subdirectories strictly remains in directory drill-down mode (`shouldOpenFolder`), rendering all files individually with `localSpanningLayout`.
+2. **State & Reorder Isolation**: Leaf folder drags route strictly through `reorderFile` and `thumbview.folderOrders`, eliminating the bug where leaf folders were treated as folder cards, dispatching `swapCardItems` to `folderCardOrders` and scrambling files.
+3. **Grid Capacity Stability**: In folder card mode, `totalItems` is strictly clamped to `orderedItems.length`, preventing empty slot holes in `displayItems` from inflating the grid capacity or triggering unwanted grid expansion when cards/tiles are moved to empty slots.
+
 ## Known limitations / accepted tradeoffs
 
 - **Unit test suite**: Core logic is covered by automated unit tests in `src/test/` run via `npm run test:unit`. End-to-end webview testing relies on VS Code Extension Host integration.
 - **`MiniLine.category`** (`scanner.ts`) is computed host-side but not read by the webview, which does its own independent tokenization. Left unresolved as either dead code or an unfinished feature — see the comment at its definition.
 - **No shared type definitions for the `postMessage` protocol** between `extension.ts` and `media/overview.js` (see CLAUDE.md's "Cross-module interface" note) — protocol drift is caught only by manual review/testing, not the compiler.
-

@@ -5,26 +5,25 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.6] - 2026-09-03
+## [0.4.6] - 2026-09-09
+
+### Added
+- Mouse buttons 3 and 4 support to step backward and forward through folder drill-down history.
+- Expandable directory tree and file counts in the ignored patterns popover.
+
+### Changed
+- Grid space expansion and reduction now scale rows and columns like a camera zoom. Existing tiles shrink toward the top left while new rows and columns appear on the bottom and right, preserving relative positions without reflow.
+- Grid expansion is scoped per folder, so adding space inside a subdirectory leaves the root view untouched.
+- Folder card previews mirror the drill-down view, including line-height spanning tiles and nested subfolder cards.
 
 ### Fixed
-- **Spanning Grid Layout Row Balancing on Unignore**: Fixed an issue where unignoring large folders placed all newly visible tiles into distant columns to the right of existing rows instead of distributing across rows and columns. Reset persisted spanning row state upon unignoring and allowed wrap rows to scale with large item counts.
-- **Subfolder Card Threshold Restoration**: Restored default minimum cell dimensions to 60x40px so large workspaces collapse into subfolder cards when cells become too dense rather than shrinking tiles excessively.
-- **Empty Space Drag and Drop with Collapsed Folders**: Enabled dropping file tiles and folder cards onto empty slots both in the overview subfolder cards mode and within folder drill-down views, preserving gaps and relative positions without unintended reflows.
-- **Strict Grid Space Bounds on Drag**: Dragging files to empty spaces now strictly stays within existing grid capacity without increasing rows or columns. Right click > Expand Grid Space is enforced as the sole mechanism for expanding grid space.
-- **Expand / Reduce Grid Buttons in Collapsed Folders**: Extended subfolder card slot generation to cover full expanded grid dimensions (`cardCols * cardRows`), fixing non-functional expand/reduce space buttons when collapsed folders are present.
-- **Folder Drag and Drop Animation**: Aligned folder card dragging visual feedback with source file cards by computing cursor grab offsets to avoid snapping and applying `BORDER_STYLES.dragging` styling.
-- **Folder Mini-Mosaic Internal Arrangement**: Enhanced collapsed folder card previews to mirror the exact internal file layout, manual position overrides, and empty gaps (`""`).
-- **File Navigator Expandable Trees & Optimistic Ignore**: Added disclosure arrows to inspect and ignore individual files from the webview navigator popover, with immediate optimistic UI updates across both navigation and ignored pattern columns.
-- **Ignored Patterns File Counts**: Displayed matching workspace file count badges and tooltips in both the sidebar TreeView and the webview ignored patterns list.
-- **Mouse Side Button Breadcrumb Navigation**: Mapped mouse buttons 3 and 4 to step backward and forward through folder drill-down history.
-- **Top Toolbar & Ignore Filter Consistency**: Added SVGs for toolbar actions and excluded compiler and test cache directories from automatic dense folder scanning.
-- **Position Stability on Folder Unignore**: Existing file cards strictly maintain their original `(col, row)` coordinates when unignoring folders. Newly unignored files populate remaining empty rows below existing cards before adding new columns to the right.
-- **Tall File Vertical Overflow Protection**: Tall spanning files that exceed available vertical canvas space automatically trigger subfolder cards mode, preventing files from clipping offscreen or disappearing when vertical height shrinks.
-- **Drag-and-Drop Interaction Performance**: Added pre-tokenized line caching (`fileTokenCache`) and reusable offscreen background canvas buffers (`cachedDragBackgroundCanvas`), eliminating synchronous re-tokenization lag during file card pickup and drop gestures.
-- **Folder Cards Empty Space Targeting**: Dragging and dropping files into empty spaces within folder card overviews and folder drill-downs preserves exact target slot indexes, preventing cards from jumping to the far right.
-- **Subfolder Cards Mode Uniform Layout**: Reverted spanning grid in subfolder cards mode back to a uniform 1-cell height for all cards and files, ensuring consistent visual alignment.
-- **In-Folder Drag and Drop Stability**: Fixed an issue where dragging and dropping files within a subfolder card or folder drill-down view changed the position of all other files. `reorderSpanningItems` now preserves target file positions on tile swaps without deleting items from the order array, and bounds row heights to `wrapRows` so column wrapping stride is preserved. Folder file moves update `thumbview.folderOrders` without corrupting workspace `fileOrder`.
+- Folder view aspect ratio and right-side void after reflow.
+- Grid row height freeze when expanding space inside a reflowed folder view.
+- Rapid successive drag swaps by updating slot occupancy in memory immediately upon drop.
+- Multi-cell tile swaps collapsing empty gaps and shifting unrelated files.
+- False folder card grouping in leaf folders with no subdirectories.
+- Canvas expansion when dragging tiles into bottom empty rows or far-right columns.
+- Window and sidebar resizing reflowing tiles across columns.
 
 ## [0.4.5] - 2026-08-31
 
@@ -48,8 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.3] - 2026-08-29
 
 ### Added
-- **Unified Folders & Ignored Side-by-Side Modal**: Combined the separate `📁 Folders` and `👁 Ignored` top toolbar buttons into a single `📁 Folders & Ignored` button opening a two-column glassmorphic modal. The left column lists active folders shown in Thumbview with file counts, click-to-isolate actions, and single-click ignore buttons. The right column lists all ignored folders and glob patterns with folder icons, an inline pattern input with an Add button, and one-click unignore buttons.
-- **Automated Spanning Reordering Test Suite**: Added a comprehensive automated unit test suite in `src/test/spanning_reorder.test.ts` and `npm run test:unit` verifying intra-column, cross-column, multi-tile displacement, and empty-slot movements.
+- **Unified Folders & Ignored Side-by-Side Modal**: Combined the separate Folders and Ignored top toolbar buttons into a single Folders & Ignored button opening a two-column glassmorphic modal. The left column lists active folders shown in Thumbview with file counts, click-to-isolate actions, and single-click ignore buttons. The right column lists all ignored folders and glob patterns with folder icons, an inline pattern input with an Add button, and one-click unignore buttons.
+- **Automated Spanning Reordering Test Suite**: Added a unit test suite in `src/test/spanning_reorder.test.ts` and `npm run test:unit` verifying intra-column, cross-column, multi-tile displacement, and empty-slot movements.
 
 ### Fixed
 - **Spanning Grid Aspect-Ratio Scaling**: Grid dimensions now expand proportionally in both horizontal and vertical directions when adding space, maintaining natural code aspect ratios without shifting existing tiles.
@@ -65,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Top Toolbar Navigation & Controls**: Added top toolbar controls with directory navigator, pattern manager, and interactive `⚙ Settings` modal directly on the webview toolbar. Allows switching layout modes (Spanning vs Uniform Grid), drag-to-reorder modes (Swap vs Shift), media thumbnails toggle, layout reflow, and full folder/ignore management.
-- **Drag-and-Drop Tile Reordering**: Click-drag any file tile onto another to reorder the grid. Two modes — Swap (the dragged tile and the drop target trade places) and Shift (the dragged tile inserts at the drop target, everything between shifts over by one) — toggle via the Command Palette, settings modal, or sidebar links. Works in both Uniform and Spanning grid layouts, persists across rescans and reloads, and shows a live ghost of the dragged tile plus an outline on the current drop target while dragging.
+- **Drag-and-Drop Tile Reordering**: Click-drag any file tile onto another to reorder the grid. Two modes, Swap and Shift, toggle via the Command Palette, settings modal, or sidebar links. Swap trades tile positions, while Shift inserts at the target and shifts items between. Works in both Uniform and Spanning grid layouts, persists across rescans and reloads, and shows a live ghost of the dragged tile plus an outline on the current drop target while dragging.
 - **Empty Grid-Slot Drag Placement**: Users can drop file tiles into empty slots across both Uniform and Spanning grid modes. Dropping a tile to an empty space leaves an empty space where it came from so surrounding files do not reflow.
 - **Git Status & Diff Tracking**: Visual gutter markers and status badges for modified, added, untracked, and deleted files with real-time Git repository change detection.
 - **Theme Color Centralization & Fixed Brand Accents**: All webview HTML/CSS and canvas UI chrome colors now derive dynamically from the user's active VS Code theme (`--vscode-*`), automatically adapting across Dark+, Light+, and High Contrast themes. Three fixed brand accents are defined in `src/colors.ts`: search highlight (`#dc267f`), magnifier inspection (`#785ef0`), and open-tab recency (`#fe6100`).
@@ -75,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stale WorkspaceState Keys for Spanning Layout**: Fixed stale `repomap.spanningAllocations` and `repomap.spanningRows` reads in `extension.ts` so persisted spanning allocations and row calculations reliably load from `thumbview.*`.
 - **Sidebar Remaining Visible in Zen Mode**: Removed the automatic sidebar un-hiding in `enterFullscreen()`, ensuring the left sidebar stays hidden during Zen mode for a true full-canvas view.
 - **Split Code Editors Visible to the Right in Zen Mode**: Enforced `zenMode.singleTabGroup: true` in `forceZenSettings()`, ensuring split editor groups to the right are hidden on enter and restored on exit.
-- **Active-File Border Never Showing**: The purple "this file is open in the editor" tile border relied on VS Code's live active-editor state, which is never set to a real file while Thumbview itself has focus — so it never actually worked. Now tracks the last real editor that had focus before Thumbview took over.
+- **Active-File Border Never Showing**: The active-file border now tracks the last editor that had focus before opening Thumbview, fixing an issue where the open-file border never appeared while Thumbview was focused.
 
 ## [0.4.1] - 2026-08-07
 
@@ -91,23 +90,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-08-07
 
 ### Changed
-- **Always-Fullscreen Thumbview via Zen Mode**: Opening Thumbview now takes over the whole workbench — Zen Mode hides sidebars, panel/terminal, and auxiliary bar, and split editor groups are maximized — instead of only maximizing the editor group. Zen Mode natively snapshots and restores the exact prior layout on exit (extensions cannot read workbench visibility state, so VS Code must do the snapshotting). `zenMode.centerLayout` and `zenMode.fullScreen` are temporarily forced off so the grid uses the full window, with original values backed up to workspaceState and restored on exit or next activation after a crash.
+- **Always-Fullscreen Thumbview via Zen Mode**: Opening Thumbview now takes over the workbench through Zen Mode, hiding sidebars, panel, and auxiliary bar while maximizing editor groups. Prior layout state is restored on exit. `zenMode.centerLayout` and `zenMode.fullScreen` are temporarily forced off so the grid uses the full window, with original values backed up to workspaceState and restored on exit or next activation after a crash.
 
 ### Fixed
-- **Slow, Multi-Step Fullscreen Transitions**: Zen Mode and editor-group maximize now fire concurrently (one visual step instead of two sequential resizes), fullscreen is entered *before* the Thumbview panel is created or revealed so it renders at full size immediately, and opening a file from the grid overlaps the layout exit with the file's disk read — no more "switch tab → resize → zen" crawl in either direction.
+- **Slow, Multi-Step Fullscreen Transitions**: Zen Mode and editor-group maximize run concurrently so the panel renders at full size immediately, and opening a file from the grid overlaps layout exit with file disk reads.
 - **Fullscreen Only Working Every Fourth Toggle / Phantom Split Groups**: All layout operations are now serialized through a promise queue with synchronously-set state flags. Previously, concurrent `enterFullscreen()` calls from the command path and `onDidChangeViewState` both passed the `fullscreenActive` check before either set it, stacking blind `toggleMaximizeEditorGroup` calls that cancelled each other or left splits stuck hidden.
 - **Stray Split Groups When Opening Files from the Grid**: `jump` and `switchTab` now exit fullscreen before opening the document, so editors never open into a maximized group and force VS Code to spawn a side group that didn't exist before.
-- **Split Widths Drifting Every Toggle**: `toggleMaximizeEditorGroup` acts on the *active* editor group, but it was fired at moments when different groups were active (maximize on the code group before `reveal()`, unmaximize on Thumbview's group), skewing split widths each cycle instead of restoring them. Maximize now runs only after the Thumbview panel is active (`maximizeThumbviewGroup()`), and unmaximize re-reveals the panel first if needed, so both toggles always land on Thumbview's group.
-- **Zen Mode Inverted (Code in Zen, Thumbview Not)**: The `onDidChangeViewState` handler exited fullscreen on any deactivation, but zen/maximize layout churn makes the panel's `active` flag flicker transiently — queuing an `exitFullscreen()` behind every `enterFullscreen()` and putting the whole cycle one toggle out of phase. The handler now exits only when the panel is actually hidden (`visible === false`), and ignores all view-state events while a layout op is in flight (plus a 300ms grace window).
+- **Split Widths Drifting Every Toggle**: `toggleMaximizeEditorGroup` acts on the active editor group, but it was fired at moments when different groups were active (maximize on the code group before `reveal()`, unmaximize on Thumbview's group), skewing split widths each cycle instead of restoring them. Maximize now runs only after the Thumbview panel is active (`maximizeThumbviewGroup()`), and unmaximize re-reveals the panel first if needed, so both toggles always land on Thumbview's group.
+- **Zen Mode Inverted (Code in Zen, Thumbview Not)**: The view-state handler now exits fullscreen only when the panel is actually hidden (`visible === false`), ignoring view-state events while a layout operation is in flight to prevent queued exit calls from inverting Zen Mode.
 
 ## [0.3.9] - 2026-08-06
 
 ### Added
-- **Match Case, Match Whole Word, and Regex Search**: The search bar now has three toggles — Match Case (`Aa`), Match Whole Word (`ab`), and Use Regular Expression (`.*`) — plus `Alt+C`/`Alt+W`/`Alt+X` keyboard shortcuts that work whether focus is on the search input or elsewhere in the webview. `media/overview.js`'s `rebuildSearchState()`/`textMatches()` are now the single matching engine behind grid tile borders/dimming, the per-line minimap match highlight, and the hover tooltip's highlighted matches. An invalid regex shows a red outline on the search input and stops dimming the grid instead of treating every tile as non-matching.
+- **Match Case, Match Whole Word, and Regex Search**: Added Match Case (`Aa`), Match Whole Word (`ab`), and Use Regular Expression (`.*`) search toggles, with `Alt+C`, `Alt+W`, and `Alt+X` keyboard shortcuts. `media/overview.js`'s `rebuildSearchState()`/`textMatches()` are now the single matching engine behind grid tile borders/dimming, the per-line minimap match highlight, and the hover tooltip's highlighted matches. An invalid regex shows a red outline on the search input and stops dimming the grid instead of treating every tile as non-matching.
 
 ### Fixed
 - **Post-Jump Line Flash Respects Search Options**: Opening a file by clicking a minimap tile now flashes matching lines in the editor using the same Match Case/Whole Word/Regex options active in the grid, instead of always doing a plain case-insensitive substring match.
-- **Search Option Buttons Swallowing Their First Click**: Clicking a Match Case/Whole Word/Regex/Clear button blurred the search input, triggering its focus-width CSS transition and shifting the button out from under the pointer before mouseup — so the first click never registered. Buttons now suppress the default focus change on `mousedown`, keeping the input focused and the layout still.
+- **Search Option Buttons Swallowing Their First Click**: Search toggle buttons now suppress default focus shifts on `mousedown` so clicks register on the first press.
 
 ## [0.3.8] - 2026-08-06
 
@@ -246,8 +245,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.1] - 2026-07-23
 
-### Performance Optimizations
-- **Parallel Chunked Repository Scanning**: Converted sequential workspace file scanning to parallel batches of 50 via `Promise.all()`, speeding up initial workspace loading by **5x–7x** (under 500ms).
+### Performance
+- **Parallel Chunked Repository Scanning**: Converted sequential workspace file scanning to parallel batches of 50 via `Promise.all()`, speeding up initial workspace loading by **5x to 7x** (under 500ms).
 - **Canvas View Frustum Culling**: Implemented bounding-box viewport culling in the webview canvas loop (`y + fileH < -50 || y > rectH + 50`), skipping offscreen cards and locking canvas rendering at **60 FPS**.
 - **Unified `_combinedText` Search Indexing**: Pre-indexed lowercased file strings into a single buffer (`file._combinedText`), replacing multi-line search loops with a fast 1-pass C++ `indexOf` lookup.
 - **Pre-Computed Tokenization & HTML Caching**: Syntax tokens and line HTML strings (`line._htmlCache`) are pre-rendered on data receipt, eliminating string allocations during render frames.
