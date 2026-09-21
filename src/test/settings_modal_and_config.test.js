@@ -177,5 +177,32 @@ assert(overviewGetCompSlice.includes("data.compressionPercentage >= 1 ? data.com
 
 console.log(`✓ Test 6 passed: compression changes only take effect on Enter or blur with no intermediate jumps or duplicate host renders`);
 
+// -------------------------------------------------------------
+// Test 7: Verify menu accent bar & layered Esc exit handling
+// -------------------------------------------------------------
+console.log("\n=== Test 7: Verify menu accent bar & layered Esc exit handling ===");
+assert(extSource.includes(".menu-popover::before, .menu-modal::before"), "extension.ts must style menu accent bars");
+const accentBarSlice = extSource.substring(
+    extSource.indexOf(".menu-popover::before, .menu-modal::before"),
+    extSource.indexOf(".popover-header")
+);
+assert(accentBarSlice.includes("background: var(--vscode-button-background, #0e639c);"), "accent bar must use button background color");
+assert(!accentBarSlice.includes("linear-gradient"), "accent bar must not use gradient");
+
+assert(extSource.includes('if (msg.command === "exitThumbview")'), "extension.ts must handle exitThumbview command");
+assert(extSource.includes("const closeActiveThumbview = async"), "extension.ts must define closeActiveThumbview helper");
+
+const escSlice = overviewSource.substring(
+    overviewSource.indexOf('if (event.key === "Escape" || event.code === "Escape")'),
+    overviewSource.indexOf('const isInputFocused = document.activeElement &&')
+);
+assert(escSlice.includes("clearDragState();"), "Escape must cancel active drag operations first");
+assert(escSlice.includes("hideContextMenu();"), "Escape must dismiss context menu second");
+assert(escSlice.includes("closeAllPopovers();"), "Escape must close popovers third");
+assert(escSlice.includes("clearSearch();"), "Escape must clear/blur search fourth");
+assert(escSlice.includes('vscode.postMessage({ command: "exitThumbview" });'), "Escape must exit Thumbview when no transient state is active");
+
+console.log(`✓ Test 7 passed: menu accent bar uses button color and Esc key follows layered exit priority`);
+
 console.log("\n=== ALL SETTINGS MODAL & CONFIG TESTS PASSED ===");
 

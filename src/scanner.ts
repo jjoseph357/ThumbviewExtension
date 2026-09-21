@@ -286,6 +286,10 @@ export function clearScanCache(): void {
     scanFileCache.clear();
 }
 
+export function invalidateScanFile(filePath: string): void {
+    scanFileCache.delete(filePath);
+}
+
 export async function scanRepository(
     ignoreState: ScanIgnoreState,
     persistIgnore: (updated: ScanIgnoreState) => Promise<void>

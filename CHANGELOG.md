@@ -5,6 +5,36 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] - 2026-09-21
+
+### Added
+- Layered Escape key dismissal: Pressing `Esc` now closes active UI interactions in priority order. It cancels active drags, hides context menus, closes settings and folders menus, or clears search input. When no menus or actions are active, `Esc` exits Thumbview and restores the previous editor tab.
+
+### Changed
+- Replaced the multi-color gradient bar atop the Settings and Folders & Ignored menus with the theme button background color, matching the active selection style used on layout and drag mode buttons.
+- Unified fonts across Active Directories and Ignored Patterns in the Folders & Ignored popover by removing the monospace override from pattern text and aligning with the UI font.
+
+### Fixed
+- **Subfolder Drilldown Rendering Latency & Top-Left Sizing**: Fixed an issue where opening a subfolder with 152 files rendered files clustered in the top left and froze the UI for 2 seconds before expanding. Restored `THUMBNAIL_MIN_READABLE_FONT_SIZE` to `6.0` and `THUMBNAIL_MIN_READABLE_TEXT_PITCH` to `5.0`, eliminating 97,000+ redundant text layout/draw calls, expanded tile cache capacity from 150 to 500 entries to prevent eviction thrashing on 150+ file folders, enabled drilldown unconditionally when a folder is focused (`shouldOpenFolder = !!focusedFolder`), and used `Math.max(canvas.clientWidth, window.innerWidth)` to prevent transient layout dimension stalls.
+- **Thumbnail vs Left CTRL Hover Alignment**: Fixed an issue where lines displayed in the Left CTRL hover inspector did not match the lines under the cursor in the thumbnail. Replaced uniform thumbnail height division with exact `stepY` pitch indexing clamped to `THUMBNAIL_MAX_LINE_PITCH`, properly mapped sampled lines in large files (>2000 lines) by scaling through the file's sampling stride, resolved hover lines against `fullLines` and `hoverLineCache` instead of returning sampled line items, and synchronized document click-to-jump calculation to use the identical visual line mapping.
+- **Editor Viewport Band Alignment on Short Files**: Scaled `bandY` and `bandH` by rendered code content height (`Math.min(thumbnailH, lines.length * stepY)`) rather than full tile height, keeping editor viewport overlays and click-to-switch hits exactly aligned with visible code lines.
+- **Git Gutter Markers in Sampled Files (>2,000 Lines)**: Added stride slice range iteration to `gitType` in `renderFileThumbnailContent`, displaying git diff additions and modifications on lines located past line 2,000.
+- **Dynamic PDF Script Loader**: Added fallback dynamic script injection via `window.PDF_JS_URI` in `overview.js`, resolving a startup race condition where opening Thumbview before initial background scanning completes omitted `pdf.min.js`.
+- **Hover Inspector Indentation Preservation**: Fixed an issue where all lines in the Left CTRL hover inspector were left-aligned due to thumbnail canvas tokens omitting leading whitespace. Extracted leading spaces and tabs from the source line and prepended them to the rendered HTML, configured `tab-size: 4` on `#hover-tooltip` in `extension.ts`, and accounted for tab expansion in `getFileWidestLineWidth` to avoid tooltip width clipping.
+
+### Performance & Architectural Enhancements
+- **Retained Webview Context Lifecycle**: Enabled `retainContextWhenHidden: true` for the webview panel and preserved the panel in the background on tab switches, editor jumps, and F4 toggles. Subsequent activations instantly reveal the existing panel in 0ms without re-instantiating Chromium DOM, re-parsing scripts, or reflowing layout.
+- **Monospace Character Width Arithmetic**: Replaced tens of thousands of dynamic `ctx.measureText` layout measurements in `drawThumbnail` with single-sample monospace width caching (`getMonospaceCharWidth(fontSize)`). Token offsets are computed in $O(1)$ arithmetic (`tok.text.length * charWidth`), eliminating 1.5s–3.5s thread freezes during folder drill-downs.
+- **Readability Thresholds & Crisp Minimap Blocks**: Configured readable text thresholds (`THUMBNAIL_MIN_READABLE_FONT_SIZE = 6.0`, `THUMBNAIL_MIN_READABLE_TEXT_PITCH = 5.0`). At sub-readable font sizes, code lines render as crisp syntax-colored minimap blocks via high-speed `ctx.fillRect`, eliminating sub-pixel blur and rendering entire repository grids in < 2ms.
+- **Offscreen Tile Raster Cache**: Implemented LRU `tileRasterCache` (150-entry capacity) caching rendered code tile surfaces to offscreen canvases. Active editor viewport bands render dynamically on top, allowing scrolling and navigation between folders to blit cached bitmaps in ~0.1ms.
+- **Memoized Recursive Subfolder Mini-Mosaics**: Preserved the full visual detail of recursive subfolder mini-mosaics while memoizing their rendered output to offscreen canvases (`group._miniCache`). Subsequent frames and hover events blit the cached mini-mosaic via a single `ctx.drawImage` call, reducing frame latency from ~300ms to < 0.05ms.
+- **Lazy Line Tokenization**: Replaced eager upfront regex tokenization across all repository files during message processing with lazy tokenization in `drawThumbnail`, tokenizing lines only on demand when rendered.
+- **Lazy Popovers & Modal Updates**: Deferred building folders and ignored patterns DOM nodes in `applyDataMessage` until the popovers or modal are physically opened.
+- **Fast Hit Testing in Focused Folders**: Restricted `findFileAt` point testing to `activeRenderGrid.files` when drilling down into a folder, avoiding filtering thousands of repository files on every mouse move.
+- **Surgical File Cache Invalidation**: Added `invalidateScanFile(filePath)` to evict only the modified file from the scan cache upon file watcher events, avoiding repository-wide disk rescans.
+- **Sidebar In-Memory Directory Provider**: Connected `DirectoryTreeDataProvider` to cached repository files, eliminating repetitive 1s–4s disk crawls on folder tree expansions.
+- **Conditional PDF Library Loading**: Lazy-injected `pdf.min.js` (320 KB) only when the workspace contains PDF files, trimming webview memory and startup evaluation.
+
 ## [0.4.7] - 2026-09-11
 
 ### Fixed

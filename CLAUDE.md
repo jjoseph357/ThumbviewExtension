@@ -1,4 +1,4 @@
-# CLAUDE.md
+# Guidance for Claude Code
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. See [DESIGN.md](DESIGN.md) for the design rationale behind the architecture and behavior decisions described here.
 
@@ -6,20 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Every change must update all affected documentation before the task is complete. Stale documentation is actively harmful.
 
-- **CLAUDE.md** — update when architecture, module responsibilities, config keys, or conventions change.
-- **DESIGN.md** — update when a design decision changes; explain the technical *why* behind architecture decisions so researchers and maintainers understand system tradeoffs.
-- **CHANGELOG.md** — update for every release following Keep a Changelog guidelines.
-- **README.md** — update when commands, features, or the development workflow change.
-- **CODEBASE_OVERVIEW.md** — a dated audit snapshot (explicitly marked "re-verify before relying on specifics"), not living documentation. Don't update it for routine changes; only touch it if a change falsifies one of its specific claims, and prefer noting the doc as stale over rewriting it wholesale.
-- **In-code comments** — update file-level and inline comments when the behavior or structure they describe changes.
+- **CLAUDE.md.** Update when architecture, module responsibilities, config keys, or conventions change.
+- **DESIGN.md.** Update when a design decision changes. Explain the technical reasons behind architecture decisions so maintainers understand tradeoffs.
+- **CHANGELOG.md.** Update for every release following Keep a Changelog guidelines.
+- **README.md.** Update when commands, features, or the development workflow change.
+- **CODEBASE_OVERVIEW.md.** This is a dated audit snapshot marked "re-verify before relying on specifics", not living documentation. Do not update it for routine changes. Touch it only if a change falsifies one of its specific claims, and prefer noting the document as stale over rewriting it wholesale.
+- **In-code comments.** Update file-level and inline comments when the behavior or structure they describe changes.
 
 ## Code comments
 
-Follow the global no-comments-by-default rule (comment the WHY, never the WHAT). On top of that, this project's conventions:
+Follow the global no-comments-by-default rule (comment the WHY, never the WHAT). On top of that, follow these project conventions:
 
-- **Top-of-file summary** — 1–2 lines on the pure-logic modules (`scanner.ts`, `layout.ts`, `spanning_layout.ts`, `state.ts`) and on `media/overview.js`: what the module computes and what it hands back to its caller. `extension.ts` doesn't need one — its command registrations are self-orienting.
-- **MARK-style section comments** are used in `media/overview.js` on the top-level render/event-handler blocks (`render()`, `mousedown`, `mousemove`, `mouseup`, ...) at the user's request, for personal navigation of the file. Don't introduce them elsewhere unprompted.
-- **Duplicated logic must say so.** Anything that exists in two places (see "Non-obvious things worth knowing" below — `buildStableGrid`, the tokenizers) needs a one-line comment at each copy pointing at its twin, so an edit to one side doesn't silently leave the other stale.
+- **Top-of-file summary.** Add 1 to 2 lines on the pure-logic modules (`scanner.ts`, `layout.ts`, `spanning_layout.ts`, `state.ts`) and on `media/overview.js` explaining what the module computes and what it returns to its caller. `extension.ts` does not need one because its command registrations are self-orienting.
+- **MARK-style section comments.** Used in `media/overview.js` on the top-level render and event-handler blocks (`render()`, `mousedown`, `mousemove`, `mouseup`) for navigation. Do not introduce them elsewhere unprompted.
+- **Duplicated logic.** Anything that exists in two places (`buildStableGrid`, the tokenizers) needs a one-line comment at each copy pointing at its twin, so edits do not leave the other copy stale.
 
 ## Commands
 
@@ -28,84 +28,86 @@ npm install          # install dependencies
 npm run compile      # one-off TypeScript build: src/ -> out/
 npm run watch        # incremental build, rebuilds on save (tsc -watch)
 npm run lint         # eslint over src/
-npm test             # vscode-test — NOTE: no test files exist yet, this will fail/no-op
+npm run test:unit    # run the node-based unit test suite
 ```
-
-There is no test suite yet, so there is no "run a single test" command to document.
 
 ### Running the extension while developing
 
-`F5` starts the `watch` build task and launches an Extension Development Host window with Thumbview loaded (`F4` there opens the minimap panel). It does **not** hot-reload — relaunch `F5` to pick up compiled changes. Full walkthrough: README.md.
+Pressing `F5` starts the `watch` build task and launches an Extension Development Host window with Thumbview loaded. Pressing `F4` in that window opens the minimap panel. It does not hot-reload. Relaunch `F5` to pick up compiled changes. A full walkthrough is in README.md.
 
 ### Packaging
 
-Situational, not everyday dev — see README.md's "Package and install a `.vsix` locally" section for the `vsce package` steps.
+Packaging is situational, not everyday development. See README.md's "Package and install a `.vsix` locally" section for the `vsce package` steps.
 
 ## Architecture
 
-Thumbview is a VS Code extension that renders every workspace source file as a small syntax-highlighted "minimap" tile in a grid. There are two runtime halves that communicate only via `webview.postMessage` — the extension host (Node, TypeScript, compiled to `out/`) and the webview (browser JS, `media/overview.js`, not compiled/bundled, loaded as-is).
+Thumbview is a VS Code extension that renders every workspace source file as a syntax-highlighted minimap tile in a grid. Two runtime halves communicate over `webview.postMessage`: the extension host (Node, TypeScript, compiled to `out/`) and the webview (browser JS, `media/overview.js`, unbundled).
 
 ```
 extension.ts (host)
   ├─ scanRepository()        [scanner.ts]         walks workspace in parallel batches of 50 (Promise.all), receives ignorePatterns/autoIgnoreExclusions
-  │                                                as parameters from workspaceState, consolidates top-level root ignores (e.g. BOFS/), enforces safety caps
+  │                                                from workspaceState, consolidates top-level root ignores (such as BOFS/), enforces safety caps
   │                                                (max 2MB per file, max 2000 lines sampled evenly spaced, max 300 chars per line),
-  │                                                and respects autoIgnoreExclusions (directories the user un-ignored).
-  ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: item count -> near-16:9 grid slots.
+  │                                                and respects autoIgnoreExclusions.
+  ├─ buildStableGrid()       [layout.ts]          uniform_grid mode: maps item count to near-16:9 grid slots.
   ├─ buildSpanningGrid()     [spanning_layout.ts] spanning_grid mode: tall files occupy multiple cells.
-  ├─ PersistentFileOrder     [state.ts]           keeps file->grid-slot assignment stable across rescans.
+  ├─ PersistentFileOrder     [state.ts]           keeps file-to-grid-slot assignment stable across rescans.
   ├─ IgnoreTreeDataProvider  [ignoreProvider.ts]  drives sidebar 'Ignored Files & Directories' tree view; supports multi-selection (canSelectMany), batch delete, disk deletion, Unignore Directory context action, and Reveal in Explorer.
-  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view (hierarchical, showing all workspace folders including 'Root Directory Files Only', with Ignore/Unignore context actions, delete folder, and Reveal in Explorer).
+  └─ DirectoryTreeDataProvider [directoryProvider.ts] drives sidebar 'Directory Navigation' tree view showing all workspace folders including 'Root Directory Files Only', with Ignore/Unignore context actions, delete folder, and Reveal in Explorer.
 
 Webview panel ("thumbview")
- └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines" | "hideForTransition" | "showAfterTransition") ──┐
-                                                                                                       │
+  └─ postMessage("data" | "status" | "activeFile" | "openState" | "setFocusedFolder" | "hoverLines" | "hideForTransition" | "showAfterTransition") ──┐
+                                                                                                        │
 media/overview.js (webview/browser side)                                                               │
- ├─ Receives data payloads, pre-indexes file text into _combinedText buffer for 1-pass fast search,     │
- ├─ Pre-tokenizes lines on payload receipt and caches tokenized HTML (_htmlCache),                      │
- ├─ Performs viewport frustum culling (y + fileH < -50 || y > rectH + 50) for 60 FPS locked rendering,  │
- ├─ Low-lights non-selected files (opacity 0.15) when a directory or 'Root Directory Files Only' is focused to preserve layout,     │
- ├─ Enforces fixed maximum line gap (6px cap) for short code files,                                     │
- ├─ Maintains Set<string> openFilesSet for O(1) tab border lookups,                                     │
- ├─ Renders editor viewport bounds overlay and handles Left CTRL hold code line magnification,         │
- ├─ Posts focusWindow on mouseenter/mousemove to restore active panel focus automatically,              │
- ├─ Displays interactive ⚙ Settings & Shortcuts glassmorphic modal overlay with live toggles,          │
- ├─ Displays top toolbar popover for Directory Navigation & Ignored Patterns (📁 Folders & Ignored),    │
- ├─ Displays custom context menu for standard VS Code Explorer operations,                              │
- └─ postMessage("ready" | "jump" | "switchTab" | "close" | "getHoverLines" | "focusWindow" | ...) ─────┘
+  ├─ Receives data payloads, pre-indexes file text into _combinedText buffer for single-pass search,   │
+  ├─ Pre-tokenizes lines on payload receipt and caches tokenized HTML (_htmlCache),                   │
+  ├─ Viewport frustum culling skips offscreen tiles (y + fileH < -50 || y > rectH + 50),               │
+  ├─ Dims non-selected files (opacity 0.15) when a directory or 'Root Directory Files Only' is focused, │
+  ├─ Caps line pitch at 16px for short code files,                                                    │
+  ├─ Maintains Set<string> openFilesSet for O(1) tab border lookups,                                  │
+  ├─ Renders editor viewport bounds overlay and handles Left CTRL hold code line magnification,        │
+  ├─ Posts focusWindow on mouseenter/mousemove to restore active panel focus automatically,            │
+  ├─ Displays Settings & Shortcuts modal overlay with live toggles,                                   │
+  ├─ Displays top toolbar popover for Directory Navigation & Ignored Patterns (Folders & Ignored),     │
+  ├─ Displays custom context menu for standard VS Code Explorer operations,                           │
+  └─ postMessage("ready" | "jump" | "switchTab" | "close" | "getHoverLines" | "focusWindow" | ...) ───┘
 ```
 
 ### Cross-module interface
 
-The `postMessage` protocol (`"data"`, `"status"`, `"activeFile"`, `"openState"`, `"setFocusedFolder"`, `"hoverLines"`, `"hideForTransition"`, `"showAfterTransition"`, `"ready"`, `"jump"`, `"switchTab"`, `"close"`, `"getHoverLines"`, `"focusWindow"`, `"openPreview"`, `"openToSide"`, `"revealInFiles"`, `"openContainingFolder"`, `"renameFile"`, `"deleteFile"`, `"ignoreFile"`, `"copyPath"`, `"copyRelativePath"`, `"copyFile"`, `"cutFile"`, `"selectForCompare"`, `"compareWithSelected"`, `"reorderFile"`, `"setDragReorderMode"`, `"setLayoutMode"`, `"setRenderMediaThumbnails"`, `"reflow"`, `"addIgnorePattern"`, `"removeIgnorePattern"`) is implicit string-literal matching between `extension.ts` and `media/overview.js`. When adding a command or changing an existing one's shape, note its fields in a short comment at both ends.
+The `postMessage` protocol uses string literals matched between `extension.ts` and `media/overview.js`: `"data"`, `"status"`, `"activeFile"`, `"openState"`, `"setFocusedFolder"`, `"hoverLines"`, `"hideForTransition"`, `"showAfterTransition"`, `"ready"`, `"jump"`, `"switchTab"`, `"close"`, `"getHoverLines"`, `"focusWindow"`, `"openPreview"`, `"openToSide"`, `"revealInFiles"`, `"openContainingFolder"`, `"renameFile"`, `"deleteFile"`, `"ignoreFile"`, `"copyPath"`, `"copyRelativePath"`, `"copyFile"`, `"cutFile"`, `"selectForCompare"`, `"compareWithSelected"`, `"reorderFile"`, `"setDragReorderMode"`, `"setLayoutMode"`, `"setRenderMediaThumbnails"`, `"reflow"`, `"addIgnorePattern"`, and `"removeIgnorePattern"`. When adding a command or changing its shape, note its fields in a short comment at both ends.
 
-### Non-obvious things worth knowing before changing this code
+### Non-obvious details
 
-- **`buildStableGrid`/tokenizer logic is duplicated, not shared**, between `src/` and `media/overview.js` — keep both copies in sync by hand. See DESIGN.md.
-- **Search regex/whole-word pattern-building is duplicated, not shared**, between `media/overview.js`'s `rebuildSearchState()` (drives grid/tooltip matching) and `extension.ts`'s `"jump"` message handler (drives the post-jump line-flash) — keep both copies in sync by hand.
-- **Parallel Chunked Repository Scanning & Directory Sorting**: `scanner.ts` scans workspace files in parallel batches of 50 using `Promise.all()` and sorts them alphabetically by relative workspace path so sibling files in the same directory sit adjacent in grid order.
-- **View Frustum Culling**: Cards outside the viewport are skipped during canvas render loops.
-- **Subdirectory Focus Lowlighting**: Focusing a folder dims non-focused files to opacity 0.15 without hiding them, keeping grid positions stable.
-- **Fixed Maximum Code Line Spacing**: Line spacing (`stepY`) is capped at 6px max so small files do not stretch lines apart.
-- **Media Aspect Ratio Preservation & Instant Cache Refresh**: `drawAspectFit` in `media/overview.js` scales images and PDF Page 1 snapshots using `object-fit: contain` logic, preserving natural aspect ratios inside grid tiles. `imageCache` is cleared on repository data updates and image URIs append a timestamp query parameter (`?v=timestamp`) so updated images refresh instantly on disk changes.
-- **Pre-Computed Indexing & Tokenization**: Search runs through `textMatches()`, backed by `rebuildSearchState()`. Plain (non-regex, non-whole-word) matching stays on the fast pre-lowercased path — `file._combinedText.includes(searchQuery)` case-insensitively, or `file._combinedTextOriginal.includes(rawSearchQuery)` when Match Case is on. Whole Word and Use Regular Expression compile a `RegExp` (case-insensitive unless Match Case is on) and test it against the original-case text instead; an uncompilable regex sets `searchInvalid` so callers stop treating every tile as non-matching rather than crash. Line HTML is cached in `line._htmlCache`, but only the syntax-color spans — search highlighting is rebuilt fresh via `buildLineHtml()` on every hover render since the query/toggles can change between hovers of the same cached line.
-- **Top-Level Ignore Consolidation**: Auto-ignore consolidates dense folders to top-level root paths (e.g. `BOFS/`) and prunes child subdirectories to prevent tree bloat. Folders listed in `autoIgnoreExclusions` (workspaceState) are never auto-ignored.
-- **Ignore State in workspaceState**: `ignorePatterns` and `autoIgnoreExclusions` are stored in `ExtensionContext.workspaceState` (VS Code's internal per-workspace storage), not in `.vscode/settings.json`. Old settings.json values are migrated on first activation.
-- **Multi-Select TreeView**: `thumbview-ignores` enables `canSelectMany: true` for `Shift/Ctrl` batch deletions and unignores.
-- **Left CTRL Hover & rAF Throttling**: Magnifying overlay requires `Left CTRL` hold, throttles position updates via `requestAnimationFrame`, and fixes overlay width to `min(maxWidthAllowed, widestLine)` per file to prevent tooltip box size jitter while moving across lines.
-- **Automatic Webview DOM Focus**: `extension.ts` sends `focusWebview` message (and `media/overview.js` calls `window.focus()` upon panel load) so `Left CTRL` hover and search typing work immediately. Background IPC messages (`data` and `openState`) do not invoke `window.focus()` to prevent focus stealing while typing in text editors.
-- **Fullscreen Mode via Zen Mode**: Opening Thumbview runs `workbench.action.toggleZenMode` (which natively snapshots and restores sidebar/panel/aux bar visibility — extensions cannot read workbench visibility state). `zenMode.centerLayout`, `zenMode.fullScreen`, and `zenMode.hideActivityBar` are temporarily forced off, `zenMode.showTabs` is forced to `"none"`, and `zenMode.singleTabGroup` is forced to `true` to hide split editors to the right of Thumbview (originals backed up in workspaceState, restored on exit or next activation after a crash). The sidebar remains hidden during Zen mode, and all actions/settings, directory navigation, and ignored pattern management are accessible directly within the webview's top toolbar and settings modal. A leftover backup on activation also toggles zen mode off, since VS Code persists zen state across sessions and an unmatched `enterFullscreen` would toggle zen *off* instead of on. All layout ops are serialized through a promise queue with synchronously-set flags so concurrent calls from the command path and `onDidChangeViewState` can't stack blind toggles; the view-state handler ignores events while a layout op is in flight (plus a 300ms grace window) and exits only when the panel is hidden, since zen/maximize churn makes the `active` flag flicker. Zen is entered *before* the panel is created/revealed; on exit (toggle-off, `switchTab`, `jump`), the webview content is hidden via `hideForTransition` (setting `body.opacity` to 0), zen exits, and *then* the target editor is shown. The `onDidChangeViewState` enter path brackets the awaited zen op with `hideForTransition`/`showAfterTransition` webview messages to mask the layout transition when the user manually switches to the Thumbview tab.
-- **Recursive Subfolder Card Expansion & Previews**: When root grid cells fall below 60×40px, `media/overview.js` switches to a subfolder card mode that groups files by immediate child folder, rendering clickable cards. Folder card previews display nested child folder cards only when opening the folder would collapse into cards, using the exact row-major `buildStableGrid` layout as the drilldown view (e.g. child cards along the bottom); if files will be individually laid out, the preview mirrors that exact layout with proportional spanning heights. Clicking drills in recursively until tiles are readable.
-- **Zero-Reflow Window & Sidebar Resize Stability & Readability Collapse**: `media/overview.js` uses a constant `BASE_GRID_ASPECT = 16 / 9` and standard reference canvas bounds (`REF_CANVAS_W = 1200`, `REF_CANVAS_H = 800`) for layout math so window/sidebar resizing smoothly scales tile dimensions (`cellW` and `cellH`) without reflowing tiles into different columns/rows. When the IDE window shrinks to the point where tiles become physically unreadable (`cellW < minCellWidth || cellH < minCellHeight`), views containing subdirectories collapse into folder thumbnail cards.
-- **Folder Card Rearranging, Capacity Below, & Clamped Columns**: In folder cards mode, `buildStableGrid` bases its capacity on `Math.max(orderedItems.length, displayItems.length)`, allocating all needed rows and slots for cards dropped into empty rows below without inflating from uncollapsed file lists. Folder card reordering inside folders (`swapCardItems`) updates dedicated `thumbview.folderCardOrders[folder]` without mutating file-level `thumbview.folderOrders[folder]` or global `fileOrder`. Dragging tiles rightward strictly bounds columns to `targetGridCols` without adding `extraCols` a second time, preserving right-click "Expand Grid Space" as the sole mechanism for expanding grid columns.
-- **Zero-Flicker 2D Spanning Drag Reordering**: `media/overview.js` executes `reorderSpanningItemsLocal` directly on `mouseup`, keeping untouched files in adjacent rows and columns strictly locked to their exact coordinates with zero shift and immediately rendering the moved file at its target slot. Extension host IPC messages are dispatched synchronously before disk state persistence, reducing round-trip confirmation delay from 300ms to < 2ms.
-- **Mouse Button Navigation Deduplication**: Mouse buttons 3 (Back) and 4 (Forward) are handled exclusively in `mouseup`, with duplicate triggers suppressed in `auxclick` to ensure 1-step back navigation per physical click.
-- **Centralized UI Theme Colors and Fixed Brand Accents (`src/colors.ts`)**: UI chrome colors derive from VS Code theme contribution points (`--vscode-editor-background`, `--vscode-foreground`, `--vscode-menu-*`, `--vscode-focusBorder`, etc.). Three fixed brand accents are defined strictly in `src/colors.ts`: `ACCENT_SEARCH = "#dc267f"` (search matches, editor jump decoration), `ACCENT_INSPECT = "#785ef0"` (Ctrl-hold magnifier inspect tooltip), and `ACCENT_RECENCY = "#fe6100"` (open tab / recency indicator). The host injects them into the webview `<style>` as `:root { --tv-accent-search; --tv-accent-inspect; --tv-accent-recency; }`, which `media/overview.js` reads via `getThemeColor("--tv-accent-*")`.
-- **General Hover Outline & `findFileAt`**: Hovering any tile draws a light-blue `BORDER_STYLES.dragging` outline (module-level `hoveredFile`, resolved via `findFileAt(px, py)` on every `mousemove` — an exact-hit-only test, unlike `findNearestSlot`'s drag-drop targeting, which always resolves to a `{col, row}` via direct grid math rather than any nearest-file search). The same color and outline style is deliberately reused for the drag ghost and drop-target outline, so hovering, dragging, and the drop target all read as one consistent "you're interacting with this tile" affordance; all three are inset/thinner than the search-match/active/open tile borders so they don't visually compete with those states.
+- **`buildStableGrid` and tokenizers are duplicated.** Keep copies in `src/` and `media/overview.js` synchronized by hand. See DESIGN.md.
+- **Search regex and whole-word patterns are duplicated.** Keep `media/overview.js`'s `rebuildSearchState()` and `extension.ts`'s `"jump"` handler synchronized by hand.
+- **Parallel repository scanning and sorting.** `scanner.ts` scans workspace files in parallel batches of 50 with `Promise.all()` and sorts them alphabetically by relative path so sibling files sit adjacent in the grid.
+- **View frustum culling.** Cards outside the viewport are skipped during canvas render loops.
+- **Subdirectory focus dimming.** Focusing a folder dims non-focused files to opacity 0.15 without hiding them, keeping grid positions stable.
+- **Maximum line pitch.** Line spacing (`stepY`) is capped at 16px max so short files do not stretch lines across the card.
+- **Media aspect ratio preservation.** `drawAspectFit` in `media/overview.js` scales images and PDF Page 1 snapshots using contain logic, preserving natural aspect ratios inside grid tiles. `imageCache` clears on repository data updates, and image URIs append a timestamp query parameter (`?v=timestamp`) so edited images refresh on disk changes.
+- **Pre-computed indexing and tokenization.** Search runs through `textMatches()`, backed by `rebuildSearchState()`. Plain matching stays on the pre-lowercased path (`file._combinedText.includes(searchQuery)`), or `file._combinedTextOriginal.includes(rawSearchQuery)` when Match Case is on. Whole Word and Regular Expression compile a `RegExp` against the original-case text. An invalid regex sets `searchInvalid` so callers treat tiles as non-matching rather than throwing. Line HTML syntax spans are cached in `line._htmlCache`. Search highlighting is rebuilt fresh via `buildLineHtml()` on each hover render because the query or toggles can change between hovers of the same cached line.
+- **Top-level ignore consolidation.** Auto-ignore consolidates dense folders to top-level root paths (such as `BOFS/`) and prunes child subdirectories to prevent tree bloat. Folders listed in `autoIgnoreExclusions` (workspaceState) are never auto-ignored.
+- **Ignore state in workspaceState.** `ignorePatterns` and `autoIgnoreExclusions` live in `ExtensionContext.workspaceState`, not in `.vscode/settings.json`. Old settings.json values migrate on first activation.
+- **Multi-select tree view.** `thumbview-ignores` enables `canSelectMany: true` for Shift and Ctrl batch deletions and unignores.
+- **Left CTRL hover inspection.** The magnifying overlay requires holding `Left CTRL`, throttles position updates with `requestAnimationFrame`, and fixes overlay width to `min(maxWidthAllowed, widestLine)` per file to prevent tooltip box jitter while moving across lines.
+- **Automatic webview DOM focus.** `extension.ts` sends a `focusWebview` message, and `media/overview.js` calls `window.focus()` on load so `Left CTRL` hover and search typing work immediately. Background IPC messages (`data` and `openState`) do not invoke `window.focus()`, avoiding focus stealing while typing in text editors.
+- **Fullscreen mode through Zen mode.** Opening Thumbview runs `workbench.action.toggleZenMode`, which snapshots and restores sidebar, panel, and aux bar visibility. Extensions cannot read workbench visibility state directly. Zen settings `zenMode.centerLayout`, `zenMode.fullScreen`, and `zenMode.hideActivityBar` are temporarily set to false, `zenMode.showTabs` is set to `"none"`, and `zenMode.singleTabGroup` is set to true to hide split editors to the right of Thumbview. Original settings are backed up in workspaceState and restored on exit or crash recovery. The sidebar remains hidden during Zen mode. Actions, settings, directory navigation, and ignored pattern management live in the webview toolbar and settings modal. A leftover backup on activation toggles Zen mode off, preventing an unmatched `enterFullscreen` from toggling Zen off instead of on. Layout operations are serialized through a promise queue with synchronously set flags so concurrent calls cannot stack blind toggles. The view-state handler ignores events while a layout operation is in flight and exits only when the panel is hidden. Zen is entered before the panel is created or revealed. On exit (`toggle-off`, `switchTab`, `jump`), the webview content is hidden with `hideForTransition` (setting `body.opacity` to 0), Zen exits, and the target editor is shown.
+- **Recursive subfolder card expansion.** When root grid cells fall below 60×40px, `media/overview.js` switches to subfolder card mode, grouping files by immediate child folder into clickable cards. Folder card previews display nested child folder cards only when opening the folder would collapse into cards, using the same row-major `buildStableGrid` layout as the drilldown view. If files will be laid out individually, the preview mirrors that layout with proportional spanning heights. Clicking drills down recursively until tiles are readable.
+- **Zero-reflow window resizing.** `media/overview.js` uses a constant `BASE_GRID_ASPECT = 16 / 9` and reference canvas bounds (`REF_CANVAS_W = 1200`, `REF_CANVAS_H = 800`) for layout calculations so window resizing scales tile dimensions (`cellW` and `cellH`) without reflowing tiles into different columns and rows. When the window shrinks to where tiles become unreadable (`cellW < minCellWidth || cellH < minCellHeight`), views containing subdirectories collapse into folder thumbnail cards.
+- **Folder card rearranging and column bounds.** In folder cards mode, `buildStableGrid` allocates capacity based on `Math.max(orderedItems.length, displayItems.length)`, creating rows and slots for cards dropped into empty rows below. Folder card reordering inside folders (`swapCardItems`) updates `thumbview.folderCardOrders[folder]` without mutating file-level `thumbview.folderOrders[folder]` or global `fileOrder`. Dragging tiles rightward strictly bounds columns to `targetGridCols` without adding `extraCols` twice. Right-clicking "Expand Grid Space" is the sole mechanism for expanding grid columns.
+- **2D spanning drag reordering.** `media/overview.js` runs `reorderSpanningItemsLocal` directly on `mouseup`, keeping untouched files in adjacent rows and columns locked to their exact coordinates and rendering the moved file at its target slot. Extension host IPC messages dispatch synchronously before disk state persistence.
+- **Mouse button navigation.** Mouse buttons 3 (Back) and 4 (Forward) are handled exclusively in `mouseup`. Duplicate triggers are suppressed in `auxclick` to ensure one step of navigation per physical click.
+- **Centralized UI theme colors and brand accents.** UI chrome colors derive from VS Code theme contribution points (`--vscode-editor-background`, `--vscode-foreground`, `--vscode-menu-*`, `--vscode-focusBorder`). Three fixed brand accents are defined in `src/colors.ts`: `ACCENT_SEARCH = "#dc267f"`, `ACCENT_INSPECT = "#785ef0"`, and `ACCENT_RECENCY = "#fe6100"`. The host injects them into the webview style element as CSS variables, which `media/overview.js` reads with `getThemeColor("--tv-accent-*")`.
+- **Hover outline and `findFileAt`.** Hovering any tile draws a light-blue outline using `BORDER_STYLES.dragging`. The module-level `hoveredFile` resolves through `findFileAt(px, py)` on every `mousemove`. This is an exact hit test, unlike `findNearestSlot` which resolves to a `{col, row}` slot. The same color and outline style are reused for the drag ghost and drop-target outline so all three read as one consistent interaction state. Inside a focused folder, `findFileAt` tests against `activeRenderGrid.files` directly instead of iterating all workspace files.
+- **Retained webview context.** `createWebviewPanel` sets `retainContextWhenHidden: true`. When Thumbview closes through `F4`, `Esc`, `jump`, or `switchTab`, the panel is backgrounded rather than disposed. Re-opening Thumbview reveals the live panel instantly without DOM re-initialization.
+- **Monospace character width arithmetic.** `drawThumbnail` computes text layout using single-sample monospace font width caching (`getMonospaceCharWidth(fontSize)`), calculating token advance in $O(1)$ arithmetic (`tok.text.length * charWidth`) without calling `ctx.measureText`.
+- **Tile raster caching and memoized mini-mosaics.** Code tiles render to offscreen canvases and cache in `tileRasterCache` (500 entries max), drawing cached tiles with editor viewports rendered dynamically on top. Subfolder mini-mosaics are memoized to offscreen canvases (`group._miniCache`), avoiding re-layout work while preserving visual detail.
+- **Surgical file invalidation.** `invalidateScanFile(filePath)` evicts only modified files upon watcher events, and `DirectoryTreeDataProvider` consumes cached scan data.
 
 ## Terminology
 
-The extension was renamed from **Repository Map** (`repomap`) to **Thumbview** partway through development. Every user-facing surface uses **Thumbview**. Internal state keys now use the `thumbview.*` prefix (`"thumbview.seenFiles"`, `"thumbview.spanningAllocations"`, `"thumbview.spanningRows"`, `"thumbview.zenSettingsBackup"`); a one-time migration in `extension.ts` copies values from the old `repomap.*` keys on activation and deletes them (see DESIGN.md).
+The extension was renamed from **Repository Map** (`repomap`) to **Thumbview** partway through development. Every user-facing surface uses **Thumbview**. Internal state keys use the `thumbview.*` prefix (`"thumbview.seenFiles"`, `"thumbview.spanningAllocations"`, `"thumbview.spanningRows"`, `"thumbview.zenSettingsBackup"`). A one-time migration in `extension.ts` copies values from the old `repomap.*` keys on activation and deletes them. See DESIGN.md.
 
 ## Committing changes
 
@@ -116,9 +118,9 @@ The extension was renamed from **Repository Map** (`repomap`) to **Thumbview** p
 
 ## Branch workflow
 
-Development takes place on personal dev branches (e.g. `bobby-dev`). Work is committed to the dev branch, merged into `main`, and pushed only when explicitly requested by the user.
+Development takes place on personal dev branches (such as `bobby-dev`). Work is committed to the dev branch, merged into `main`, and pushed only when explicitly requested by the user.
 
-## Responding to a reported problem/issue/bug
+## Responding to a reported problem, issue, or bug
 
 When the user reports a problem, issue, or bug:
 1. Investigate and pinpoint the actual root cause first.
@@ -126,6 +128,6 @@ When the user reports a problem, issue, or bug:
 3. Explain your proposed solution.
 4. Wait for the user's explicit approval before making any edits.
 
-## Verifying UI/layout changes
+## Verifying UI and layout changes
 
-Never attempt to launch F5 or visually verify canvas/webview changes yourself. Make the change and ask the user to press F5 to test. Do not run `npm run compile`, `npm run lint`, or `tsc` proactively unless explicitly requested by the user.
+Never attempt to launch F5 or visually verify canvas and webview changes yourself. Make the change and ask the user to press F5 to test. Do not run `npm run compile`, `npm run lint`, or `tsc` proactively unless explicitly requested by the user.

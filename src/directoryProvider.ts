@@ -61,7 +61,10 @@ export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<Direct
     private _onDidChangeTreeData: vscode.EventEmitter<DirectoryTreeItem | undefined | void> = new vscode.EventEmitter<DirectoryTreeItem | undefined | void>();
     readonly onDidChangeTreeData: vscode.Event<DirectoryTreeItem | undefined | void> = this._onDidChangeTreeData.event;
 
-    constructor(private context: vscode.ExtensionContext) {}
+    constructor(
+        private context: vscode.ExtensionContext,
+        private getCachedData?: () => { validFiles: { path: string }[] | null; allPaths: string[] | null }
+    ) {}
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
@@ -74,17 +77,26 @@ export class DirectoryTreeDataProvider implements vscode.TreeDataProvider<Direct
     async getChildren(element?: DirectoryTreeItem): Promise<DirectoryTreeItem[]> {
         try {
             const ignorePatterns = this.context.workspaceState.get<string[]>("thumbview.ignorePatterns") ?? [];
-            const autoIgnoreExclusions = this.context.workspaceState.get<string[]>("thumbview.autoIgnoreExclusions") ?? [];
+            const cached = this.getCachedData ? this.getCachedData() : null;
 
-            const ignoreState: ScanIgnoreState = { ignorePatterns, autoIgnoreExclusions };
-            const persistIgnore = async (updated: ScanIgnoreState) => {
-                await this.context.workspaceState.update("thumbview.ignorePatterns", updated.ignorePatterns);
-                await this.context.workspaceState.update("thumbview.autoIgnoreExclusions", updated.autoIgnoreExclusions);
-            };
+            let validFiles: { path: string }[];
+            let allFiles: { path: string }[];
 
-            const validFiles = await scanRepository(ignoreState, persistIgnore);
-            const allFileUris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git}/**");
-            const allFiles = allFileUris.map(u => ({ path: vscode.workspace.asRelativePath(u).replace(/\\/g, "/") }));
+            if (cached && cached.validFiles && cached.allPaths) {
+                validFiles = cached.validFiles;
+                allFiles = cached.allPaths.map(p => ({ path: p }));
+            } else {
+                const autoIgnoreExclusions = this.context.workspaceState.get<string[]>("thumbview.autoIgnoreExclusions") ?? [];
+                const ignoreState: ScanIgnoreState = { ignorePatterns, autoIgnoreExclusions };
+                const persistIgnore = async (updated: ScanIgnoreState) => {
+                    await this.context.workspaceState.update("thumbview.ignorePatterns", updated.ignorePatterns);
+                    await this.context.workspaceState.update("thumbview.autoIgnoreExclusions", updated.autoIgnoreExclusions);
+                };
+
+                validFiles = await scanRepository(ignoreState, persistIgnore);
+                const allFileUris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git}/**");
+                allFiles = allFileUris.map(u => ({ path: vscode.workspace.asRelativePath(u).replace(/\\/g, "/") }));
+            }
 
             if (!element) {
                 // Root level items

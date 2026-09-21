@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache } from "./scanner";
+import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache, invalidateScanFile } from "./scanner";
 import { buildStableGrid, slotToIndex, findSlotIndex, MIN_GRID_COLS, MIN_GRID_ROWS } from "./layout";
 import { buildSpanningGrid, cellsNeeded, integrateNewFilesPreservingPositions, SpanningPlacement, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
@@ -692,6 +692,7 @@ export async function activate(context: vscode.ExtensionContext) {
     let fullscreenActive = false;
     let thumbviewEnteredZenMode = false;
     let groupMaximizedByUs = false;
+    let layoutOpsInFlight = 0;
 
     const initZenSettings = () => {
         try {
@@ -762,39 +763,220 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    const isThumbviewTab = (tab: vscode.Tab): boolean => {
+        const input: any = tab.input;
+        if (input instanceof vscode.TabInputWebview) {
+            return input.viewType === "thumbview";
+        }
+        if (input && typeof input.viewType === "string" && input.viewType === "thumbview") {
+            return true;
+        }
+        return tab.label === "Thumbview";
+    };
+
+    const getTabUri = (tab: vscode.Tab): vscode.Uri | undefined => {
+        const input: any = tab.input;
+        if (!input) {
+            return undefined;
+        }
+        if (input instanceof vscode.TabInputText) {
+            return input.uri;
+        }
+        if (input instanceof vscode.TabInputTextDiff) {
+            return input.modified || input.original;
+        }
+        if (input instanceof vscode.TabInputCustom) {
+            return input.uri;
+        }
+        if (input instanceof vscode.TabInputNotebook) {
+            return input.uri;
+        }
+        if (input.uri instanceof vscode.Uri) {
+            return input.uri;
+        }
+        if (input.resource instanceof vscode.Uri) {
+            return input.resource;
+        }
+        return undefined;
+    };
+
+    const switchToTab = async (tab: vscode.Tab): Promise<boolean> => {
+        const uri = getTabUri(tab);
+        if (uri) {
+            try {
+                if (uri.toString().toLowerCase().endsWith(".pdf")) {
+                    await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                } else {
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        await vscode.window.showTextDocument(doc, {
+                            preview: false,
+                            viewColumn: tab.group.viewColumn
+                        });
+                    } catch {
+                        await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                    }
+                }
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        return false;
+    };
+
+    const getAllNonThumbviewTabs = (): { preferred: vscode.Tab | undefined; tabs: vscode.Tab[] } => {
+        const tabs: vscode.Tab[] = [];
+        let preferred: vscode.Tab | undefined;
+
+        const activeGroup = vscode.window.tabGroups.activeTabGroup;
+        if (activeGroup?.activeTab && !isThumbviewTab(activeGroup.activeTab)) {
+            preferred = activeGroup.activeTab;
+        }
+
+        for (const group of vscode.window.tabGroups.all) {
+            for (const tab of group.tabs) {
+                if (!isThumbviewTab(tab)) {
+                    tabs.push(tab);
+                    if (!preferred && tab.isActive) {
+                        preferred = tab;
+                    }
+                }
+            }
+        }
+
+        if (!preferred && tabs.length > 0) {
+            preferred = tabs[0];
+        }
+
+        return { preferred, tabs };
+    };
+
+    const closeActiveThumbview = async (): Promise<void> => {
+        if (!activePanel) {
+            return;
+        }
+
+        const { preferred, tabs: otherTabs } = getAllNonThumbviewTabs();
+
+        // Fallback Close: If there are no other tabs open in the entire workspace,
+        // cleanly dispose the Thumbview tab so the user sees the normal VS Code empty editor watermark.
+        if (otherTabs.length === 0) {
+            layoutOpsInFlight++;
+            try {
+                if (thumbviewEnteredZenMode) {
+                    thumbviewEnteredZenMode = false;
+                    await exitFullscreen();
+                }
+                if (groupMaximizedByUs) {
+                    await unmaximizeIfSplits();
+                }
+                activePanel.dispose();
+                activePanel = undefined;
+            } finally {
+                setTimeout(() => {
+                    layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
+                }, 400);
+            }
+            return;
+        }
+
+        layoutOpsInFlight++;
+        try {
+            activePanel.webview.postMessage({ command: "hideForTransition" });
+
+            if (thumbviewEnteredZenMode) {
+                thumbviewEnteredZenMode = false;
+                await exitFullscreen();
+                // Settle Delay: Allow VS Code's workbench layout animation to finish restoring
+                await new Promise(r => setTimeout(r, 70));
+            }
+            if (groupMaximizedByUs) {
+                await unmaximizeIfSplits();
+                await new Promise(r => setTimeout(r, 30));
+            }
+
+            // Robust Tab Switcher:
+            // 1. Try lastActiveTextEditor if valid and not closed
+            let switched = false;
+            if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
+                try {
+                    await vscode.window.showTextDocument(lastActiveTextEditor.document, {
+                        preview: false,
+                        viewColumn: lastActiveTextEditor.viewColumn
+                    });
+                    switched = true;
+                } catch { }
+            }
+
+            // 2. If not switched, try preferred tab from vscode.window.tabGroups
+            if (!switched && preferred) {
+                switched = await switchToTab(preferred);
+            }
+
+            // 3. If still not switched, iterate remaining open tabs
+            if (!switched) {
+                for (const candidate of otherTabs) {
+                    if (candidate !== preferred) {
+                        switched = await switchToTab(candidate);
+                        if (switched) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 4. Fallback to previousEditor if still not switched
+            if (!switched) {
+                try {
+                    await vscode.commands.executeCommand("workbench.action.previousEditor");
+                } catch { }
+            }
+
+            // Settle check & Double-activation:
+            // Give VS Code 50ms to finish any pending tab activation.
+            await new Promise(r => setTimeout(r, 50));
+
+            // If VS Code's layout engine clobbered the focus and Thumbview is still active,
+            // re-trigger the switch to the desired code tab.
+            if (activePanel && activePanel.active) {
+                if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
+                    try {
+                        await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
+                    } catch { }
+                } else if (preferred) {
+                    await switchToTab(preferred);
+                }
+                await new Promise(r => setTimeout(r, 50));
+            }
+
+            // Acknowledge and Reset Opacity:
+            // If Thumbview is still visible (e.g. user stayed on Thumbview or switch failed),
+            // ensure opacity is restored so it is never stuck as a blank canvas.
+            if (activePanel && activePanel.visible) {
+                activePanel.webview.postMessage({ command: "showAfterTransition" });
+            }
+        } finally {
+            setTimeout(() => {
+                layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
+                if (layoutOpsInFlight === 0 && activePanel && activePanel.visible) {
+                    activePanel.webview.postMessage({ command: "showAfterTransition" });
+                }
+            }, 400);
+        }
+    };
+
     const disposable = vscode.commands.registerCommand(
         "thumbview.open",
         async () => {
             console.log("THUMBVIEW COMMAND EXECUTED");
 
-            if (activePanel) {
-                const panelToDispose = activePanel;
-                activePanel = undefined;
-                try {
-                    panelToDispose.dispose();
-                } catch { }
+            if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.uri.scheme !== "vscode-webview") {
+                lastActiveTextEditor = vscode.window.activeTextEditor;
+            }
 
-                if (thumbviewEnteredZenMode) {
-                    thumbviewEnteredZenMode = false;
-                    exitFullscreen();
-                }
-                if (groupMaximizedByUs) {
-                    unmaximizeIfSplits();
-                }
-
-                if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
-                    try {
-                        await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
-                    } catch {
-                        try {
-                            await vscode.commands.executeCommand("workbench.action.previousEditor");
-                        } catch { }
-                    }
-                } else {
-                    try {
-                        await vscode.commands.executeCommand("workbench.action.previousEditor");
-                    } catch { }
-                }
+            if (activePanel && activePanel.visible) {
+                await closeActiveThumbview();
                 return;
             }
 
@@ -804,6 +986,50 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             fetchWorkspaceGitDiff().catch(() => {});
 
+            if (activePanel) {
+                layoutOpsInFlight++;
+                try {
+                    thumbviewEnteredZenMode = true;
+                    await enterFullscreen();
+
+                    if (vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
+                        groupMaximizedByUs = true;
+                        try {
+                            await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
+                        } catch { }
+                    }
+
+                    // Settle delay for Zen mode window expansion:
+                    // Wait for the workbench layout to expand to fullscreen before revealing
+                    await new Promise(r => setTimeout(r, 70));
+
+                    updateVisibleRanges(vscode.window.activeTextEditor || lastActiveTextEditor);
+                    activePanel.reveal(vscode.ViewColumn.Active);
+                    sendOpenState();
+
+                    // Settle delay before revealing opacity: allow webview resize & render to paint at full size
+                    await new Promise(r => setTimeout(r, 40));
+                    activePanel.webview.postMessage({ command: "showAfterTransition" });
+                } finally {
+                    setTimeout(() => {
+                        layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
+                    }, 400);
+                }
+                return;
+            }
+
+            // Enter fullscreen BEFORE creating the panel so Thumbview renders
+            // directly at full size instead of snapping through layouts
+            thumbviewEnteredZenMode = true;
+            await enterFullscreen();
+
+            if (vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
+                groupMaximizedByUs = true;
+                try {
+                    await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
+                } catch { }
+            }
+
             let panel: vscode.WebviewPanel;
             try {
                 panel = vscode.window.createWebviewPanel(
@@ -812,7 +1038,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     vscode.ViewColumn.Active,
                     {
                         enableScripts: true,
-                        retainContextWhenHidden: false,
+                        retainContextWhenHidden: true,
                         localResourceRoots: [
                             vscode.Uri.joinPath(context.extensionUri, "media"),
                             ...(vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders.map(f => f.uri) : [])
@@ -821,14 +1047,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 );
 
                 activePanel = panel;
-                if (vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
-                    groupMaximizedByUs = true;
-                    try {
-                        await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
-                    } catch { }
-                }
 
-                panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
+                const hasPdfs = (cachedScannedFiles || []).some(f => f.isPdf);
+                panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel(), hasPdfs);
             } catch (err) {
                 console.error("Failed to open Thumbview panel:", err);
                 return;
@@ -836,6 +1057,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
             panel.webview.onDidReceiveMessage(async msg => {
                 console.log("THUMBVIEW WEBVIEW MESSAGE:", msg);
+
+                if (msg.command === "exitThumbview") {
+                    await closeActiveThumbview();
+                    return;
+                }
 
                 if (msg.command === "ensureZenMode") {
                     thumbviewEnteredZenMode = true;
@@ -848,6 +1074,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     } else {
                         refreshThumbview(panel);
                     }
+                    panel.webview.postMessage({ command: "showAfterTransition" });
                 }
 
                 if (msg.command === "focusWindow") {
@@ -859,27 +1086,33 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "switchTab") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
-                        if (activePanel) {
-                            const p = activePanel;
-                            activePanel = undefined;
-                            try { p.dispose(); } catch { }
-                        }
-                        if (thumbviewEnteredZenMode) {
-                            thumbviewEnteredZenMode = false;
-                            exitFullscreen();
-                        }
-                        if (groupMaximizedByUs) {
-                            unmaximizeIfSplits();
-                        }
-                        if (msg.uri.toLowerCase().endsWith(".pdf")) {
-                            await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
-                        } else {
-                            try {
-                                const doc = await vscode.workspace.openTextDocument(uri);
-                                await vscode.window.showTextDocument(doc, { preview: false });
-                            } catch {
-                                await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                        layoutOpsInFlight++;
+                        try {
+                            activePanel?.webview.postMessage({ command: "hideForTransition" });
+                            if (thumbviewEnteredZenMode) {
+                                thumbviewEnteredZenMode = false;
+                                await exitFullscreen();
+                                await new Promise(r => setTimeout(r, 70));
                             }
+                            if (groupMaximizedByUs) {
+                                await unmaximizeIfSplits();
+                                await new Promise(r => setTimeout(r, 30));
+                            }
+
+                            if (msg.uri.toLowerCase().endsWith(".pdf")) {
+                                await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                            } else {
+                                try {
+                                    const doc = await vscode.workspace.openTextDocument(uri);
+                                    await vscode.window.showTextDocument(doc, { preview: false });
+                                } catch {
+                                    await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                                }
+                            }
+                        } finally {
+                            setTimeout(() => {
+                                layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
+                            }, 400);
                         }
                     } catch (err: any) {
                         console.error("THUMBVIEW SWITCH TAB ERROR:", err);
@@ -889,27 +1122,27 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "jump") {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
-                        if (activePanel) {
-                            const p = activePanel;
-                            activePanel = undefined;
-                            try { p.dispose(); } catch { }
-                        }
-                        if (thumbviewEnteredZenMode) {
-                            thumbviewEnteredZenMode = false;
-                            exitFullscreen();
-                        }
-                        if (groupMaximizedByUs) {
-                            unmaximizeIfSplits();
-                        }
-
-                        let doc: vscode.TextDocument;
+                        layoutOpsInFlight++;
                         try {
-                            doc = await vscode.workspace.openTextDocument(uri);
-                        } catch {
-                            // Binary/media file fallback
-                            await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
-                            return;
-                        }
+                            activePanel?.webview.postMessage({ command: "hideForTransition" });
+                            if (thumbviewEnteredZenMode) {
+                                thumbviewEnteredZenMode = false;
+                                await exitFullscreen();
+                                await new Promise(r => setTimeout(r, 70));
+                            }
+                            if (groupMaximizedByUs) {
+                                await unmaximizeIfSplits();
+                                await new Promise(r => setTimeout(r, 30));
+                            }
+
+                            let doc: vscode.TextDocument;
+                            try {
+                                doc = await vscode.workspace.openTextDocument(uri);
+                            } catch {
+                                // Binary/media file fallback
+                                await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                                return;
+                            }
 
                         const safeLine = Math.max(
                             0,
@@ -989,12 +1222,17 @@ export async function activate(context: vscode.ExtensionContext) {
                                 }, 150);
                             }
                         }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(
-                            `Thumbview jump failed: ${err?.message ?? String(err)}`
-                        );
+                    } finally {
+                        setTimeout(() => {
+                            layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
+                        }, 400);
                     }
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(
+                        `Thumbview jump failed: ${err?.message ?? String(err)}`
+                    );
                 }
+            }
 
                 if (msg.command === "getHoverLines") {
                     try {
@@ -2187,22 +2425,29 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             panel.onDidChangeViewState(async e => {
+                if (layoutOpsInFlight > 0) {
+                    return;
+                }
                 if (e.webviewPanel.visible && e.webviewPanel.active) {
                     if (fullscreenActive && vscode.window.tabGroups.all.length > 1) {
                         // User dragged the tab into a new split, breaking zen mode layout. Close gracefully.
-                        panel.dispose();
+                        await closeActiveThumbview();
                         return;
                     }
-                    const activeUri = lastActiveTextEditor?.document.uri.toString() || null;
-                    panel.webview.postMessage({
-                        command: "activeFile",
-                        uri: activeUri
-                    });
                     sendOpenState();
+                    panel.webview.postMessage({ command: "showAfterTransition" });
+                } else if (e.webviewPanel.visible) {
+                    panel.webview.postMessage({ command: "showAfterTransition" });
                 } else if (!e.webviewPanel.visible && fullscreenActive) {
                     // Exit only when Thumbview is truly backgrounded — an inactive
                     // but still visible panel is just a focus shift, not leaving
-                    exitFullscreen();
+                    if (thumbviewEnteredZenMode) {
+                        thumbviewEnteredZenMode = false;
+                        await exitFullscreen();
+                    }
+                    if (groupMaximizedByUs) {
+                        await unmaximizeIfSplits();
+                    }
                 }
             });
 
@@ -2436,7 +2681,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const focusFolderDisposable = vscode.commands.registerCommand("thumbview.focusFolder", async (folderPath?: string | DirectoryTreeItem) => {
         let targetFolder = typeof folderPath === "string" ? folderPath : folderPath?.folderPath || "";
         let panel = activePanel;
-        if (!panel) {
+        if (!panel || !panel.visible) {
             await vscode.commands.executeCommand("thumbview.open");
             panel = activePanel;
         }
@@ -2620,12 +2865,16 @@ export async function activate(context: vscode.ExtensionContext) {
     // instead of flooding the webview with a message per file event.
     const watcher = vscode.workspace.createFileSystemWatcher("**/*");
     let debounceTimer: NodeJS.Timeout | undefined;
-    const triggerUpdate = () => {
+    const triggerUpdate = (uri?: vscode.Uri) => {
+        if (uri) {
+            invalidateScanFile(uri.fsPath);
+        } else {
+            clearScanCache();
+        }
         if (debounceTimer) {
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(async () => {
-            clearScanCache();
             await getAllWorkspaceRelativePaths().catch(() => {});
             refreshProviders();
             if (activePanel) {
@@ -2634,9 +2883,9 @@ export async function activate(context: vscode.ExtensionContext) {
         }, 200);
     };
 
-    watcher.onDidCreate(() => triggerUpdate());
-    watcher.onDidDelete(() => triggerUpdate());
-    watcher.onDidChange(() => triggerUpdate());
+    watcher.onDidCreate(uri => triggerUpdate(uri));
+    watcher.onDidDelete(uri => triggerUpdate(uri));
+    watcher.onDidChange(uri => triggerUpdate(uri));
 
     const docChangeDisposable = vscode.workspace.onDidChangeTextDocument(e => {
         updateDocumentInCache(e.document);
@@ -2653,7 +2902,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 updateLayoutFromCache(activePanel);
             }
         }).catch(() => {});
-        triggerUpdate();
+        triggerUpdate(doc.uri);
     });
     context.subscriptions.push(docSaveDisposable);
 
@@ -2681,7 +2930,8 @@ export function deactivate() { }
 function getHtml(
     webview: vscode.Webview,
     context: vscode.ExtensionContext,
-    openKeybindingLabel: string = "F4"
+    openKeybindingLabel: string = "F4",
+    hasPdfs: boolean = false
 ): string {
     const isMac = process.platform === "darwin";
     const jsUri = webview.asWebviewUri(
@@ -2857,6 +3107,8 @@ function getHtml(
             max-width: 750px;
             line-height: 1.4;
             white-space: pre;
+            tab-size: 4;
+            -moz-tab-size: 4;
             overflow: hidden;
         }
 
@@ -3021,7 +3273,7 @@ function getHtml(
             display: block;
             height: 2px;
             width: 100%;
-            background: linear-gradient(90deg, var(--tv-accent-inspect, #785ef0) 0%, var(--tv-accent-search, #dc267f) 50%, var(--tv-accent-recency, #fe6100) 100%);
+            background: var(--vscode-button-background, #0e639c);
             flex-shrink: 0;
         }
 
@@ -3214,7 +3466,8 @@ function getHtml(
             flex: 1;
         }
 
-        .folder-name-text {
+        .folder-name-text,
+        .pattern-text {
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -3223,14 +3476,6 @@ function getHtml(
         .path-sep {
             opacity: 0.35;
             margin: 0 1px;
-        }
-
-        .pattern-text {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            font-family: var(--vscode-editor-font-family, monospace);
-            font-size: 11px;
         }
 
         .pattern-type-badge {
@@ -3273,6 +3518,7 @@ function getHtml(
             color: var(--vscode-input-foreground, #cccccc);
             padding: 4px 8px;
             font-size: 12px;
+            font-family: inherit;
             outline: none;
             transition: border-color 0.1s ease;
         }
@@ -3900,8 +4146,9 @@ function getHtml(
     </div>
     <script nonce="${nonce}">
         window.PDF_WORKER_URI = "${pdfWorkerUri}";
+        window.PDF_JS_URI = "${pdfJsUri}";
     </script>
-    <script nonce="${nonce}" src="${pdfJsUri}"></script>
+    ${hasPdfs ? `<script nonce="${nonce}" src="${pdfJsUri}"></script>` : ""}
     <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;

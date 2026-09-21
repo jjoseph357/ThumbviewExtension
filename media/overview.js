@@ -234,6 +234,8 @@ let dragBackgroundCanvas = null;
 let cachedDragBackgroundCanvas = null;
 let pendingDataMsg = null;
 const fileTokenCache = new Map();
+const tileRasterCache = new Map();
+const MAX_TILE_CACHE_ENTRIES = 500;
 let clipboardItem = null;
 
 let hoveredFile = null;
@@ -289,9 +291,14 @@ function findFileAt(px, py) {
         }
     }
 
-    const filteredFiles = getFilteredFiles();
-    for (let i = 0; i < filteredFiles.length; i++) {
-        const file = filteredFiles[i];
+    // In focused folder mode, test only the files currently rendered in the active grid
+    const candidateFiles = (focusedFolder && activeRenderGrid && activeRenderGrid.files)
+        ? activeRenderGrid.files
+        : ((focusedFolder && activeRenderGrid && activeRenderGrid.orderedItems)
+            ? activeRenderGrid.orderedItems.filter(it => it && it.file).map(it => it.file)
+            : getFilteredFiles());
+    for (let i = 0; i < candidateFiles.length; i++) {
+        const file = candidateFiles[i];
         const c = file._cell;
         if (c && pointInRect(c, px, py)) {
             return file;
@@ -624,6 +631,10 @@ let resizeRafId = null;
 
 /** Resyncs the canvas backing-store size to the (DPR-scaled) window size and re-renders; retries via rAF while the tab is hidden/backgrounded. */
 function resize() {
+    if (document.hidden || document.visibilityState === "hidden") {
+        // Webview tab is hidden or backgrounded; do NOT resize or re-render to background dimensions
+        return;
+    }
     if (window.innerWidth < 100 || window.innerHeight < 100) {
         // Webview tab is hidden or backgrounded; ignore transient collapsed dimensions
         if (!resizeRafId) {
@@ -639,6 +650,7 @@ function resize() {
     canvas.width = Math.floor(window.innerWidth * dpr);
     canvas.height = Math.floor(window.innerHeight * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    tileRasterCache.clear();
     render();
 }
 
@@ -654,6 +666,27 @@ canvas.addEventListener("contextrestored", () => {
     console.log("Thumbview Canvas context restored.");
     resize();
 });
+
+let hideTransitionTimeout = null;
+function ensureVisibleOpacity() {
+    if (document.body.style.opacity !== "1") {
+        document.body.style.opacity = "1";
+    }
+    if (hideTransitionTimeout) {
+        clearTimeout(hideTransitionTimeout);
+        hideTransitionTimeout = null;
+    }
+}
+
+window.addEventListener("focus", ensureVisibleOpacity);
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+        ensureVisibleOpacity();
+        resize();
+    }
+});
+window.addEventListener("pointerdown", ensureVisibleOpacity, true);
+window.addEventListener("keydown", ensureVisibleOpacity, true);
 
 // Host -> webview protocol (extension.ts is the sender in each case): "status" (loading/
 // error text), "data" (the full file/layout payload), "activeFile" (URI of the focused
@@ -686,9 +719,15 @@ window.addEventListener("message", event => {
     // extension.ts onDidChangeViewState enter path — keep in sync)
     if (msg.command === "hideForTransition") {
         document.body.style.opacity = "0";
+        if (hideTransitionTimeout) {
+            clearTimeout(hideTransitionTimeout);
+        }
+        hideTransitionTimeout = setTimeout(() => {
+            ensureVisibleOpacity();
+        }, 400);
     }
     if (msg.command === "showAfterTransition") {
-        document.body.style.opacity = "1";
+        ensureVisibleOpacity();
     }
 
     function applyDataMessage(msg) {
@@ -696,6 +735,8 @@ window.addEventListener("message", event => {
             userReorderedFileSlots.clear();
         }
         data = msg;
+        data._version = (data._version || 0) + 1;
+        tileRasterCache.clear();
         if (userReorderedFileSlots.size > 0 && data && data.files) {
             for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
                 const f = data.files[fIdx];
@@ -736,7 +777,9 @@ window.addEventListener("message", event => {
                     if (f.lines && cached.lines) {
                         for (let lIdx = 0; lIdx < f.lines.length && lIdx < cached.lines.length; lIdx++) {
                             f.lines[lIdx]._lowerText = cached.lines[lIdx].lowerText;
-                            f.lines[lIdx]._tokens = cached.lines[lIdx].tokens;
+                            if (cached.lines[lIdx].tokens) {
+                                f.lines[lIdx]._tokens = cached.lines[lIdx].tokens;
+                            }
                         }
                     }
                 } else {
@@ -749,10 +792,9 @@ window.addEventListener("message", event => {
                             const l = f.lines[lIdx];
                             const lower = l.text ? l.text.toLowerCase() : "";
                             l._lowerText = lower;
-                            l._tokens = tokenizeLine(l.text ? l.text.trimStart() : "", lang);
                             textArr.push(lower);
                             textArrOriginal.push(l.text || "");
-                            cachedLines.push({ lowerText: lower, tokens: l._tokens });
+                            cachedLines.push({ lowerText: lower });
                         }
                         let totalChars = 0;
                         let validCount = 0;
@@ -804,9 +846,13 @@ window.addEventListener("message", event => {
                 kbdLabel2.textContent = msg.openKeybinding;
             }
         }
-        updateSettingsModalState();
-        updateIgnoresPopover();
-        updateFoldersPopover();
+        if (actionsModal && actionsModal.style.display === "block") {
+            updateSettingsModalState();
+        }
+        if (foldersPopover && foldersPopover.style.display === "block") {
+            updateIgnoresPopover();
+            updateFoldersPopover();
+        }
         render();
     }
 
@@ -1901,6 +1947,22 @@ const THUMBNAIL_LINE_HEIGHT_RATIO = 0.88;
 const THUMBNAIL_MAX_FONT_SIZE = 13;
 const THUMBNAIL_MIN_FONT_SIZE = 3.2;
 const THUMBNAIL_MIN_TEXT_PITCH = 1.5;
+const THUMBNAIL_MIN_READABLE_FONT_SIZE = 6.0;
+const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 5.0;
+
+const monospaceCharWidthCache = new Map();
+function getMonospaceCharWidth(fontSize) {
+    const quantized = Math.round(fontSize * 10) / 10;
+    let w = monospaceCharWidthCache.get(quantized);
+    if (w === undefined) {
+        ctx.save();
+        ctx.font = `${quantized}px Consolas, "Courier New", monospace`;
+        w = ctx.measureText("M").width || (quantized * THUMBNAIL_CHAR_ASPECT_RATIO);
+        ctx.restore();
+        monospaceCharWidthCache.set(quantized, w);
+    }
+    return w;
+}
 const THUMBNAIL_INDENT_MAX_RATIO = 0.4;
 const THUMBNAIL_LINE_WIDTH_RATIO = 0.7;
 const THUMBNAIL_TEXT_VERTICAL_RATIO = 0.85;
@@ -2030,6 +2092,18 @@ function drawThumbnail(file, x, y, w, h) {
                         console.error("PDF RENDER ERROR:", err);
                         imageCache[file.mediaUri] = "error";
                     });
+                } else if (window.PDF_JS_URI && !window._pdfJsLoading) {
+                    window._pdfJsLoading = true;
+                    const script = document.createElement("script");
+                    script.src = window.PDF_JS_URI;
+                    script.onload = () => {
+                        window._pdfJsLoading = false;
+                        render();
+                    };
+                    script.onerror = () => {
+                        window._pdfJsLoading = false;
+                    };
+                    document.head.appendChild(script);
                 }
             }
             const cachedPdfImg = imageCache[file.mediaUri];
@@ -2061,21 +2135,15 @@ function drawThumbnail(file, x, y, w, h) {
         return;
     }
 
+function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, useText, fontSize, stepY) {
     const lines = file.lines || [];
-    const lineCount = Math.max(lines.length, 1);
-    const stepY = Math.min(h / lineCount, THUMBNAIL_MAX_LINE_PITCH);
     const maxLineChars = THUMBNAIL_MAX_LINE_CHARS;
 
-    const targetLineChars = Math.min(maxLineChars, Math.max(THUMBNAIL_MIN_AVG_CHARS, file._avgLineChars || THUMBNAIL_DEFAULT_AVG_CHARS));
-    const fontForWidth = (w * THUMBNAIL_WIDTH_BUDGET_FACTOR) / (targetLineChars * THUMBNAIL_CHAR_ASPECT_RATIO);
-    const fontForHeight = stepY * THUMBNAIL_LINE_HEIGHT_RATIO;
-    const rawFontSize = Math.min(fontForHeight, fontForWidth, THUMBNAIL_MAX_FONT_SIZE);
-    const fontSize = Math.max(THUMBNAIL_MIN_FONT_SIZE, Math.floor(rawFontSize * 10) / 10);
-    const useText = fontSize >= THUMBNAIL_MIN_FONT_SIZE && stepY >= THUMBNAIL_MIN_TEXT_PITCH;
-
     if (useText) {
-        ctx.font = `${fontSize}px Consolas, "Courier New", monospace`;
+        targetCtx.font = `${fontSize}px Consolas, "Courier New", monospace`;
     }
+
+    const charWidth = useText ? getMonospaceCharWidth(fontSize) : 0;
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
@@ -2118,51 +2186,66 @@ function drawThumbnail(file, x, y, w, h) {
             }
         }
 
-        const gitType = (file.gitStatus === "untracked" || file.gitStatus === "added")
+        let gitType = (file.gitStatus === "untracked" || file.gitStatus === "added")
             ? "added"
-            : (file.gitChanges ? file.gitChanges[i] : undefined);
+            : undefined;
+        if (!gitType && file.gitChanges) {
+            if (file.lineCount && file.lineCount > lines.length) {
+                const step = file.lineCount / lines.length;
+                const startLineIdx = Math.floor(i * step);
+                const endLineIdx = Math.max(startLineIdx + 1, Math.min(Math.floor((i + 1) * step), file.lineCount));
+                for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
+                    if (file.gitChanges[fullI]) {
+                        gitType = file.gitChanges[fullI];
+                        break;
+                    }
+                }
+            } else {
+                gitType = file.gitChanges[i];
+            }
+        }
 
         if (isMatchedLine) {
-            ctx.fillStyle = THEME_COLORS.searchMatchHighlight;
-            ctx.fillRect(
-                x,
-                y + i * stepY,
+            targetCtx.fillStyle = THEME_COLORS.searchMatchHighlight;
+            targetCtx.fillRect(
+                originX,
+                originY + i * stepY,
                 w,
                 Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
             );
-            ctx.fillStyle = ACCENT_SEARCH;
-            ctx.fillRect(
-                x,
-                y + i * stepY,
+            targetCtx.fillStyle = ACCENT_SEARCH;
+            targetCtx.fillRect(
+                originX,
+                originY + i * stepY,
                 THUMBNAIL_GIT_GUTTER_WIDTH,
                 Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
             );
         } else if (isErrorLine) {
-            ctx.fillStyle = ERROR_STYLES.errorBg;
-            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-            ctx.fillStyle = ERROR_STYLES.errorGutter;
-            ctx.fillRect(x, y + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            targetCtx.fillStyle = ERROR_STYLES.errorBg;
+            targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            targetCtx.fillStyle = ERROR_STYLES.errorGutter;
+            targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
         } else if (gitType === "modified") {
-            ctx.fillStyle = GIT_STYLES.modifiedBg;
-            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-            ctx.fillStyle = GIT_STYLES.modifiedGutter;
-            ctx.fillRect(x, y + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            targetCtx.fillStyle = GIT_STYLES.modifiedBg;
+            targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            targetCtx.fillStyle = GIT_STYLES.modifiedGutter;
+            targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
         } else if (gitType === "added") {
-            ctx.fillStyle = GIT_STYLES.addedBg;
-            ctx.fillRect(x, y + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-            ctx.fillStyle = GIT_STYLES.addedGutter;
-            ctx.fillRect(x, y + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            targetCtx.fillStyle = GIT_STYLES.addedBg;
+            targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            targetCtx.fillStyle = GIT_STYLES.addedGutter;
+            targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
         } else if (gitType === "removed") {
-            ctx.fillStyle = GIT_STYLES.deletedLine;
-            const triY = y + i * stepY;
+            targetCtx.fillStyle = GIT_STYLES.deletedLine;
+            const triY = originY + i * stepY;
             const triH = Math.max(stepY, 3);
             const triW = THUMBNAIL_GIT_GUTTER_WIDTH + 1.5;
-            ctx.beginPath();
-            ctx.moveTo(x, triY);
-            ctx.lineTo(x + triW, triY + triH / 2);
-            ctx.lineTo(x, triY + triH);
-            ctx.closePath();
-            ctx.fill();
+            targetCtx.beginPath();
+            targetCtx.moveTo(originX, triY);
+            targetCtx.lineTo(originX + triW, triY + triH / 2);
+            targetCtx.lineTo(originX, triY + triH);
+            targetCtx.closePath();
+            targetCtx.fill();
         }
 
         if (!line || !lineText) {
@@ -2170,7 +2253,7 @@ function drawThumbnail(file, x, y, w, h) {
         }
 
         const indent = line.indent || 0;
-        const startX = x + Math.min(indent / maxLineChars, THUMBNAIL_INDENT_MAX_RATIO) * w;
+        const startX = originX + Math.min(indent / maxLineChars, THUMBNAIL_INDENT_MAX_RATIO) * w;
         const trimmedText = lineText.trimStart();
         const lineTextLength = trimmedText.length;
         if (lineTextLength === 0) {
@@ -2178,29 +2261,83 @@ function drawThumbnail(file, x, y, w, h) {
         }
 
         const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * THUMBNAIL_LINE_WIDTH_RATIO;
-        const tokens = line._tokens || tokenizeLine(trimmedText, detectLang(file.path));
+        const tokens = line._tokens || (line._tokens = tokenizeLine(trimmedText, detectLang(file.path)));
         const totalTextChars = Math.max(lineTextLength, 1);
 
         let currentX = startX;
         for (const tok of tokens) {
-            if (currentX >= x + w) break;
+            if (currentX >= originX + w) break;
 
-            ctx.fillStyle = colorForCategory(tok.category, tok.isKey);
+            targetCtx.fillStyle = colorForCategory(tok.category, tok.isKey);
             if (useText) {
-                ctx.fillText(tok.text, currentX, y + i * stepY + Math.min(stepY * THUMBNAIL_TEXT_VERTICAL_RATIO, fontSize * THUMBNAIL_TEXT_FONT_RATIO));
-                currentX += ctx.measureText(tok.text).width;
+                targetCtx.fillText(tok.text, currentX, originY + i * stepY + Math.min(stepY * THUMBNAIL_TEXT_VERTICAL_RATIO, fontSize * THUMBNAIL_TEXT_FONT_RATIO));
+                currentX += tok.text.length * charWidth;
             } else {
                 const tokLen = tok.text.length;
                 const tokW = (tokLen / totalTextChars) * lineW;
 
-                ctx.fillRect(
+                targetCtx.fillRect(
                     currentX,
-                    y + i * stepY,
-                    Math.min(tokW, x + w - currentX),
+                    originY + i * stepY,
+                    Math.min(tokW, originX + w - currentX),
                     Math.max(stepY, THUMBNAIL_BLOCK_MIN_HEIGHT)
                 );
                 currentX += tokW;
             }
+        }
+    }
+}
+
+    const lines = file.lines || [];
+    const lineCount = Math.max(lines.length, 1);
+    const stepY = Math.min(h / lineCount, THUMBNAIL_MAX_LINE_PITCH);
+    const maxLineChars = THUMBNAIL_MAX_LINE_CHARS;
+
+    const targetLineChars = Math.min(maxLineChars, Math.max(THUMBNAIL_MIN_AVG_CHARS, file._avgLineChars || THUMBNAIL_DEFAULT_AVG_CHARS));
+    const fontForWidth = (w * THUMBNAIL_WIDTH_BUDGET_FACTOR) / (targetLineChars * THUMBNAIL_CHAR_ASPECT_RATIO);
+    const fontForHeight = stepY * THUMBNAIL_LINE_HEIGHT_RATIO;
+    const rawFontSize = Math.min(fontForHeight, fontForWidth, THUMBNAIL_MAX_FONT_SIZE);
+    const fontSize = Math.max(THUMBNAIL_MIN_FONT_SIZE, Math.floor(rawFontSize * 10) / 10);
+    const useText = fontSize >= THUMBNAIL_MIN_READABLE_FONT_SIZE && stepY >= THUMBNAIL_MIN_READABLE_TEXT_PITCH;
+
+    const intW = Math.round(w);
+    const intH = Math.round(h);
+    const useRasterCache = intW >= 30 && intH >= 30;
+    const tileKey = useRasterCache
+        ? `${file.id}:${intW}:${intH}:${rawSearchQuery && !searchInvalid ? rawSearchQuery : ""}:${file.gitStatus || ""}:${file.gitChanges ? 1 : 0}:${file.errorLines ? 1 : 0}`
+        : null;
+
+    let cached = tileKey ? tileRasterCache.get(tileKey) : null;
+    if (cached) {
+        ctx.drawImage(cached, x, y);
+    } else {
+        let offscreen = null;
+        let offCtx = null;
+        if (useRasterCache) {
+            try {
+                offscreen = document.createElement("canvas");
+                offscreen.width = intW;
+                offscreen.height = intH;
+                offCtx = offscreen.getContext("2d");
+            } catch (e) {
+                offscreen = null;
+                offCtx = null;
+            }
+        }
+
+        const targetCtx = offCtx || ctx;
+        const originX = offCtx ? 0 : x;
+        const originY = offCtx ? 0 : y;
+
+        renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, useText, fontSize, stepY);
+
+        if (offscreen && offCtx) {
+            if (tileRasterCache.size >= MAX_TILE_CACHE_ENTRIES) {
+                const firstKey = tileRasterCache.keys().next().value;
+                tileRasterCache.delete(firstKey);
+            }
+            tileRasterCache.set(tileKey, offscreen);
+            ctx.drawImage(offscreen, x, y);
         }
     }
 
@@ -2217,9 +2354,10 @@ function drawThumbnail(file, x, y, w, h) {
 
         const thumbnailY = y;
         const thumbnailH = h;
+        const contentH = Math.min(thumbnailH, lines.length * stepY);
 
-        const bandY = thumbnailY + startRatio * thumbnailH;
-        const bandH = Math.max((endRatio - startRatio) * thumbnailH, THUMBNAIL_VIEWPORT_MIN_HEIGHT);
+        const bandY = thumbnailY + startRatio * contentH;
+        const bandH = Math.max((endRatio - startRatio) * contentH, THUMBNAIL_VIEWPORT_MIN_HEIGHT);
 
         // Store bounding rect of view band on cell for click detection
         file._cell._viewBand = {
@@ -2232,7 +2370,7 @@ function drawThumbnail(file, x, y, w, h) {
             x,
             bandY,
             w,
-            Math.min(bandH, thumbnailY + thumbnailH - bandY)
+            Math.min(bandH, thumbnailY + contentH - bandY)
         );
     } else if (file._cell) {
         delete file._cell._viewBand;
@@ -2388,10 +2526,10 @@ function render() {
         return;
     }
 
-    const rectW = canvas.clientWidth || window.innerWidth;
-    const rectH = canvas.clientHeight || window.innerHeight;
+    const rectW = Math.max(canvas.clientWidth, window.innerWidth);
+    const rectH = Math.max(canvas.clientHeight, window.innerHeight);
 
-    if (rectW < 200 || rectH < 200) {
+    if (document.hidden || document.visibilityState === "hidden" || rectW < 200 || rectH < 200) {
         // Tab container is transitionally backgrounded or hidden
         if (!resizeRafId) {
             resizeRafId = requestAnimationFrame(() => {
@@ -2490,13 +2628,10 @@ function render() {
         }
     }
 
-    const rootCellsTooSmall = refCellW < MIN_CELL_W || refCellH < MIN_CELL_H || hasTallFileOverflow || rootCellW < MIN_CELL_W || rootCellH < MIN_CELL_H;
+    const rootCellsTooSmall = refCellW < MIN_CELL_W || refCellH < MIN_CELL_H || hasTallFileOverflow;
 
-    // If root tiles are NOT too small (rootCellsTooSmall === false), individual file tiles
-    // are visible in their stable root grid slots — selecting a directory lowlights non-selected files.
-    // If root tiles ARE too small (rootCellsTooSmall === true), directories have shrunk into
-    // folder thumbnail cards — selecting a directory opens/drills down into that folder.
-    const shouldOpenFolder = !!(focusedFolder && rootCellsTooSmall);
+    // Opening/focusing a directory drills down into that folder so its files span the canvas.
+    const shouldOpenFolder = !!focusedFolder;
 
     const scopedFiles = shouldOpenFolder
         ? data.files.filter(f => f.path && (focusedFolder === "(root files)/" ? !f.path.includes("/") : f.path.startsWith(focusedFolder)))
@@ -2539,7 +2674,11 @@ function render() {
             folderCellW = availableW / Math.max(1, folderCols);
             folderCellH = availableH / Math.max(1, folderRows);
         }
-        cellsTooSmall = hasSubfolders && (doesFolderCollapse(scopedFiles, effectiveBasePath, isSpanningMode, availableW, availableH) || folderCellW < MIN_CELL_W || folderCellH < MIN_CELL_H);
+        const refFolderCols = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.cols : 1) : (localFolderGrid ? localFolderGrid.cols + extraCols : 1);
+        const refFolderRows = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.rows : 1) : (localFolderGrid ? localFolderGrid.rows + extraRows : 1);
+        const refFolderCellW = refAvailableW / Math.max(1, refFolderCols);
+        const refFolderCellH = refAvailableH / Math.max(1, refFolderRows);
+        cellsTooSmall = hasSubfolders && (doesFolderCollapse(scopedFiles, effectiveBasePath, isSpanningMode) || refFolderCellW < MIN_CELL_W || refFolderCellH < MIN_CELL_H);
     } else {
         cellsTooSmall = hasSubfolders && rootCellsTooSmall;
     }
@@ -2761,204 +2900,233 @@ function render() {
                 const mosaicH = localCellH - 46;
 
                 if (mosaicW >= 24 && mosaicH >= 16 && group.files && group.files.length > 0) {
-                    const willCollapse = doesFolderCollapse(group.files, group.path, isSpanningMode);
-                    const groupFolderOrder = willCollapse
-                        ? ((data && data.folderCardOrders && data.folderCardOrders[group.path]) || null)
-                        : ((data && data.folderOrders && data.folderOrders[group.path]) || null);
-                    const childSubfolderInfo = getSubfolderGroups(group.files, group.path);
-                    const previewItems = willCollapse
-                        ? childSubfolderInfo.orderedItems
-                        : group.files.map(f => ({ type: "file", file: f, id: f.id }));
+                    const mosaicWInt = Math.round(mosaicW);
+                    const mosaicHInt = Math.round(mosaicH);
+                    const mosaicCacheKey = `${group.path}:${mosaicWInt}:${mosaicHInt}:${isSpanningMode}:${queryActive ? rawSearchQuery : ""}:${activeFileUri}:${openFiles.length}:${light ? 1 : 0}:${group.files.length}:${data._version || 0}`;
 
-                    if (!willCollapse && isSpanningMode) {
-                        const itemsToLayout = previewItems.map(it => {
-                            if (it.type === "folder") {
-                                return { id: it.id, item: it, isFolder: true, nCells: 1 };
-                            }
-                            const f = it.file;
-                            const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
-                            return { id: it.id, item: it, file: f, lineCount: f.lineCount, nCells };
-                        });
-                        const groupFolderWrapRows = (data && data.folderWrapRows && data.folderWrapRows[group.path]) || null;
-                        const groupFolderExtraCols = (data && data.folderExtraCols && typeof data.folderExtraCols[group.path] === "number")
-                            ? data.folderExtraCols[group.path]
-                            : 0;
-                        const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
-                            ? data.folderExtraRows[group.path]
-                            : 0;
-                        const spanningLayout = buildSpanningGridLocal(itemsToLayout, BASE_GRID_ASPECT, groupFolderOrder, groupFolderExtraCols, groupFolderExtraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), groupFolderWrapRows);
-                        const miniCols = spanningLayout.cols;
-                        const miniRows = spanningLayout.rows;
-                        const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
-
-                        const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
-                        const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
-
-                        for (const placement of spanningLayout.placements) {
-                            const miniX = mosaicX + placement.col * (miniCellW + gap);
-                            const miniY = mosaicY + placement.row * (miniCellH + gap);
-                            const miniFileH = placement.nCells * miniCellH + (placement.nCells - 1) * gap;
-
-                            if (placement.item && placement.item.type === "folder") {
-                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
-                                ctx.fillRect(miniX, miniY, miniCellW, miniFileH);
-
-                                ctx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.5);
-                                ctx.lineWidth = 1;
-                                ctx.strokeRect(miniX, miniY, miniCellW, miniFileH);
-
-                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.35);
-                                ctx.fillRect(miniX, miniY, miniCellW, Math.min(6, miniFileH));
-
-                                if (miniCellW >= 24 && miniFileH >= 12 && placement.item.card) {
-                                    ctx.fillStyle = getThemeColor("--vscode-foreground", light ? "#3730a3" : "#c4b5fd");
-                                    const miniFont = `${Math.max(6, Math.min(8, miniCellW / 8))}px system-ui, sans-serif`;
-                                    ctx.font = miniFont;
-                                    let miniLabel = placement.item.card.name;
-                                    while (miniLabel.length > 1 && ctx.measureText(miniLabel).width > miniCellW - 4) {
-                                        miniLabel = miniLabel.slice(0, -1);
-                                    }
-                                    ctx.fillText(miniLabel, miniX + 2, miniY + Math.min(10, miniFileH - 2));
-                                }
-                                continue;
-                            }
-
-                            const pf = placement.file;
-                            if (!pf) continue;
-                            const isOpen = openFilesSet.has(pf.uri);
-                            const isActive = pf.uri === activeFileUri;
-                            const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
-
-                            ctx.fillStyle = isSearchMatch
-                                ? withAlpha(ACCENT_SEARCH, 0.35)
-                                : (light ? "#eaeaf0" : "#141418");
-                            ctx.fillRect(miniX, miniY, miniCellW, miniFileH);
-
-                            ctx.strokeStyle = isSearchMatch
-                                ? ACCENT_SEARCH
-                                : (isActive
-                                    ? (BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4")
-                                    : (isOpen
-                                        ? ACCENT_RECENCY
-                                        : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
-                            ctx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
-                            ctx.strokeRect(miniX, miniY, miniCellW, miniFileH);
-
-                            if (pf.lines && pf.lines.length > 0 && miniFileH >= 10 && miniCellW >= 8) {
-                                const maxLines = Math.min(pf.lines.length, Math.floor((miniFileH - 4) / 2));
-                                for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
-                                    const line = pf.lines[lineIdx];
-                                    const lineY = miniY + 3 + lineIdx * 2;
-                                    const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
-                                    const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
-                                    ctx.fillStyle = withAlpha(colorForCategory(line.category || "normal", false), 0.75);
-                                    ctx.fillRect(miniX + 2 + lineIndent, lineY, Math.max(1, lineWidth - lineIndent), 1);
-                                }
-                            } else if (miniFileH >= 4 && miniCellW >= 4 && pf.gitStatus) {
-                                ctx.fillStyle = pf.gitStatus === "modified"
-                                    ? (TILE_LABEL_COLOR.modified || "#e2c08d")
-                                    : (TILE_LABEL_COLOR.added || "#73c991");
-                                ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniFileH - 2));
-                            }
-                        }
+                    if (group._miniCache && group._miniCache.key === mosaicCacheKey) {
+                        ctx.drawImage(group._miniCache.canvas, mosaicX, mosaicY);
                     } else {
-                        const totalSlots = Math.max(previewItems.length, groupFolderOrder ? groupFolderOrder.length : 0);
-                        const baseMiniGrid = buildStableGrid(totalSlots, BASE_GRID_ASPECT);
-                        const groupFolderExtraCols = (data && data.folderExtraCols && typeof data.folderExtraCols[group.path] === "number")
-                            ? data.folderExtraCols[group.path]
-                            : 0;
-                        const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
-                            ? data.folderExtraRows[group.path]
-                            : 0;
-                        const miniCols = baseMiniGrid.cols + groupFolderExtraCols;
-                        const miniRows = baseMiniGrid.rows + groupFolderExtraRows;
-                        const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
+                        let miniOffscreen = null;
+                        let miniCtx = null;
+                        try {
+                            miniOffscreen = document.createElement("canvas");
+                            miniOffscreen.width = mosaicWInt;
+                            miniOffscreen.height = mosaicHInt;
+                            miniCtx = miniOffscreen.getContext("2d");
+                        } catch (e) {
+                            miniOffscreen = null;
+                            miniCtx = null;
+                        }
 
-                        const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
-                        const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
+                        const targetMiniCtx = miniCtx || ctx;
+                        const originMosaicX = miniCtx ? 0 : mosaicX;
+                        const originMosaicY = miniCtx ? 0 : mosaicY;
 
-                        const miniSlots = [];
-                        for (let r = 0; r < miniRows; r++) {
-                            for (let c = 0; c < miniCols; c++) {
-                                miniSlots.push([c, r]);
+                        const willCollapse = doesFolderCollapse(group.files, group.path, isSpanningMode);
+                        const groupFolderOrder = willCollapse
+                            ? ((data && data.folderCardOrders && data.folderCardOrders[group.path]) || null)
+                            : ((data && data.folderOrders && data.folderOrders[group.path]) || null);
+                        const childSubfolderInfo = getSubfolderGroups(group.files, group.path);
+                        const previewItems = willCollapse
+                            ? childSubfolderInfo.orderedItems
+                            : group.files.map(f => ({ type: "file", file: f, id: f.id }));
+
+                        if (!willCollapse && isSpanningMode) {
+                            const itemsToLayout = previewItems.map(it => {
+                                if (it.type === "folder") {
+                                    return { id: it.id, item: it, isFolder: true, nCells: 1 };
+                                }
+                                const f = it.file;
+                                const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
+                                return { id: it.id, item: it, file: f, lineCount: f.lineCount, nCells };
+                            });
+                            const groupFolderWrapRows = (data && data.folderWrapRows && data.folderWrapRows[group.path]) || null;
+                            const groupFolderExtraCols = (data && data.folderExtraCols && typeof data.folderExtraCols[group.path] === "number")
+                                ? data.folderExtraCols[group.path]
+                                : 0;
+                            const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
+                                ? data.folderExtraRows[group.path]
+                                : 0;
+                            const spanningLayout = buildSpanningGridLocal(itemsToLayout, BASE_GRID_ASPECT, groupFolderOrder, groupFolderExtraCols, groupFolderExtraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), groupFolderWrapRows);
+                            const miniCols = spanningLayout.cols;
+                            const miniRows = spanningLayout.rows;
+                            const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
+
+                            const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
+                            const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
+
+                            for (const placement of spanningLayout.placements) {
+                                const miniX = originMosaicX + placement.col * (miniCellW + gap);
+                                const miniY = originMosaicY + placement.row * (miniCellH + gap);
+                                const miniFileH = placement.nCells * miniCellH + (placement.nCells - 1) * gap;
+
+                                if (placement.item && placement.item.type === "folder") {
+                                    targetMiniCtx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
+                                    targetMiniCtx.fillRect(miniX, miniY, miniCellW, miniFileH);
+
+                                    targetMiniCtx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.5);
+                                    targetMiniCtx.lineWidth = 1;
+                                    targetMiniCtx.strokeRect(miniX, miniY, miniCellW, miniFileH);
+
+                                    targetMiniCtx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.35);
+                                    targetMiniCtx.fillRect(miniX, miniY, miniCellW, Math.min(6, miniFileH));
+
+                                    if (miniCellW >= 24 && miniFileH >= 12 && placement.item.card) {
+                                        targetMiniCtx.fillStyle = getThemeColor("--vscode-foreground", light ? "#3730a3" : "#c4b5fd");
+                                        const miniFont = `${Math.max(6, Math.min(8, miniCellW / 8))}px system-ui, sans-serif`;
+                                        targetMiniCtx.font = miniFont;
+                                        let miniLabel = placement.item.card.name;
+                                        while (miniLabel.length > 1 && targetMiniCtx.measureText(miniLabel).width > miniCellW - 4) {
+                                            miniLabel = miniLabel.slice(0, -1);
+                                        }
+                                        targetMiniCtx.fillText(miniLabel, miniX + 2, miniY + Math.min(10, miniFileH - 2));
+                                    }
+                                    continue;
+                                }
+
+                                const pf = placement.file;
+                                if (!pf) continue;
+                                const isOpen = openFilesSet.has(pf.uri);
+                                const isActive = pf.uri === activeFileUri;
+                                const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
+
+                                targetMiniCtx.fillStyle = isSearchMatch
+                                    ? withAlpha(ACCENT_SEARCH, 0.35)
+                                    : (light ? "#eaeaf0" : "#141418");
+                                targetMiniCtx.fillRect(miniX, miniY, miniCellW, miniFileH);
+
+                                targetMiniCtx.strokeStyle = isSearchMatch
+                                    ? ACCENT_SEARCH
+                                    : (isActive
+                                        ? (BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4")
+                                        : (isOpen
+                                            ? ACCENT_RECENCY
+                                            : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
+                                targetMiniCtx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
+                                targetMiniCtx.strokeRect(miniX, miniY, miniCellW, miniFileH);
+
+                                if (pf.lines && pf.lines.length > 0 && miniFileH >= 10 && miniCellW >= 8) {
+                                    const maxLines = Math.min(pf.lines.length, Math.floor((miniFileH - 4) / 2));
+                                    for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
+                                        const line = pf.lines[lineIdx];
+                                        const lineY = miniY + 3 + lineIdx * 2;
+                                        const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
+                                        const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
+                                        targetMiniCtx.fillStyle = withAlpha(colorForCategory(line.category || "normal", false), 0.75);
+                                        targetMiniCtx.fillRect(miniX + 2 + lineIndent, lineY, Math.max(1, lineWidth - lineIndent), 1);
+                                    }
+                                } else if (miniFileH >= 4 && miniCellW >= 4 && pf.gitStatus) {
+                                    targetMiniCtx.fillStyle = pf.gitStatus === "modified"
+                                        ? (TILE_LABEL_COLOR.modified || "#e2c08d")
+                                        : (TILE_LABEL_COLOR.added || "#73c991");
+                                    targetMiniCtx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniFileH - 2));
+                                }
+                            }
+                        } else {
+                            const totalSlots = Math.max(previewItems.length, groupFolderOrder ? groupFolderOrder.length : 0);
+                            const baseMiniGrid = buildStableGrid(totalSlots, BASE_GRID_ASPECT);
+                            const groupFolderExtraCols = (data && data.folderExtraCols && typeof data.folderExtraCols[group.path] === "number")
+                                ? data.folderExtraCols[group.path]
+                                : 0;
+                            const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
+                                ? data.folderExtraRows[group.path]
+                                : 0;
+                            const miniCols = baseMiniGrid.cols + groupFolderExtraCols;
+                            const miniRows = baseMiniGrid.rows + groupFolderExtraRows;
+                            const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
+
+                            const miniCellW = Math.max(1, (mosaicW - (miniCols - 1) * gap) / miniCols);
+                            const miniCellH = Math.max(1, (mosaicH - (miniRows - 1) * gap) / miniRows);
+
+                            const miniSlots = [];
+                            for (let r = 0; r < miniRows; r++) {
+                                for (let c = 0; c < miniCols; c++) {
+                                    miniSlots.push([c, r]);
+                                }
+                            }
+
+                            const itemsById = new Map(previewItems.map(it => [it.id, it]));
+                            const orderToUse = groupFolderOrder && groupFolderOrder.length > 0
+                                ? groupFolderOrder
+                                : previewItems.map(it => it.id);
+
+                            for (let mIdx = 0; mIdx < orderToUse.length && mIdx < miniSlots.length; mIdx++) {
+                                const fid = orderToUse[mIdx];
+                                if (!fid) continue;
+                                const pit = itemsById.get(fid);
+                                if (!pit) continue;
+                                const miniSlot = miniSlots[mIdx];
+                                const miniX = originMosaicX + miniSlot[0] * (miniCellW + gap);
+                                const miniY = originMosaicY + miniSlot[1] * (miniCellH + gap);
+
+                                if (pit.type === "folder") {
+                                    targetMiniCtx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
+                                    targetMiniCtx.fillRect(miniX, miniY, miniCellW, miniCellH);
+
+                                    targetMiniCtx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.5);
+                                    targetMiniCtx.lineWidth = 1;
+                                    targetMiniCtx.strokeRect(miniX, miniY, miniCellW, miniCellH);
+
+                                    targetMiniCtx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.35);
+                                    targetMiniCtx.fillRect(miniX, miniY, miniCellW, Math.min(6, miniCellH));
+
+                                    if (miniCellW >= 24 && miniCellH >= 12 && pit.card) {
+                                        targetMiniCtx.fillStyle = getThemeColor("--vscode-foreground", light ? "#3730a3" : "#c4b5fd");
+                                        const miniFont = `${Math.max(6, Math.min(8, miniCellW / 8))}px system-ui, sans-serif`;
+                                        targetMiniCtx.font = miniFont;
+                                        let miniLabel = pit.card.name;
+                                        while (miniLabel.length > 1 && targetMiniCtx.measureText(miniLabel).width > miniCellW - 4) {
+                                            miniLabel = miniLabel.slice(0, -1);
+                                        }
+                                        targetMiniCtx.fillText(miniLabel, miniX + 2, miniY + Math.min(10, miniCellH - 2));
+                                    }
+                                    continue;
+                                }
+
+                                const pf = pit.file;
+                                if (!pf) continue;
+                                const isOpen = openFilesSet.has(pf.uri);
+                                const isActive = pf.uri === activeFileUri;
+                                const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
+
+                                targetMiniCtx.fillStyle = isSearchMatch
+                                    ? withAlpha(ACCENT_SEARCH, 0.35)
+                                    : (light ? "#eaeaf0" : "#141418");
+                                targetMiniCtx.fillRect(miniX, miniY, miniCellW, miniCellH);
+
+                                targetMiniCtx.strokeStyle = isSearchMatch
+                                    ? ACCENT_SEARCH
+                                    : (isActive
+                                        ? (BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4")
+                                        : (isOpen
+                                            ? ACCENT_RECENCY
+                                            : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
+                                targetMiniCtx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
+                                targetMiniCtx.strokeRect(miniX, miniY, miniCellW, miniCellH);
+
+                                if (pf.lines && pf.lines.length > 0 && miniCellH >= 10 && miniCellW >= 8) {
+                                    const maxLines = Math.min(pf.lines.length, Math.floor((miniCellH - 4) / 2));
+                                    for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
+                                        const line = pf.lines[lineIdx];
+                                        const lineY = miniY + 3 + lineIdx * 2;
+                                        const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
+                                        const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
+                                        targetMiniCtx.fillStyle = withAlpha(colorForCategory(line.category || "normal", false), 0.75);
+                                        targetMiniCtx.fillRect(miniX + 2 + lineIndent, lineY, Math.max(1, lineWidth - lineIndent), 1);
+                                    }
+                                } else if (miniCellH >= 4 && miniCellW >= 4 && pf.gitStatus) {
+                                    targetMiniCtx.fillStyle = pf.gitStatus === "modified"
+                                        ? (TILE_LABEL_COLOR.modified || "#e2c08d")
+                                        : (TILE_LABEL_COLOR.added || "#73c991");
+                                    targetMiniCtx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniCellH - 2));
+                                }
                             }
                         }
 
-                        const itemsById = new Map(previewItems.map(it => [it.id, it]));
-                        const orderToUse = groupFolderOrder && groupFolderOrder.length > 0
-                            ? groupFolderOrder
-                            : previewItems.map(it => it.id);
-
-                        for (let mIdx = 0; mIdx < orderToUse.length && mIdx < miniSlots.length; mIdx++) {
-                            const fid = orderToUse[mIdx];
-                            if (!fid) continue;
-                            const pit = itemsById.get(fid);
-                            if (!pit) continue;
-                            const miniSlot = miniSlots[mIdx];
-                            const miniX = mosaicX + miniSlot[0] * (miniCellW + gap);
-                            const miniY = mosaicY + miniSlot[1] * (miniCellH + gap);
-
-                            if (pit.type === "folder") {
-                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.15);
-                                ctx.fillRect(miniX, miniY, miniCellW, miniCellH);
-
-                                ctx.strokeStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.5);
-                                ctx.lineWidth = 1;
-                                ctx.strokeRect(miniX, miniY, miniCellW, miniCellH);
-
-                                ctx.fillStyle = withAlpha(getThemeColor("--vscode-focusBorder", "#a855f7"), 0.35);
-                                ctx.fillRect(miniX, miniY, miniCellW, Math.min(6, miniCellH));
-
-                                if (miniCellW >= 24 && miniCellH >= 12 && pit.card) {
-                                    ctx.fillStyle = getThemeColor("--vscode-foreground", light ? "#3730a3" : "#c4b5fd");
-                                    const miniFont = `${Math.max(6, Math.min(8, miniCellW / 8))}px system-ui, sans-serif`;
-                                    ctx.font = miniFont;
-                                    let miniLabel = pit.card.name;
-                                    while (miniLabel.length > 1 && ctx.measureText(miniLabel).width > miniCellW - 4) {
-                                        miniLabel = miniLabel.slice(0, -1);
-                                    }
-                                    ctx.fillText(miniLabel, miniX + 2, miniY + Math.min(10, miniCellH - 2));
-                                }
-                                continue;
-                            }
-
-                            const pf = pit.file;
-                            if (!pf) continue;
-                            const isOpen = openFilesSet.has(pf.uri);
-                            const isActive = pf.uri === activeFileUri;
-                            const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
-
-                            ctx.fillStyle = isSearchMatch
-                                ? withAlpha(ACCENT_SEARCH, 0.35)
-                                : (light ? "#eaeaf0" : "#141418");
-                            ctx.fillRect(miniX, miniY, miniCellW, miniCellH);
-
-                            ctx.strokeStyle = isSearchMatch
-                                ? ACCENT_SEARCH
-                                : (isActive
-                                    ? (BORDER_STYLES.active ? BORDER_STYLES.active.color : "#007fd4")
-                                    : (isOpen
-                                        ? ACCENT_RECENCY
-                                        : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
-                            ctx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
-                            ctx.strokeRect(miniX, miniY, miniCellW, miniCellH);
-
-                            if (pf.lines && pf.lines.length > 0 && miniCellH >= 10 && miniCellW >= 8) {
-                                const maxLines = Math.min(pf.lines.length, Math.floor((miniCellH - 4) / 2));
-                                for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
-                                    const line = pf.lines[lineIdx];
-                                    const lineY = miniY + 3 + lineIdx * 2;
-                                    const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
-                                    const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
-                                    ctx.fillStyle = withAlpha(colorForCategory(line.category || "normal", false), 0.75);
-                                    ctx.fillRect(miniX + 2 + lineIndent, lineY, Math.max(1, lineWidth - lineIndent), 1);
-                                }
-                            } else if (miniCellH >= 4 && miniCellW >= 4 && pf.gitStatus) {
-                                ctx.fillStyle = pf.gitStatus === "modified"
-                                    ? (TILE_LABEL_COLOR.modified || "#e2c08d")
-                                    : (TILE_LABEL_COLOR.added || "#73c991");
-                                ctx.fillRect(miniX + 1, miniY + 1, Math.min(3, miniCellW - 2), Math.min(3, miniCellH - 2));
-                            }
+                        if (miniOffscreen && miniCtx) {
+                            group._miniCache = { key: mosaicCacheKey, canvas: miniOffscreen };
+                            ctx.drawImage(miniOffscreen, mosaicX, mosaicY);
                         }
                     }
                 }
@@ -3299,14 +3467,51 @@ window.addEventListener("keydown", event => {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
-        clearDragState();
-        closeAllPopovers();
-        if (typeof hideContextMenu === "function") {
-            hideContextMenu();
+
+        // 1. Cancel active drag operation
+        const isDragging = draggingFile !== null || draggingFolder !== null || candidateFile !== null || candidateFolder !== null;
+        if (isDragging) {
+            clearDragState();
+            render();
+            return;
         }
+
+        // 2. Dismiss open context menu
+        const menuEl = document.getElementById("context-menu");
+        if (menuEl && menuEl.style.display !== "none" && menuEl.style.display !== "") {
+            if (typeof hideContextMenu === "function") {
+                hideContextMenu();
+            } else {
+                menuEl.style.display = "none";
+            }
+            return;
+        }
+
+        // 3. Close open popovers / modals (Settings, Folders & Ignored)
+        const foldersPopoverEl = document.getElementById("folders-popover");
+        const actionsModalEl = document.getElementById("actions-modal");
+        const isPopoverOpen = (foldersPopoverEl && foldersPopoverEl.style.display !== "none" && foldersPopoverEl.style.display !== "") ||
+                              (actionsModalEl && actionsModalEl.style.display !== "none" && actionsModalEl.style.display !== "");
+        if (isPopoverOpen) {
+            closeAllPopovers();
+            return;
+        }
+
+        // 4. Clear search query or unfocus search input
+        const searchInput = document.getElementById("search-input");
+        const isSearchActive = searchInput && (document.activeElement === searchInput || (searchInput.value && searchInput.value.length > 0));
+        if (isSearchActive) {
+            clearSearch();
+            searchInput.blur();
+            return;
+        }
+
+        // 5. Exit Thumbview
         isCtrlDown = false;
-        tooltip.style.display = "none";
-        render();
+        if (typeof tooltip !== "undefined" && tooltip) {
+            tooltip.style.display = "none";
+        }
+        vscode.postMessage({ command: "exitThumbview" });
         return;
     }
 
@@ -3389,16 +3594,22 @@ function getFileWidestLineWidth(file) {
     if (file.lines && file.lines.length > 0) {
         for (let i = 0; i < file.lines.length; i++) {
             const l = file.lines[i];
-            if (l && l.text && l.text.length > maxCharLen) {
-                maxCharLen = l.text.length;
+            if (l && l.text) {
+                const len = l.text.includes("\t") ? l.text.replace(/\t/g, "    ").length : l.text.length;
+                if (len > maxCharLen) {
+                    maxCharLen = len;
+                }
             }
         }
     }
     if (file.fullLines && file.fullLines.length > 0) {
         for (let i = 0; i < file.fullLines.length; i++) {
             const str = file.fullLines[i];
-            if (str && str.length > maxCharLen) {
-                maxCharLen = str.length;
+            if (str) {
+                const len = str.includes("\t") ? str.replace(/\t/g, "    ").length : str.length;
+                if (len > maxCharLen) {
+                    maxCharLen = len;
+                }
             }
         }
     }
@@ -3406,8 +3617,11 @@ function getFileWidestLineWidth(file) {
     if (uriCache) {
         for (const idx in uriCache) {
             const l = uriCache[idx];
-            if (l && l.text && l.text.length > maxCharLen) {
-                maxCharLen = l.text.length;
+            if (l && l.text) {
+                const len = l.text.includes("\t") ? l.text.replace(/\t/g, "    ").length : l.text.length;
+                if (len > maxCharLen) {
+                    maxCharLen = len;
+                }
             }
         }
     }
@@ -3597,9 +3811,22 @@ function updateHoverTooltip() {
     const c = hoveredFile._cell;
     const thumbnailTop = c.y + TILE_THUMBNAIL_OFFSET_Y;
     const thumbnailHeight = Math.max(1, c.h - TILE_THUMBNAIL_HEIGHT_MARGIN);
-    const totalLines = Math.max(hoveredFile.lineCount || (hoveredFile.lines ? hoveredFile.lines.length : 1), 1);
-    const relativeY = Math.max(0, Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight));
-    const hoveredLineIdx = Math.max(0, Math.min(totalLines - 1, Math.floor(relativeY * totalLines)));
+    const lines = hoveredFile.lines || [];
+    const lineCount = Math.max(lines.length, 1);
+    const stepY = Math.min(thumbnailHeight / lineCount, THUMBNAIL_MAX_LINE_PITCH);
+    const cursorOffsetY = Math.max(0, cursorPos.py - thumbnailTop);
+    const visualLinesCount = lines.length;
+    const visualLineIdx = Math.max(0, Math.min(visualLinesCount - 1, Math.floor(cursorOffsetY / stepY)));
+
+    const isSampled = !!(hoveredFile.lineCount && hoveredFile.lineCount > lines.length);
+    const totalLines = Math.max(hoveredFile.lineCount || lines.length, 1);
+    let hoveredLineIdx;
+    if (isSampled) {
+        const stride = hoveredFile.lineCount / lines.length;
+        hoveredLineIdx = Math.max(0, Math.min(hoveredFile.lineCount - 1, Math.floor(visualLineIdx * stride)));
+    } else {
+        hoveredLineIdx = Math.max(0, Math.min(totalLines - 1, visualLineIdx));
+    }
 
     const radius = TOOLTIP_CONFIG.lineRadius;
     let start = Math.max(0, hoveredLineIdx - radius);
@@ -3614,10 +3841,18 @@ function updateHoverTooltip() {
 
     // Check if any required lines are missing from scan results and cache
     let missingLines = false;
-    const uriCache = hoverLineCache[hoveredFile.uri] || {};
+    const uriCache = hoverLineCache[hoveredFile.uri] || (hoverLineCache[hoveredFile.uri] = {});
 
     for (let i = start; i <= end; i++) {
-        if ((!hoveredFile.lines || !hoveredFile.lines[i]) && !uriCache[i]) {
+        let hasLine = false;
+        if (hoveredFile.fullLines && hoveredFile.fullLines[i] !== undefined) {
+            hasLine = true;
+        } else if (uriCache[i]) {
+            hasLine = true;
+        } else if (!isSampled && hoveredFile.lines && hoveredFile.lines[i]) {
+            hasLine = true;
+        }
+        if (!hasLine) {
             missingLines = true;
             break;
         }
@@ -3642,9 +3877,20 @@ function updateHoverTooltip() {
     let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
 
     for (let i = start; i <= end; i++) {
-        const line = (hoveredFile.lines && hoveredFile.lines[i]) ? hoveredFile.lines[i] : uriCache[i];
+        let line = null;
+        if (hoveredFile.fullLines && hoveredFile.fullLines[i] !== undefined) {
+            if (!uriCache[i]) {
+                uriCache[i] = { text: hoveredFile.fullLines[i] };
+            }
+            line = uriCache[i];
+        } else if (uriCache[i]) {
+            line = uriCache[i];
+        } else if (!isSampled && hoveredFile.lines && hoveredFile.lines[i]) {
+            line = hoveredFile.lines[i];
+        }
+
         const isHoveredLine = i === hoveredLineIdx;
-        const lineText = line ? line.text : "Loading line...";
+        const lineText = line ? (typeof line.text === "string" ? line.text : String(line)) : "Loading line...";
         const lang = detectLang(hoveredFile.path);
 
         if (line && !line._htmlCache) {
@@ -3671,6 +3917,9 @@ function updateHoverTooltip() {
         const gitType = (hoveredFile.gitStatus === "untracked" || hoveredFile.gitStatus === "added")
             ? "added"
             : (hoveredFile.gitChanges ? hoveredFile.gitChanges[i] : undefined);
+
+        const indentMatch = lineText.match(/^[ \t]*/);
+        const indentStr = indentMatch ? indentMatch[0].replace(/\t/g, "    ") : "";
 
         let bgStyle = "display: block; box-sizing: border-box; width: 100%; min-height: 1.4em;";
         let prefix = "  ";
@@ -3721,7 +3970,7 @@ function updateHoverTooltip() {
             bgStyle = "background: rgba(239, 68, 68, 0.12); display: block; box-sizing: border-box; width: 100%; border-left: 3px solid rgba(239, 68, 68, 0.65); padding-left: 2px; min-height: 1.4em;";
         }
 
-        tooltipHtml += `<div style="${bgStyle}">${prefix}${renderedLineHtml}${suffix}</div>`;
+        tooltipHtml += `<div style="${bgStyle}">${prefix}${indentStr}${renderedLineHtml}${suffix}</div>`;
     }
 
     tooltip.innerHTML = tooltipHtml;
@@ -4450,13 +4699,21 @@ canvas.addEventListener("mouseup", event => {
         // Clicked inside the thumbnail body -> jump to line in document
         const thumbnailTop = c.y + headerHeight;
         const thumbnailHeight = Math.max(1, c.h - 34);
+        const lines = file.lines || [];
+        const lineCount = Math.max(lines.length, 1);
+        const stepY = Math.min(thumbnailHeight / lineCount, THUMBNAIL_MAX_LINE_PITCH);
+        const cursorOffsetY = Math.max(0, cursorPos.py - thumbnailTop);
+        const visualLinesCount = lines.length;
+        const visualLineIdx = Math.max(0, Math.min(visualLinesCount - 1, Math.floor(cursorOffsetY / stepY)));
 
-        const relativeY = Math.max(
-            0,
-            Math.min(1, (cursorPos.py - thumbnailTop) / thumbnailHeight)
-        );
-
-        const line = Math.floor(relativeY * file.lineCount);
+        let line = visualLineIdx;
+        if (file.lineCount && file.lineCount > lines.length) {
+            const stride = file.lineCount / lines.length;
+            line = Math.max(0, Math.min(file.lineCount - 1, Math.floor(visualLineIdx * stride)));
+        } else {
+            const totalLines = Math.max(file.lineCount || lines.length, 1);
+            line = Math.max(0, Math.min(totalLines - 1, visualLineIdx));
+        }
 
         // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
         // above so extension.ts's "jump" handler can flash the same lines this webview
@@ -4847,6 +5104,7 @@ canvas.addEventListener("contextmenu", event => {
 const themeObserver = new MutationObserver(() => {
     themeTokensDirty = true;
     refreshThemeTokens();
+    tileRasterCache.clear();
     render();
 });
 themeObserver.observe(document.body, { attributes: true, attributeFilter: ["style", "class"] });
@@ -5612,17 +5870,6 @@ document.addEventListener("click", event => {
 
 resize();
 window.focus();
-
-function checkAndRequestZenMode() {
-    const heightDiff = window.outerHeight - window.innerHeight;
-    const isAlreadyZen = heightDiff < 30 && window.innerHeight > 300;
-    if (!isAlreadyZen) {
-        vscode.postMessage({
-            command: "ensureZenMode"
-        });
-    }
-}
-checkAndRequestZenMode();
 
 vscode.postMessage({
     command: "ready"
