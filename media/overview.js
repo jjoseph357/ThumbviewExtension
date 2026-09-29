@@ -3,9 +3,412 @@
 // every render() call — there is no virtual DOM or per-tile element, for performance
 // with large workspaces. Not compiled/bundled: loaded as-is via a nonce'd <script> tag
 // (see extension.ts's getHtml), so it can't `import` the extension-host TypeScript in
-// src/ — hence buildStableGrid below being a hand-kept-in-sync duplicate of layout.ts's,
-// and tokenizeJS/tokenizeCSS/tokenizeHTML being a second, independent highlighter from
-// scanner.ts's coarse per-line categorizer.
+// src/. The pure layout functions it shares with the host (buildStableGrid, cellsNeeded,
+// fillLayoutHoles, the spanning reorders) are generated into the block below from
+// src/layout_core.ts; tokenizeJS/tokenizeCSS/tokenizeHTML are webview-only.
+
+// ---- BEGIN GENERATED from src/layout_core.ts by `npm run sync-core`. Do not edit here. ----
+// Single source of the pure layout functions shared by the extension host and the webview:
+// grid slot packing, spanning cell counts, hole filling, and spanning drag reorders.
+// The host imports this module; `npm run sync-core` transpiles it into the generated block of
+// media/overview.js (the webview is unbundled), and `npm run check-core` fails if that block is
+// stale. Keep it dependency-free: no imports, no vscode, no DOM.
+const DEFAULT_TARGET_ASPECT = 16 / 9;
+const MIN_GRID_ROWS = 1;
+const MIN_GRID_COLS = 2;
+const DEFAULT_BASE_LINES_PER_CELL = 60;
+const DEFAULT_COMPRESSION_PCT = 0.05;
+const MAX_COMPRESSION_PCT = 0.25;
+/** Packs nCells items into a near-targetAspect grid, returning {rows, cols, slots} in fill order. */
+function buildStableGrid(nCells, targetAspect = DEFAULT_TARGET_ASPECT) {
+    let rows = MIN_GRID_ROWS;
+    let cols = Math.max(MIN_GRID_COLS, Math.ceil(rows * targetAspect));
+    const slots = [];
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            slots.push([c, r]);
+        }
+    }
+    while (slots.length < nCells) {
+        const errCol = Math.abs((cols + 1) / rows - targetAspect);
+        const errRow = Math.abs(cols / (rows + 1) - targetAspect);
+        if (errCol <= errRow) {
+            const newCol = cols;
+            for (let r = 0; r < rows; r++) {
+                slots.push([newCol, r]);
+            }
+            cols++;
+        }
+        else {
+            const newRow = rows;
+            for (let c = 0; c < cols; c++) {
+                slots.push([c, newRow]);
+            }
+            rows++;
+        }
+    }
+    return {
+        rows,
+        cols,
+        slots
+    };
+}
+/** Vertical cells a file of lineCount lines spans in spanning mode. */
+function cellsNeeded(lineCount, baseLinesPerCell = DEFAULT_BASE_LINES_PER_CELL, compressionPct = DEFAULT_COMPRESSION_PCT) {
+    if (lineCount <= baseLinesPerCell || compressionPct <= 0) {
+        return 1;
+    }
+    const clampedPct = Math.min(compressionPct, MAX_COMPRESSION_PCT);
+    const repLines = Math.max(lineCount * clampedPct, baseLinesPerCell);
+    return Math.ceil(repLines / baseLinesPerCell);
+}
+/**
+ * Returns `order` with each id in `liveIds` that it lacks placed into the earliest hole it fits
+ * in, or appended when none fits. A hole is an id no longer in `liveIds` (ignored or deleted);
+ * `""` entries are deliberate user gaps and are never filled. A new file of n cells may take a
+ * hole of H >= n cells; when H > n it is recorded in `footprints` with H, and spanning layouts
+ * give it max(n, footprint) cells, so it occupies exactly the hole's cells (content at the top,
+ * empty space below) and the column-major flow, including column breaks, is unchanged: nothing
+ * else moves. Unfilled holes keep their stale id, so an unignored file whose hole is still free
+ * returns to its exact slot. Never trims or compacts.
+ */
+function fillLayoutHoles(order, liveIds, cellsOf = () => 1, holeCellsOf = () => 1) {
+    const live = new Set(liveIds);
+    const present = new Set(order.filter(Boolean));
+    const result = [...order];
+    const footprints = {};
+    let searchFrom = 0;
+    for (const id of liveIds) {
+        if (present.has(id)) {
+            continue;
+        }
+        const need = Math.max(1, cellsOf(id));
+        let placed = false;
+        for (let i = searchFrom; i < result.length; i++) {
+            const entry = result[i];
+            if (!entry || live.has(entry)) {
+                continue;
+            }
+            const holeCells = Math.max(1, holeCellsOf(entry));
+            if (holeCells >= need) {
+                result[i] = id;
+                if (holeCells > need) {
+                    footprints[id] = holeCells;
+                }
+                placed = true;
+                if (need === 1) {
+                    // Every earlier hole would have fit a one-cell item, so none remain before i.
+                    searchFrom = i + 1;
+                }
+                break;
+            }
+        }
+        if (!placed) {
+            result.push(id);
+        }
+        present.add(id);
+    }
+    return { order: result, footprints };
+}
+/**
+ * Clamps target column and row to the existing grid capacity.
+ * Ensures dragging tiles cannot exceed the grid bounds and cannot expand the grid space.
+ */
+function clampTargetToGridCapacity(targetCol, targetRow, spanCells, maxCols, maxRows) {
+    const safeMaxCols = Math.max(1, maxCols);
+    const safeMaxRows = Math.max(1, maxRows);
+    const clampedCol = Math.max(0, Math.min(targetCol, safeMaxCols - 1));
+    const maxAllowedRow = Math.max(0, safeMaxRows - spanCells);
+    const clampedRow = Math.max(0, Math.min(targetRow, maxAllowedRow));
+    return { col: clampedCol, row: clampedRow };
+}
+/**
+ * Expands a 2D spanning order array by adding 1 empty slot at the bottom of each column,
+ * and 1 empty column on the right.
+ * Guarantees that all existing items maintain their exact (col, row) placements with zero reflow.
+ */
+function expandSpanningGridOrder(currentOrder, allocations, oldCols, oldRows) {
+    const newCols = oldCols + 1;
+    const newRows = oldRows + 1;
+    const grid = [];
+    for (let c = 0; c < oldCols; c++) {
+        grid.push(new Array(oldRows).fill(""));
+    }
+    let currCol = 0;
+    let currRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > oldRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol >= oldCols)
+            break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < oldRows) {
+                grid[currCol][currRow + i] = id;
+            }
+        }
+        currRow += nCells;
+    }
+    const newOrder = [];
+    for (let c = 0; c < newCols; c++) {
+        let r = 0;
+        while (r < newRows) {
+            if (c < oldCols && r < oldRows) {
+                const cell = grid[c][r];
+                if (cell) {
+                    newOrder.push(cell);
+                    const n = allocations[cell] || 1;
+                    r += n;
+                }
+                else {
+                    newOrder.push("");
+                    r += 1;
+                }
+            }
+            else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+    return {
+        newOrder,
+        cols: newCols,
+        rows: newRows
+    };
+}
+/**
+ * Reduces a 2D spanning order array by removing 1 row from the bottom of each column,
+ * and 1 column from the right, if extra space allows.
+ */
+function reduceSpanningGridOrder(currentOrder, allocations, oldCols, oldRows, minCols, minRows) {
+    const newCols = Math.max(minCols, oldCols - 1);
+    const newRows = Math.max(minRows, oldRows - 1);
+    if (newCols === oldCols && newRows === oldRows) {
+        return { newOrder: [...currentOrder], cols: oldCols, rows: oldRows };
+    }
+    const grid = [];
+    for (let c = 0; c < oldCols; c++) {
+        grid.push(new Array(oldRows).fill(""));
+    }
+    let currCol = 0;
+    let currRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > oldRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol >= oldCols)
+            break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < oldRows) {
+                grid[currCol][currRow + i] = id;
+            }
+        }
+        currRow += nCells;
+    }
+    const newOrder = [];
+    for (let c = 0; c < newCols; c++) {
+        let r = 0;
+        while (r < newRows) {
+            const cell = grid[c][r];
+            if (cell) {
+                newOrder.push(cell);
+                const n = allocations[cell] || 1;
+                r += n;
+            }
+            else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+    return {
+        newOrder,
+        cols: newCols,
+        rows: newRows
+    };
+}
+/**
+ * Reorders items in a 2D spanning grid layout, placing sourceId at targetCol, targetRow.
+ * Preserves empty holes in the column-major grid and respects capacity constraints.
+ */
+function reorderSpanningItems(activeIds, currentOrder, allocations, sourceId, targetCol, targetRow, maxAllowedCols, maxAllowedRows, wrapRows) {
+    let maxColUsed = maxAllowedCols - 1;
+    let scanCol = 0;
+    let scanRow = 0;
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (scanRow > 0 && scanRow + nCells > wrapRows) {
+            scanCol++;
+            scanRow = 0;
+        }
+        if (id && scanCol > maxColUsed) {
+            maxColUsed = scanCol;
+        }
+        scanRow += nCells;
+    }
+    const maxCol = Math.max(maxAllowedCols - 1, maxColUsed);
+    const sourceCells = allocations[sourceId] || 1;
+    const gridRows = Math.max(maxAllowedRows, wrapRows);
+    let currCol = 0;
+    let currRow = 0;
+    const placements = [];
+    const placementBySlot = new Map();
+    const placementById = new Map();
+    for (const id of currentOrder) {
+        const nCells = id ? (allocations[id] || 1) : 1;
+        if (currRow > 0 && currRow + nCells > wrapRows) {
+            currCol++;
+            currRow = 0;
+        }
+        if (currCol > maxCol)
+            break;
+        if (!id) {
+            currRow += 1;
+            continue;
+        }
+        const p = { id, col: currCol, row: currRow, nCells };
+        placements.push(p);
+        placementById.set(id, p);
+        for (let i = 0; i < nCells; i++) {
+            if (currRow + i < gridRows) {
+                placementBySlot.set(`${currCol},${currRow + i}`, p);
+            }
+        }
+        currRow += nCells;
+    }
+    const sourcePlacement = placementById.get(sourceId);
+    const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
+    const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
+    let targetPlacement = placementBySlot.get(`${targetCol},${targetRow}`);
+    if (targetPlacement && targetPlacement.id === sourceId) {
+        targetPlacement = undefined;
+    }
+    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
+    const maxAllowedRow = Math.max(0, maxAllowedRows - sourceCells);
+    const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
+    const finalTargetRow = targetPlacement ? Math.min(targetPlacement.row, maxAllowedRow) : clamped.row;
+    const grid = [];
+    for (let c = 0; c <= maxCol; c++) {
+        grid.push(new Array(gridRows).fill(""));
+    }
+    for (const p of placements) {
+        for (let i = 0; i < p.nCells; i++) {
+            if (p.row + i < gridRows && p.col <= maxCol) {
+                grid[p.col][p.row + i] = p.id;
+            }
+        }
+    }
+    for (let c = 0; c <= maxCol; c++) {
+        for (let r = 0; r < gridRows; r++) {
+            if (grid[c][r] === sourceId) {
+                grid[c][r] = "";
+            }
+        }
+    }
+    // Identify all items overlapping the target span [finalTargetRow ... finalTargetRow + sourceCells - 1] in finalTargetCol
+    const displacedPlacements = [];
+    const seenDisplacedIds = new Set();
+    for (let i = 0; i < sourceCells; i++) {
+        const r = finalTargetRow + i;
+        if (r < gridRows && finalTargetCol <= maxCol) {
+            const cellId = grid[finalTargetCol][r];
+            if (cellId && cellId !== sourceId && !seenDisplacedIds.has(cellId)) {
+                seenDisplacedIds.add(cellId);
+                const p = placementById.get(cellId);
+                if (p)
+                    displacedPlacements.push(p);
+            }
+        }
+    }
+    if (targetPlacement && targetPlacement.id !== sourceId && !seenDisplacedIds.has(targetPlacement.id)) {
+        seenDisplacedIds.add(targetPlacement.id);
+        displacedPlacements.push(targetPlacement);
+    }
+    // Clear sourceId and all displaced items from the grid
+    for (let c = 0; c <= maxCol; c++) {
+        for (let r = 0; r < gridRows; r++) {
+            if (grid[c][r] === sourceId || seenDisplacedIds.has(grid[c][r])) {
+                grid[c][r] = "";
+            }
+        }
+    }
+    // Place displaced items into sourceCol, preserving relative offsets and gaps
+    let safeSourceRow = sourceRow;
+    let curSourceR = sourceRow;
+    for (const p of displacedPlacements) {
+        const relOffset = p.row - finalTargetRow;
+        let destR = (sourceCells >= p.nCells && relOffset >= 0)
+            ? (sourceRow + relOffset)
+            : curSourceR;
+        destR = Math.min(destR, Math.max(0, gridRows - p.nCells));
+        for (let i = 0; i < p.nCells; i++) {
+            if (sourceCol <= maxCol && destR + i < gridRows) {
+                grid[sourceCol][destR + i] = p.id;
+            }
+        }
+        curSourceR = destR + p.nCells;
+    }
+    if (displacedPlacements.length > 0) {
+        safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - displacedPlacements[0].nCells));
+    }
+    for (let i = 0; i < sourceCells; i++) {
+        if (finalTargetCol <= maxCol && finalTargetRow + i < gridRows) {
+            grid[finalTargetCol][finalTargetRow + i] = sourceId;
+        }
+    }
+    const effectiveWrapRows = Math.max(wrapRows, finalTargetRow + sourceCells);
+    const newOrder = [];
+    for (let c = 0; c <= maxCol; c++) {
+        let r = 0;
+        while (r < effectiveWrapRows) {
+            const cell = grid[c][r];
+            if (cell) {
+                newOrder.push(cell);
+                const n = allocations[cell] || 1;
+                r += n;
+            }
+            else {
+                newOrder.push("");
+                r += 1;
+            }
+        }
+    }
+    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+        newOrder.pop();
+    }
+    return {
+        newOrder,
+        rows: effectiveWrapRows,
+        cols: Math.max(maxAllowedCols, maxCol + 1),
+        finalTargetCol,
+        finalTargetRow,
+        sourceCol,
+        sourceRow,
+        targetPlacement,
+        safeSourceRow
+    };
+}
+// ---- END GENERATED from src/layout_core.ts ----
+
 const vscode = acquireVsCodeApi();
 
 const canvas = document.getElementById("map");
@@ -204,6 +607,7 @@ function isFolderVisibleInTree(folderPath, collapsedSet) {
 }
 let openFiles = []; // Array of open file URIs (orange borders)
 let openFilesSet = new Set();
+let openFilesVersion = 0; // bumped whenever openFiles changes; part of the folder mosaic cache key
 let cursorLocations = {}; // Map of file URIs to current cursor line numbers
 
 const CLOSE_BUTTON_PADDING = 4; // px
@@ -233,12 +637,69 @@ let activeRenderGrid = null;
 let dragBackgroundCanvas = null;
 let cachedDragBackgroundCanvas = null;
 let pendingDataMsg = null;
+// Search index per file id, reused while the host's contentVersion is unchanged. Entries for
+// files missing from a payload are evicted so the map stays bounded by the workspace size.
 const fileTokenCache = new Map();
-const tileRasterCache = new Map();
+let dataVersion = 0; // increments per "data" payload; part of the folder mosaic cache key
+/**
+ * LRU cache of offscreen canvases bounded by entry count and by pixel memory. Canvas backing
+ * stores are often GPU textures, and entry-count limits alone let large drill-down tiles pin
+ * hundreds of MB (the user saw GPU-process crashes while spamming F4). Evicted canvases are
+ * shrunk to 0x0 so their memory is released immediately instead of at the next GC.
+ */
+class CanvasLRU {
+    constructor(maxEntries, maxBytes) {
+        this.maxEntries = maxEntries;
+        this.maxBytes = maxBytes;
+        this.bytes = 0;
+        this.map = new Map();
+    }
+    get size() { return this.map.size; }
+    get(key) {
+        const canvas = this.map.get(key);
+        if (canvas) {
+            // Refresh recency: Map iteration order is insertion order.
+            this.map.delete(key);
+            this.map.set(key, canvas);
+        }
+        return canvas;
+    }
+    set(key, canvas) {
+        this.delete(key);
+        this.map.set(key, canvas);
+        this.bytes += (canvas.width || 0) * (canvas.height || 0) * 4;
+        while (this.map.size > 1 && (this.map.size > this.maxEntries || this.bytes > this.maxBytes)) {
+            this.delete(this.map.keys().next().value);
+        }
+    }
+    delete(key) {
+        const canvas = this.map.get(key);
+        if (!canvas) return;
+        this.map.delete(key);
+        this.bytes -= (canvas.width || 0) * (canvas.height || 0) * 4;
+        canvas.width = 0;
+        canvas.height = 0;
+    }
+    clear() {
+        for (const key of [...this.map.keys()]) this.delete(key);
+        this.bytes = 0;
+    }
+}
+
 const MAX_TILE_CACHE_ENTRIES = 500;
+const MAX_TILE_CACHE_BYTES = 64 * 1024 * 1024;
+const tileRasterCache = new CanvasLRU(MAX_TILE_CACHE_ENTRIES, MAX_TILE_CACHE_BYTES);
+// Keyed by mosaicCacheKey, not stored on the group: getSubfolderGroups() rebuilds group objects every render.
+const MAX_MOSAIC_CACHE_ENTRIES = 300;
+const MAX_MOSAIC_CACHE_BYTES = 32 * 1024 * 1024;
+const mosaicCache = new CanvasLRU(MAX_MOSAIC_CACHE_ENTRIES, MAX_MOSAIC_CACHE_BYTES);
 let clipboardItem = null;
 
 let hoveredFile = null;
+// Last pointer position in client coordinates (the Ctrl magnifier anchors to it) and whether
+// Ctrl is held. Previously implicit globals; declared so reads before the first event are safe.
+let lastMousePos = null;
+let isCtrlDown = false;
 
 const slotOccupancy = new Map();
 const userReorderedFileSlots = new Map();
@@ -273,8 +734,8 @@ function findFileAt(px, py) {
 
     // Fast O(1) grid slot lookup when in standard root grid mode
     if (!focusedFolder && data.layout.cols > 0 && data.layout.rows > 0) {
-        const rectW = canvas.clientWidth || window.innerWidth;
-        const rectH = canvas.clientHeight || window.innerHeight;
+        const rectW = getViewportW();
+        const rectH = getViewportH();
         const availableW = rectW - (GRID_SIDE_MARGIN * 2);
         const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
         if (availableW > 0 && availableH > 0) {
@@ -312,8 +773,8 @@ function clamp(num, min, max) {
 }
 
 function findNearestSlot(px, py) {
-    const rectW = canvas.clientWidth || window.innerWidth;
-    const rectH = canvas.clientHeight || window.innerHeight;
+    const rectW = getViewportW();
+    const rectH = getViewportH();
     const availableW = rectW - (GRID_SIDE_MARGIN * 2);
     const availableH = rectH - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN;
 
@@ -436,6 +897,25 @@ function triggerSearchRender(immediate = false) {
             render();
         }, 80);
     }
+    scheduleSearchAnnouncement();
+}
+
+let searchAnnounceTimer = null;
+/** Announces the search result count once typing pauses, so screen readers are not flooded per keystroke. */
+function scheduleSearchAnnouncement() {
+    if (searchAnnounceTimer) clearTimeout(searchAnnounceTimer);
+    searchAnnounceTimer = setTimeout(() => {
+        searchAnnounceTimer = null;
+        if (!data || typeof announce !== "function") return;
+        if (!searchQuery) {
+            announce("Search cleared");
+        } else if (searchInvalid) {
+            announce("Invalid regular expression");
+        } else {
+            const count = data.files.filter(f => textMatches(f._combinedTextOriginal, f._combinedText)).length;
+            announce(count === 0 ? "No files match" : `${count} file${count === 1 ? "" : "s"} match`);
+        }
+    }, 500);
 }
 
 /** Escapes regex-special characters so a literal string can be embedded in a RegExp pattern. */
@@ -539,6 +1019,7 @@ function toggleMatchCase() {
     matchCase = !matchCase;
     rebuildSearchState(searchInputFld.value);
     matchCaseBtn.classList.toggle('active');
+    matchCaseBtn.setAttribute("aria-pressed", String(matchCase));
     triggerSearchRender(true);
 }
 
@@ -547,6 +1028,7 @@ function toggleRegex() {
     useRegex = !useRegex;
     rebuildSearchState(searchInputFld.value);
     useRegexBtn.classList.toggle('active');
+    useRegexBtn.setAttribute("aria-pressed", String(useRegex));
     triggerSearchRender(true);
 }
 
@@ -555,6 +1037,7 @@ function toggleMatchWord() {
     matchWholeWord = !matchWholeWord;
     rebuildSearchState(searchInputFld.value);
     matchWordBtn.classList.toggle('active');
+    matchWordBtn.setAttribute("aria-pressed", String(matchWholeWord));
     triggerSearchRender(true);
 }
 
@@ -610,6 +1093,17 @@ window.addEventListener("keydown", event => {
         return;
     }
 
+    if (event.key === " " && activeEl && activeEl.tagName === "BUTTON") {
+        // Space presses a focused button (toolbar, dialogs, the fullscreen banner) instead of typing.
+        return;
+    }
+
+    if (event.key === " " && kbMode && currentKeyboardTarget()) {
+        // Space activates the keyboard-focused tile (the grid handler below), as screen reader
+        // users expect in an application widget; it only starts a search when nothing is focused.
+        return;
+    }
+
     if (event.key.length === 1) {
         event.preventDefault();
         searchInputFld.focus();
@@ -627,34 +1121,90 @@ window.addEventListener("keydown", event => {
     }
 });
 
-let resizeRafId = null;
+let renderRafId = null;
 
-/** Resyncs the canvas backing-store size to the (DPR-scaled) window size and re-renders; retries via rAF while the tab is hidden/backgrounded. */
+// Single source of truth for the canvas's CSS size. Fed by a ResizeObserver so layout,
+// hit testing, and the backing store never disagree during a Zen mode window expansion.
+let viewportW = 0;
+let viewportH = 0;
+function getViewportW() {
+    return viewportW || canvas.clientWidth || window.innerWidth;
+}
+function getViewportH() {
+    return viewportH || canvas.clientHeight || window.innerHeight;
+}
+
+/** Coalesces bursts of state updates (data, openState, activeFile, resize) into one render per animation frame. */
+function scheduleRender() {
+    if (renderRafId) return;
+    renderRafId = requestAnimationFrame(() => {
+        renderRafId = null;
+        render();
+    });
+}
+
+/** Schedules a render at the current viewport size; render() resyncs the backing store. Tile and mosaic cache keys include their pixel size, so stale sizes age out of the LRU instead of forcing a full re-raster on the first frame after a resize. */
 function resize() {
     if (document.hidden || document.visibilityState === "hidden") {
         // Webview tab is hidden or backgrounded; do NOT resize or re-render to background dimensions
         return;
     }
-    if (window.innerWidth < 100 || window.innerHeight < 100) {
-        // Webview tab is hidden or backgrounded; ignore transient collapsed dimensions
-        if (!resizeRafId) {
-            resizeRafId = requestAnimationFrame(() => {
-                resizeRafId = null;
-                resize();
-            });
-        }
-        return;
-    }
-
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(window.innerWidth * dpr);
-    canvas.height = Math.floor(window.innerHeight * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    tileRasterCache.clear();
-    render();
+    scheduleRender();
 }
 
-window.addEventListener("resize", resize);
+let resizeSnapshotCanvas = null;
+
+/**
+ * Stretches the last painted frame to the new viewport size. Called from the ResizeObserver
+ * callback, which runs after layout but before paint, so the frame painted at the new size is
+ * already full-size instead of the previous frame sitting in the top-left corner while the
+ * sharp render runs on the next animation frame. The zero-reflow layout scales cells in
+ * proportion to the viewport, so the stretched frame closely matches the real one.
+ */
+function stretchLastFrameToViewport() {
+    if (!data || !canvas.width || !canvas.height || document.hidden || isFrameFrozen()) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const targetW = Math.floor(viewportW * dpr);
+    const targetH = Math.floor(viewportH * dpr);
+    if (targetW < 1 || targetH < 1 || (targetW === canvas.width && targetH === canvas.height)) return;
+    try {
+        if (!resizeSnapshotCanvas) resizeSnapshotCanvas = document.createElement("canvas");
+        resizeSnapshotCanvas.width = canvas.width;
+        resizeSnapshotCanvas.height = canvas.height;
+        resizeSnapshotCanvas.getContext("2d").drawImage(canvas, 0, 0);
+        canvas.width = targetW;
+        canvas.height = targetH;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(resizeSnapshotCanvas, 0, 0, targetW, targetH);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        // Release the full-window snapshot now; holding it doubles canvas memory between resizes.
+        resizeSnapshotCanvas.width = 0;
+        resizeSnapshotCanvas.height = 0;
+        dragBackgroundCanvas = null;
+    } catch (e) {
+        // A stale-frame stretch is cosmetic; the scheduled render repaints regardless.
+    }
+}
+
+function updateViewportSize(width, height) {
+    const w = Math.round(width);
+    const h = Math.round(height);
+    if (w === viewportW && h === viewportH) return;
+    viewportW = w;
+    viewportH = h;
+    tryFastReveal();
+    stretchLastFrameToViewport();
+    resize();
+}
+
+if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(entries => {
+        const rect = entries[entries.length - 1].contentRect;
+        updateViewportSize(rect.width, rect.height);
+    }).observe(canvas);
+} else {
+    window.addEventListener("resize", () => updateViewportSize(canvas.clientWidth || window.innerWidth, canvas.clientHeight || window.innerHeight));
+}
 
 // Handle canvas context loss gracefully (e.g. GPU crash on Linux Wayland/Mesa drivers)
 canvas.addEventListener("contextlost", (event) => {
@@ -667,24 +1217,182 @@ canvas.addEventListener("contextrestored", () => {
     resize();
 });
 
-let hideTransitionTimeout = null;
+// The page is hidden (opacity 0) at first load and again whenever the host hides it for a
+// Zen transition (hideForTransition). It reveals itself only after a data render has held the
+// same viewport size for two frames, so neither the first open nor a rapid reopen ever shows a
+// frame laid out for a transitional editor size. Fallback timers guarantee it cannot stay blank.
+const INITIAL_REVEAL_STATUS_DELAY_MS = 400;
+const INITIAL_REVEAL_MAX_DELAY_MS = 2500;
+const TRANSITION_REVEAL_MAX_DELAY_MS = 1500;
+let revealPending = true;
+// Set while the host is mid-transition (after hideForTransition), so a render during a Zen step
+// cannot count as "stable". Cleared only by the host's showAfterTransition for the latest
+// transition id, which it sends once its layout commands and settle delays have finished.
+let revealBlockedByTransition = false;
+let latestTransitionId = 0;
+let revealSafetyTimer = null;
+document.body.style.opacity = "0";
+
+/** Reveals the page and ends the pending gate. */
+function completeReveal() {
+    if (!revealPending) return;
+    revealPending = false;
+    revealBlockedByTransition = false;
+    revealNeedsSettleTime = false;
+    hiddenSinceArm = false;
+    panelHiddenByHost = false;
+    // A fallback reveal (safety timer, user input) can happen while drawing was frozen at an old
+    // size; always repaint at the current size. The render records lastRevealedW/H.
+    scheduleRender();
+    if (revealSafetyTimer) {
+        clearTimeout(revealSafetyTimer);
+        revealSafetyTimer = null;
+    }
+    ensureVisibleOpacity();
+}
+
+// While backgrounded the safety timer keeps polling instead of relying on a visibilitychange
+// event. Once visible again it restarts the full transition delay rather than revealing at once,
+// because becoming visible usually means a reopen transition is still expanding the editor.
+const REVEAL_SAFETY_POLL_MS = 500;
+
+function armRevealSafetyTimer(delayMs, sawHidden = false) {
+    if (revealSafetyTimer) clearTimeout(revealSafetyTimer);
+    revealSafetyTimer = setTimeout(() => {
+        revealSafetyTimer = null;
+        if (!revealPending) return;
+        if (document.hidden) {
+            armRevealSafetyTimer(REVEAL_SAFETY_POLL_MS, true);
+            return;
+        }
+        if (sawHidden) {
+            armRevealSafetyTimer(TRANSITION_REVEAL_MAX_DELAY_MS);
+            return;
+        }
+        completeReveal();
+    }, delayMs);
+}
+
+/** Hides the page until the next render at a stable size (see checkRevealStable). */
+function armReveal() {
+    revealPending = true;
+    revealBlockedByTransition = true;
+    revealNeedsSettleTime = true;
+    document.body.style.opacity = "0";
+    armRevealSafetyTimer(TRANSITION_REVEAL_MAX_DELAY_MS);
+}
+
+// Fast reopen: while a transition hides the page, drawing is frozen (see isFrameFrozen), so the
+// canvas still holds the last frame the user saw. When the page comes back at exactly that size
+// the frame is still correct and is shown at once, instead of waiting ~200ms for the host's
+// settled signal plus the stability window (the "black flash"). Only after the page was actually
+// hidden: during a close the panel is still visible at the old size and must stay hidden.
+let lastRevealedW = 0;
+let lastRevealedH = 0;
+let hiddenSinceArm = false;
+// Set by the host's panelHidden (e.g. after a jump covers Thumbview without hiding the page);
+// cleared when the panel is shown again. Rendering a backgrounded panel only risks overwriting
+// the last shown frame with one at a transitional size.
+let panelHiddenByHost = false;
+
+/** True while a transition hides a previously shown page, or the panel is backgrounded: renders and stretches would overwrite the frame the fast reopen path wants to show again. */
+function isFrameFrozen() {
+    if (lastRevealedW <= 0) return false;
+    return (revealPending && revealBlockedByTransition) || panelHiddenByHost;
+}
+
+function markPanelShown() {
+    if (!panelHiddenByHost) return;
+    panelHiddenByHost = false;
+    scheduleRender();
+}
+
+function tryFastReveal() {
+    if (!revealPending || !hiddenSinceArm || document.hidden || !lastRevealedW) return;
+    if (getViewportW() === lastRevealedW && getViewportH() === lastRevealedH) {
+        completeReveal();
+        scheduleRender();
+    }
+}
+
+/** The host finished its layout transition: let the next stable-size render reveal the page. */
+function endRevealTransitionBlock() {
+    tryFastReveal();
+    revealBlockedByTransition = false;
+    if (revealPending) scheduleRender();
+}
+
+/** True for a transition message older than the latest one seen (e.g. a delayed show from a previous close). Records newer ids. */
+function isStaleTransition(msg) {
+    if (typeof msg.transitionId !== "number") return false;
+    if (msg.transitionId < latestTransitionId) return true;
+    latestTransitionId = msg.transitionId;
+    return false;
+}
+
+/** Keyboard/pointer input reveals a pending page only once no host transition is in flight; during one, the safety timer is the fallback. */
+function revealOnUserInput() {
+    if (!revealBlockedByTransition) completeReveal();
+}
+
+// After a host transition the size must also hold for this long: the host's "settled" signal
+// follows fixed sleeps, and on a slow machine Zen/maximize can still be animating.
+const TRANSITION_REVEAL_STABLE_MS = 120;
+let revealNeedsSettleTime = false;
+
+/** Called after each data render while a reveal is pending; reveals once the size is stable (two frames, plus TRANSITION_REVEAL_STABLE_MS after a transition). */
+function checkRevealStable(renderedW, renderedH) {
+    const start = performance.now();
+    const tick = () => {
+        if (!revealPending || revealBlockedByTransition || document.hidden) return;
+        // A changed size means the ResizeObserver has already scheduled a render at the new
+        // size, which calls back here once that size holds.
+        if (getViewportW() !== renderedW || getViewportH() !== renderedH) return;
+        if (revealNeedsSettleTime && performance.now() - start < TRANSITION_REVEAL_STABLE_MS) {
+            requestAnimationFrame(tick);
+            return;
+        }
+        completeReveal();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(tick));
+}
+
+setTimeout(() => {
+    // Nothing to lay out yet (first scan still running): show the loading status instead of a blank panel.
+    if (!data && !document.hidden) completeReveal();
+}, INITIAL_REVEAL_STATUS_DELAY_MS);
+armRevealSafetyTimer(INITIAL_REVEAL_MAX_DELAY_MS);
+
 function ensureVisibleOpacity() {
+    if (revealPending) {
+        return;
+    }
     if (document.body.style.opacity !== "1") {
         document.body.style.opacity = "1";
-    }
-    if (hideTransitionTimeout) {
-        clearTimeout(hideTransitionTimeout);
-        hideTransitionTimeout = null;
     }
 }
 
 window.addEventListener("focus", ensureVisibleOpacity);
 document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden" && revealPending) {
+        hiddenSinceArm = true;
+    }
     if (document.visibilityState === "visible") {
+        tryFastReveal();
+        markPanelShown();
+        if (revealPending) {
+            // Becoming visible happens before the host's settle delays finish, so it only
+            // restarts the fallback timer; showAfterTransition is what unblocks the reveal.
+            armRevealSafetyTimer(TRANSITION_REVEAL_MAX_DELAY_MS);
+        }
         ensureVisibleOpacity();
         resize();
     }
 });
+// User input reveals a pending page, except mid-transition: spamming the open key (F4) sends
+// keydowns to the focused webview while Zen mode is still expanding.
+window.addEventListener("pointerdown", revealOnUserInput, true);
+window.addEventListener("keydown", revealOnUserInput, true);
 window.addEventListener("pointerdown", ensureVisibleOpacity, true);
 window.addEventListener("keydown", ensureVisibleOpacity, true);
 
@@ -696,17 +1404,208 @@ let hoverLineCache = {}; // Cache of fetched line ranges for long files { uri: {
 let pendingHoverRequest = null;
 let viewLocations = {}; // Map of file URIs to current visible range { startLine, endLine }
 
+/** Installs a host "data" payload: indexes files for search/hit testing and schedules a render. Also used to flush a payload deferred during a drag. */
+/** 32-bit FNV-1a hash of a string, for compact cache-key signatures. */
+function hashString(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(36);
+}
+
+/**
+ * Signature of everything a folder mosaic draws beyond its size and view state: member content
+ * and decorations, plus the group's own saved layout. Lets mosaics survive unrelated payloads.
+ */
+function groupMosaicSignature(group) {
+    let members = "";
+    for (const f of group.files) {
+        members += `${f.id}|${f.contentVersion}|${f._decoSig}\n`;
+    }
+    const p = group.path;
+    const scopeState = data ? JSON.stringify([
+        data.folderOrders && data.folderOrders[p],
+        data.folderCardOrders && data.folderCardOrders[p],
+        data.folderWrapRows && data.folderWrapRows[p],
+        data.folderExtraCols && data.folderExtraCols[p],
+        data.folderExtraRows && data.folderExtraRows[p],
+        data.slotFootprints && data.slotFootprints[`folder:${p}`],
+        data.slotFlowCells && data.slotFlowCells[`folder:${p}`]
+    ]) : "";
+    return hashString(members) + hashString(scopeState);
+}
+
+/** A line's lowercase text for search matching, computed on first use and kept on the line. */
+function lowerLineText(line) {
+    if (line._lowerText === undefined) {
+        line._lowerText = (line.text || "").toLowerCase();
+    }
+    return line._lowerText;
+}
+
+function applyDataMessage(msg) {
+    if (msg.isReflow) {
+        userReorderedFileSlots.clear();
+    }
+    // Delta payloads omit lines for files whose contentVersion the webview already holds.
+    const previousById = new Map(fileById);
+    const missingLines = [];
+    data = msg;
+    data._version = ++dataVersion;
+    // Raster caches are not cleared here: tile keys carry contentVersion and a decoration
+    // signature, mosaic keys a group signature, so unchanged tiles survive every payload.
+    if (userReorderedFileSlots.size > 0 && data && data.files) {
+        for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
+            const f = data.files[fIdx];
+            const saved = userReorderedFileSlots.get(f.id);
+            if (saved) {
+                f.slot = [...saved.slot];
+                f.slots = saved.slots ? saved.slots.map(s => [...s]) : [[...saved.slot]];
+            }
+        }
+    }
+    currentIgnorePatterns = msg.ignorePatterns || [];
+    for (const k of Object.keys(optimisticPatternCounts)) {
+        if (data.ignorePatternCounts && typeof data.ignorePatternCounts[k] === "number") {
+            delete optimisticPatternCounts[k];
+        }
+    }
+    statusText = "";
+    hoverLineCache = {};
+    slotOccupancy.clear();
+    fileById.clear();
+    fileByUri.clear();
+    if (data && data.files) {
+        for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
+            const f = data.files[fIdx];
+            if (f.linesOmitted) {
+                const prev = previousById.get(f.id);
+                if (prev && prev.contentVersion === f.contentVersion && prev.lines) {
+                    f.lines = prev.lines;
+                    f.fullLines = prev.fullLines;
+                } else {
+                    missingLines.push(f.id);
+                }
+            } else if (f.lines && f.lines.length > 0 && typeof f.lines[0] === "string") {
+                // The host sends lines as plain strings (a fraction of the size and clone time of
+                // objects); line objects carry the per-line render caches (_tokens, _htmlCache).
+                f.lines = f.lines.map(text => ({ text }));
+            }
+            f._decoSig = hashString(JSON.stringify([
+                f.gitStatus || "",
+                f.gitChanges || null,
+                f.errorLines ? Object.keys(f.errorLines) : null
+            ]));
+            fileById.set(f.id, f);
+            fileByUri.set(f.uri, f);
+            f._lowerPath = f.path ? f.path.toLowerCase() : "";
+            const lang = detectLang(f.path);
+
+            const cachedEntry = fileTokenCache.get(f.id);
+            const cached = cachedEntry && f.contentVersion !== undefined && cachedEntry.contentVersion === f.contentVersion
+                ? cachedEntry
+                : null;
+
+            if (cached) {
+                f._combinedText = cached.combinedText;
+                f._combinedTextOriginal = cached.combinedTextOriginal;
+                f._avgLineChars = cached.avgLineChars;
+                f._lowerFullLines = cached.lowerFullLines;
+            } else {
+                // One lowercase pass over the joined text instead of one per line: per-line
+                // lowercase copies (_lowerText) are made lazily, only for lines drawn or hovered
+                // while a search is active (see lowerLineText).
+                const textArrOriginal = [];
+                if (f.lines) {
+                    for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
+                        textArrOriginal.push(f.lines[lIdx].text || "");
+                    }
+                    let totalChars = 0;
+                    let validCount = 0;
+                    for (let k = 0; k < Math.min(f.lines.length, 50); k++) {
+                        const len = f.lines[k]?.text?.length || 0;
+                        if (len > 0) {
+                            totalChars += len;
+                            validCount++;
+                        }
+                    }
+                    f._avgLineChars = validCount > 0 ? Math.min(100, Math.max(45, Math.round(totalChars / validCount))) : 65;
+                }
+                if (f.fullLines) {
+                    f._lowerFullLines = f.fullLines.map(str => str.toLowerCase());
+                    textArrOriginal.push(...f.fullLines);
+                }
+                f._combinedTextOriginal = textArrOriginal.join("\n");
+                // Same string as lowercasing each part and joining: the path, then every line.
+                const lowerParts = [];
+                if (f.path) lowerParts.push(f.path.toLowerCase());
+                if (textArrOriginal.length > 0) lowerParts.push(f._combinedTextOriginal.toLowerCase());
+                f._combinedText = lowerParts.join("\n");
+
+                fileTokenCache.set(f.id, {
+                    contentVersion: f.contentVersion,
+                    combinedText: f._combinedText,
+                    combinedTextOriginal: f._combinedTextOriginal,
+                    avgLineChars: f._avgLineChars,
+                    lowerFullLines: f._lowerFullLines
+                });
+            }
+
+            if (f.slots) {
+                for (const [col, row] of f.slots) {
+                    slotOccupancy.set(`${col},${row}`, f);
+                }
+            } else if (f.slot) {
+                slotOccupancy.set(`${f.slot[0]},${f.slot[1]}`, f);
+            }
+        }
+        for (const id of fileTokenCache.keys()) {
+            if (!fileById.has(id)) {
+                fileTokenCache.delete(id);
+            }
+        }
+        if (missingLines.length > 0) {
+            // E.g. a delta arrived after a payload that was superseded during a drag.
+            vscode.postMessage({ command: "requestFileLines", ids: missingLines });
+        }
+    }
+    if (msg.openKeybinding) {
+        const kbdLabel = document.getElementById("open-shortcut-label");
+        if (kbdLabel) {
+            kbdLabel.textContent = msg.openKeybinding;
+        }
+        const kbdLabel2 = document.getElementById("open-shortcut-label-2");
+        if (kbdLabel2) {
+            kbdLabel2.textContent = msg.openKeybinding;
+        }
+    }
+    if (actionsModal && actionsModal.style.display === "block") {
+        updateSettingsModalState();
+    }
+    if (foldersPopover && foldersPopover.style.display === "block") {
+        updateIgnoresPopover();
+        updateFoldersPopover();
+    }
+    scheduleRender();
+}
+
 window.addEventListener("message", event => {
     const msg = event.data;
 
     if (msg.command === "status") {
         statusText = msg.text;
+        if (typeof msg.text === "string" && msg.text.startsWith("Error") && typeof announce === "function") {
+            announce(msg.text);
+        }
         if (msg.clearData) {
             data = null;
             hoverLineCache = {};
         }
         if (!data) {
-            drawStatus();
+            // render() sizes the backing store before delegating to drawStatus().
+            scheduleRender();
         }
     }
 
@@ -717,143 +1616,37 @@ window.addEventListener("message", event => {
     // Hide/show webview content during zen mode transitions so the user
     // doesn't see the canvas at the wrong size (hideForTransition from
     // extension.ts onDidChangeViewState enter path — keep in sync)
-    if (msg.command === "hideForTransition") {
-        document.body.style.opacity = "0";
-        if (hideTransitionTimeout) {
-            clearTimeout(hideTransitionTimeout);
+    if (msg.command === "hideForTransition" && !isStaleTransition(msg)) {
+        // Stays hidden through the exit and the next reopen until a stable-size frame exists.
+        armReveal();
+        if (msg.fromHidden) {
+            // Reopen of a panel that was hidden (e.g. after a jump, which does not hide the page):
+            // the last shown frame is intact, so the fast reopen path may use it.
+            hiddenSinceArm = true;
         }
-        hideTransitionTimeout = setTimeout(() => {
-            ensureVisibleOpacity();
-        }, 400);
     }
-    if (msg.command === "showAfterTransition") {
+    if (msg.command === "fullscreenNotice") {
+        // extension.ts maybeShowFullscreenNotice: { keybinding }. Sent once per install.
+        showFullscreenNotice(msg.keybinding);
+    }
+    if (msg.command === "fullscreenSetting") {
+        // extension.ts: { enabled }, after thumbview.fullscreenOnOpen changes from anywhere.
+        const fsToggleEl = document.getElementById("fullscreen-toggle");
+        if (fsToggleEl) fsToggleEl.checked = msg.enabled !== false;
+        hideFullscreenNotice();
+    }
+    if (msg.command === "panelHidden") {
+        // Host signal (onDidChangeViewState): the panel was backgrounded. Retained webviews may be
+        // hidden without document.visibilityState changing, so the fast reopen path relies on this.
+        panelHiddenByHost = true;
+        // The one-time banner does not come back with the retained page.
+        hideFullscreenNotice();
+        if (revealPending) hiddenSinceArm = true;
+    }
+    if (msg.command === "showAfterTransition" && !isStaleTransition(msg)) {
+        markPanelShown();
+        endRevealTransitionBlock();
         ensureVisibleOpacity();
-    }
-
-    function applyDataMessage(msg) {
-        if (msg.isReflow) {
-            userReorderedFileSlots.clear();
-        }
-        data = msg;
-        data._version = (data._version || 0) + 1;
-        tileRasterCache.clear();
-        if (userReorderedFileSlots.size > 0 && data && data.files) {
-            for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
-                const f = data.files[fIdx];
-                const saved = userReorderedFileSlots.get(f.id);
-                if (saved) {
-                    f.slot = [...saved.slot];
-                    f.slots = saved.slots ? saved.slots.map(s => [...s]) : [[...saved.slot]];
-                }
-            }
-        }
-        currentIgnorePatterns = msg.ignorePatterns || [];
-        for (const k of Object.keys(optimisticPatternCounts)) {
-            if (data.ignorePatternCounts && typeof data.ignorePatternCounts[k] === "number") {
-                delete optimisticPatternCounts[k];
-            }
-        }
-        statusText = "";
-        hoverLineCache = {};
-        slotOccupancy.clear();
-        fileById.clear();
-        fileByUri.clear();
-        if (data && data.files) {
-            for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
-                const f = data.files[fIdx];
-                fileById.set(f.id, f);
-                fileByUri.set(f.uri, f);
-                f._lowerPath = f.path ? f.path.toLowerCase() : "";
-                const lang = detectLang(f.path);
-
-                const cacheKey = `${f.id}:${f.lineCount || (f.lines ? f.lines.length : 0)}:${f.lines && f.lines[0] ? f.lines[0].text : ""}`;
-                const cached = fileTokenCache.get(cacheKey);
-
-                if (cached) {
-                    f._combinedText = cached.combinedText;
-                    f._combinedTextOriginal = cached.combinedTextOriginal;
-                    f._avgLineChars = cached.avgLineChars;
-                    f._lowerFullLines = cached.lowerFullLines;
-                    if (f.lines && cached.lines) {
-                        for (let lIdx = 0; lIdx < f.lines.length && lIdx < cached.lines.length; lIdx++) {
-                            f.lines[lIdx]._lowerText = cached.lines[lIdx].lowerText;
-                            if (cached.lines[lIdx].tokens) {
-                                f.lines[lIdx]._tokens = cached.lines[lIdx].tokens;
-                            }
-                        }
-                    }
-                } else {
-                    const textArr = [];
-                    const textArrOriginal = [];
-                    if (f.path) textArr.push(f.path.toLowerCase());
-                    const cachedLines = [];
-                    if (f.lines) {
-                        for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
-                            const l = f.lines[lIdx];
-                            const lower = l.text ? l.text.toLowerCase() : "";
-                            l._lowerText = lower;
-                            textArr.push(lower);
-                            textArrOriginal.push(l.text || "");
-                            cachedLines.push({ lowerText: lower });
-                        }
-                        let totalChars = 0;
-                        let validCount = 0;
-                        for (let k = 0; k < Math.min(f.lines.length, 50); k++) {
-                            const len = f.lines[k]?.text?.length || 0;
-                            if (len > 0) {
-                                totalChars += len;
-                                validCount++;
-                            }
-                        }
-                        f._avgLineChars = validCount > 0 ? Math.min(100, Math.max(45, Math.round(totalChars / validCount))) : 65;
-                    }
-                    if (f.fullLines) {
-                        f._lowerFullLines = f.fullLines.map(str => {
-                            const lower = str.toLowerCase();
-                            textArr.push(lower);
-                            return lower;
-                        });
-                        textArrOriginal.push(...f.fullLines);
-                    }
-                    f._combinedText = textArr.join("\n");
-                    f._combinedTextOriginal = textArrOriginal.join("\n");
-
-                    fileTokenCache.set(cacheKey, {
-                        combinedText: f._combinedText,
-                        combinedTextOriginal: f._combinedTextOriginal,
-                        avgLineChars: f._avgLineChars,
-                        lowerFullLines: f._lowerFullLines,
-                        lines: cachedLines
-                    });
-                }
-
-                if (f.slots) {
-                    for (const [col, row] of f.slots) {
-                        slotOccupancy.set(`${col},${row}`, f);
-                    }
-                } else if (f.slot) {
-                    slotOccupancy.set(`${f.slot[0]},${f.slot[1]}`, f);
-                }
-            }
-        }
-        if (msg.openKeybinding) {
-            const kbdLabel = document.getElementById("open-shortcut-label");
-            if (kbdLabel) {
-                kbdLabel.textContent = msg.openKeybinding;
-            }
-            const kbdLabel2 = document.getElementById("open-shortcut-label-2");
-            if (kbdLabel2) {
-                kbdLabel2.textContent = msg.openKeybinding;
-            }
-        }
-        if (actionsModal && actionsModal.style.display === "block") {
-            updateSettingsModalState();
-        }
-        if (foldersPopover && foldersPopover.style.display === "block") {
-            updateIgnoresPopover();
-            updateFoldersPopover();
-        }
-        render();
     }
 
     if (msg.command === "data") {
@@ -866,7 +1659,7 @@ window.addEventListener("message", event => {
 
     if (msg.command === "activeFile") {
         activeFileUri = msg.uri;
-        render();
+        scheduleRender();
     }
 
     if (msg.command === "openState") {
@@ -876,9 +1669,10 @@ window.addEventListener("message", event => {
         if ("openFiles" in msg) {
             openFiles = msg.openFiles;
             openFilesSet = new Set(openFiles);
+            openFilesVersion++;
         }
         viewLocations = msg.viewLocations || {};
-        render();
+        scheduleRender();
     }
 
     if (msg.command === "setFocusedFolder") {
@@ -902,50 +1696,6 @@ window.addEventListener("message", event => {
     }
 });
 
-/**
- * Packs nCells items into a near-16:9 grid, returning {rows, cols, slots}. Duplicate of
- * layout.ts's buildStableGrid (uniform_grid mode only) — used here only to lay out a
- * focused folder's subset of files (see render() below), since the host never computes
- * a layout for that subset. Keep in sync with layout.ts by hand.
- */
-function buildStableGrid(nCells, targetAspect = 1.777) {
-    let rows = 1;
-    let cols = Math.max(2, Math.ceil(rows * targetAspect));
-
-    const slots = [];
-
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            slots.push([c, r]);
-        }
-    }
-
-    while (slots.length < nCells) {
-        const errCol = Math.abs((cols + 1) / rows - targetAspect);
-        const errRow = Math.abs(cols / (rows + 1) - targetAspect);
-
-        if (errCol <= errRow) {
-            const newCol = cols;
-            for (let r = 0; r < rows; r++) {
-                slots.push([newCol, r]);
-            }
-            cols++;
-        } else {
-            const newRow = rows;
-            for (let c = 0; c < cols; c++) {
-                slots.push([c, newRow]);
-            }
-            rows++;
-        }
-    }
-
-    return {
-        rows,
-        cols,
-        slots
-    };
-}
-
 function getCompressionPct() {
     if (typeof data !== "undefined" && data) {
         if (typeof data.compressionPercentage === "number") {
@@ -961,26 +1711,58 @@ function getCompressionPct() {
     return 0.05;
 }
 
-function cellsNeeded(lineCount, baseLinesPerCell = 60, compressionPct = (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05)) {
-    if (lineCount <= baseLinesPerCell || compressionPct <= 0) {
-        return 1;
-    }
-    const clampedPct = Math.min(compressionPct, 0.25);
-    const repLines = Math.max(lineCount * clampedPct, baseLinesPerCell);
-    return Math.ceil(repLines / baseLinesPerCell);
+/** Footprints (minimum cells for items that filled a taller hole) for a layout scope: "folder:<path>", "cards:<path>", or "root". Mirrors extension.ts slotFootprints. */
+function scopeFootprints(scopeKey) {
+    return (typeof data !== "undefined" && data && data.slotFootprints && data.slotFootprints[scopeKey]) || null;
 }
 
-function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, extraCols = 0, extraRows = 0, baseLinesPerCell = 60, compressionPct = (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), savedWrapRows = null) {
+/** Frozen flow cells (column-membership heights) for a layout scope. Mirrors extension.ts slotFlowCells. */
+function scopeFlowCells(scopeKey) {
+    return (typeof data !== "undefined" && data && data.slotFlowCells && data.slotFlowCells[scopeKey]) || null;
+}
+
+/** Cells an ignored/deleted id occupied in a scope: its frozen flow cells there, else its natural height (host naturalCells) or footprint, so the hole matches the layout. */
+function spanningHoleCells(fid, footprints = null, flowCells = null) {
+    if (flowCells && flowCells[fid]) return flowCells[fid];
+    const natural = (typeof data !== "undefined" && data && data.naturalCells && data.naturalCells[fid]) || 1;
+    return Math.max(natural, (footprints && footprints[fid]) || 0);
+}
+
+// Twin of spanning_layout.ts buildSpanningGrid's flow/display split: `allocations` are flow cells
+// (frozen per scope in `flowCells`, deciding column membership) and `displayCells` are drawn
+// heights. A growing or shrinking file pushes files within its column but never re-wraps them;
+// an overflowing column adds rows, plus columns in proportion to keep the cell aspect.
+function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null, extraCols = 0, extraRows = 0, baseLinesPerCell = 60, compressionPct = (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), savedWrapRows = null, footprints = null, flowCells = null) {
     const allocations = {};
+    const displayCells = {};
     let actualCells = 0;
     let maxNCells = 1;
 
     for (const f of files) {
-        const nCells = f.lineCount ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : (f.nCells || 1);
+        const natural = f.lineCount ? cellsNeeded(f.lineCount, baseLinesPerCell, compressionPct) : (f.nCells || 1);
+        // An item that filled a taller hole displays at least the hole's cells.
+        const shown = Math.max(natural, (footprints && footprints[f.id]) || 0);
+        displayCells[f.id] = shown;
+        const nCells = (flowCells && flowCells[f.id]) || shown;
         allocations[f.id] = nCells;
         actualCells += nCells;
         if (nCells > maxNCells) {
             maxNCells = nCells;
+        }
+    }
+
+    // Holes left by ignored/deleted files count toward the grid size exactly like the host's
+    // buildSpanningGrid counts stale ids, so ignoring a file changes neither wrapRows nor columns.
+    if (folderOrder && Array.isArray(folderOrder)) {
+        const liveIds = new Set(files.map(f => f.id));
+        for (const fid of folderOrder) {
+            if (!fid || liveIds.has(fid)) continue;
+            const holeCells = spanningHoleCells(fid, footprints, flowCells);
+            allocations[fid] = holeCells;
+            actualCells += holeCells;
+            if (holeCells > maxNCells) {
+                maxNCells = holeCells;
+            }
         }
     }
 
@@ -1014,39 +1796,47 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     }
 
     let currCol = 0;
-    let currRow = 0;
+    let currRow = 0;        // flow position: decides column breaks
+    let currDisplayRow = 0; // drawn position: follows current tile heights
     let maxRowUsed = 1;
+    let maxFlowRowUsed = 1;
     const placements = [];
 
     for (const fid of orderToIterate) {
         const file = fid ? filesById.get(fid) : null;
         const nCells = fid ? (allocations[fid] || 1) : 1;
+        const shownCells = file ? (displayCells[fid] || nCells) : nCells;
         const mustBreak = currRow > 0 && currRow + nCells > wrapRows;
 
         if (mustBreak) {
             currCol++;
             currRow = 0;
+            currDisplayRow = 0;
         }
 
         if (file) {
             const slots = [];
-            for (let i = 0; i < nCells; i++) {
-                slots.push([currCol, currRow + i]);
+            for (let i = 0; i < shownCells; i++) {
+                slots.push([currCol, currDisplayRow + i]);
             }
 
             placements.push({
                 file: file.file || file,
                 item: file.item || file,
                 col: currCol,
-                row: currRow,
-                nCells,
+                row: currDisplayRow,
+                nCells: shownCells,
                 slots
             });
         }
 
         currRow += nCells;
-        if (currRow > maxRowUsed) {
-            maxRowUsed = currRow;
+        currDisplayRow += shownCells;
+        if (currDisplayRow > maxRowUsed) {
+            maxRowUsed = currDisplayRow;
+        }
+        if (currRow > maxFlowRowUsed) {
+            maxFlowRowUsed = currRow;
         }
     }
 
@@ -1059,8 +1849,14 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     }
     const reqCols = placements.length > 0 ? (maxPlacementCol + 1) : (currCol + 1);
     const reqRows = placements.length > 0 ? maxPlacementRow : maxRowUsed;
-    const resolvedCols = Math.max(finalCols, reqCols);
+    let resolvedCols = Math.max(finalCols, reqCols);
     const resolvedRows = Math.max(finalRows, reqRows);
+    // Rows added only because grown tiles overflow their columns: add columns in proportion.
+    const flowRows = Math.max(1, Math.min(resolvedRows, Math.max(finalRows, maxFlowRowUsed)));
+    const flowCols = resolvedCols;
+    if (resolvedRows > flowRows) {
+        resolvedCols = Math.max(resolvedCols, Math.ceil(resolvedCols * resolvedRows / flowRows));
+    }
 
     const gridSlots = [];
     for (let r = 0; r < resolvedRows; r++) {
@@ -1073,320 +1869,11 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
         rows: resolvedRows,
         cols: resolvedCols,
         wrapRows: wrapRows,
+        // Pre-overflow size: readability/collapse checks use it (see spanning_layout.ts flowRows).
+        flowRows,
+        flowCols,
         placements,
         slots: gridSlots
-    };
-}
-
-// Duplicated logic: keep in sync with src/reorder_helpers.ts clampTargetToGridCapacity and reorderSpanningItems
-function clampTargetToGridCapacityLocal(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows) {
-    const col = Math.max(0, Math.min(targetCol, maxAllowedCols - 1));
-    const row = Math.max(0, Math.min(targetRow, maxAllowedRows - sourceCells));
-    return { col, row };
-}
-
-// Duplicated logic: keep in sync with src/reorder_helpers.ts expandSpanningGridOrder and reduceSpanningGridOrder
-function expandSpanningGridOrderLocal(currentOrder, allocations, oldCols, oldRows) {
-    const newCols = oldCols + 1;
-    const newRows = oldRows + 1;
-
-    const grid = [];
-    for (let c = 0; c < oldCols; c++) {
-        grid.push(new Array(oldRows).fill(""));
-    }
-
-    let currCol = 0;
-    let currRow = 0;
-    for (const id of currentOrder) {
-        const nCells = id ? (allocations[id] || 1) : 1;
-        if (currRow > 0 && currRow + nCells > oldRows) {
-            currCol++;
-            currRow = 0;
-        }
-        if (currCol >= oldCols) break;
-        if (!id) {
-            currRow += 1;
-            continue;
-        }
-        for (let i = 0; i < nCells; i++) {
-            if (currRow + i < oldRows) {
-                grid[currCol][currRow + i] = id;
-            }
-        }
-        currRow += nCells;
-    }
-
-    const newOrder = [];
-    for (let c = 0; c < newCols; c++) {
-        let r = 0;
-        while (r < newRows) {
-            if (c < oldCols && r < oldRows) {
-                const cell = grid[c][r];
-                if (cell) {
-                    newOrder.push(cell);
-                    const n = allocations[cell] || 1;
-                    r += n;
-                } else {
-                    newOrder.push("");
-                    r += 1;
-                }
-            } else {
-                newOrder.push("");
-                r += 1;
-            }
-        }
-    }
-
-    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
-        newOrder.pop();
-    }
-
-    return {
-        newOrder,
-        cols: newCols,
-        rows: newRows
-    };
-}
-
-function reduceSpanningGridOrderLocal(currentOrder, allocations, oldCols, oldRows, minCols, minRows) {
-    const newCols = Math.max(minCols, oldCols - 1);
-    const newRows = Math.max(minRows, oldRows - 1);
-    if (newCols === oldCols && newRows === oldRows) {
-        return { newOrder: [...currentOrder], cols: oldCols, rows: oldRows };
-    }
-
-    const grid = [];
-    for (let c = 0; c < oldCols; c++) {
-        grid.push(new Array(oldRows).fill(""));
-    }
-
-    let currCol = 0;
-    let currRow = 0;
-    for (const id of currentOrder) {
-        const nCells = id ? (allocations[id] || 1) : 1;
-        if (currRow > 0 && currRow + nCells > oldRows) {
-            currCol++;
-            currRow = 0;
-        }
-        if (currCol >= oldCols) break;
-        if (!id) {
-            currRow += 1;
-            continue;
-        }
-        for (let i = 0; i < nCells; i++) {
-            if (currRow + i < oldRows) {
-                grid[currCol][currRow + i] = id;
-            }
-        }
-        currRow += nCells;
-    }
-
-    const newOrder = [];
-    for (let c = 0; c < newCols; c++) {
-        let r = 0;
-        while (r < newRows) {
-            const cell = grid[c][r];
-            if (cell) {
-                newOrder.push(cell);
-                const n = allocations[cell] || 1;
-                r += n;
-            } else {
-                newOrder.push("");
-                r += 1;
-            }
-        }
-    }
-
-    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
-        newOrder.pop();
-    }
-
-    return {
-        newOrder,
-        cols: newCols,
-        rows: newRows
-    };
-}
-
-function reorderSpanningItemsLocal(
-    activeIds,
-    currentOrder,
-    allocations,
-    sourceId,
-    targetCol,
-    targetRow,
-    maxAllowedCols,
-    maxAllowedRows,
-    wrapRows
-) {
-    let maxColUsed = maxAllowedCols - 1;
-    let scanCol = 0;
-    let scanRow = 0;
-    for (const id of currentOrder) {
-        const nCells = id ? (allocations[id] || 1) : 1;
-        if (scanRow > 0 && scanRow + nCells > wrapRows) {
-            scanCol++;
-            scanRow = 0;
-        }
-        if (id && scanCol > maxColUsed) {
-            maxColUsed = scanCol;
-        }
-        scanRow += nCells;
-    }
-
-    const maxCol = Math.max(maxAllowedCols - 1, maxColUsed);
-    const sourceCells = allocations[sourceId] || 1;
-    const gridRows = Math.max(maxAllowedRows, wrapRows);
-
-    let currCol = 0;
-    let currRow = 0;
-    const placements = [];
-    const placementBySlot = new Map();
-    const placementById = new Map();
-
-    for (const id of currentOrder) {
-        const nCells = id ? (allocations[id] || 1) : 1;
-        if (currRow > 0 && currRow + nCells > wrapRows) {
-            currCol++;
-            currRow = 0;
-        }
-        if (currCol > maxCol) break;
-        if (!id) {
-            currRow += 1;
-            continue;
-        }
-        const p = { id, col: currCol, row: currRow, nCells };
-        placements.push(p);
-        placementById.set(id, p);
-        for (let i = 0; i < nCells; i++) {
-            if (currRow + i < gridRows) {
-                placementBySlot.set(`${currCol},${currRow + i}`, p);
-            }
-        }
-        currRow += nCells;
-    }
-
-    const sourcePlacement = placementById.get(sourceId);
-    const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
-    const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
-
-    let targetPlacement = placementBySlot.get(`${targetCol},${targetRow}`);
-    if (targetPlacement && targetPlacement.id === sourceId) {
-        targetPlacement = undefined;
-    }
-
-    const clamped = clampTargetToGridCapacityLocal(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
-    const maxAllowedRow = Math.max(0, maxAllowedRows - sourceCells);
-    const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
-    const finalTargetRow = targetPlacement ? Math.min(targetPlacement.row, maxAllowedRow) : clamped.row;
-
-    const grid = [];
-    for (let c = 0; c <= maxCol; c++) {
-        grid.push(new Array(gridRows).fill(""));
-    }
-    for (const p of placements) {
-        for (let i = 0; i < p.nCells; i++) {
-            if (p.row + i < gridRows && p.col <= maxCol) {
-                grid[p.col][p.row + i] = p.id;
-            }
-        }
-    }
-
-    for (let c = 0; c <= maxCol; c++) {
-        for (let r = 0; r < gridRows; r++) {
-            if (grid[c][r] === sourceId) {
-                grid[c][r] = "";
-            }
-        }
-    }
-
-    // Identify all items overlapping the target span [finalTargetRow ... finalTargetRow + sourceCells - 1] in finalTargetCol
-    const displacedPlacements = [];
-    const seenDisplacedIds = new Set();
-
-    for (let i = 0; i < sourceCells; i++) {
-        const r = finalTargetRow + i;
-        if (r < gridRows && finalTargetCol <= maxCol) {
-            const cellId = grid[finalTargetCol][r];
-            if (cellId && cellId !== sourceId && !seenDisplacedIds.has(cellId)) {
-                seenDisplacedIds.add(cellId);
-                const p = placementById.get(cellId);
-                if (p) displacedPlacements.push(p);
-            }
-        }
-    }
-    if (targetPlacement && targetPlacement.id !== sourceId && !seenDisplacedIds.has(targetPlacement.id)) {
-        seenDisplacedIds.add(targetPlacement.id);
-        displacedPlacements.push(targetPlacement);
-    }
-
-    // Clear sourceId and all displaced items from the grid
-    for (let c = 0; c <= maxCol; c++) {
-        for (let r = 0; r < gridRows; r++) {
-            if (grid[c][r] === sourceId || seenDisplacedIds.has(grid[c][r])) {
-                grid[c][r] = "";
-            }
-        }
-    }
-
-    // Place displaced items into sourceCol, preserving relative offsets and gaps
-    let safeSourceRow = sourceRow;
-    let curSourceR = sourceRow;
-    for (const p of displacedPlacements) {
-        const relOffset = p.row - finalTargetRow;
-        let destR = (sourceCells >= p.nCells && relOffset >= 0)
-            ? (sourceRow + relOffset)
-            : curSourceR;
-        destR = Math.min(destR, Math.max(0, gridRows - p.nCells));
-        for (let i = 0; i < p.nCells; i++) {
-            if (sourceCol <= maxCol && destR + i < gridRows) {
-                grid[sourceCol][destR + i] = p.id;
-            }
-        }
-        curSourceR = destR + p.nCells;
-    }
-    if (displacedPlacements.length > 0) {
-        safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - displacedPlacements[0].nCells));
-    }
-
-    for (let i = 0; i < sourceCells; i++) {
-        if (finalTargetCol <= maxCol && finalTargetRow + i < gridRows) {
-            grid[finalTargetCol][finalTargetRow + i] = sourceId;
-        }
-    }
-
-    const effectiveWrapRows = Math.max(wrapRows, finalTargetRow + sourceCells);
-
-    const newOrder = [];
-    for (let c = 0; c <= maxCol; c++) {
-        let r = 0;
-        while (r < effectiveWrapRows) {
-            const cell = grid[c][r];
-            if (cell) {
-                newOrder.push(cell);
-                const n = allocations[cell] || 1;
-                r += n;
-            } else {
-                newOrder.push("");
-                r += 1;
-            }
-        }
-    }
-
-    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
-        newOrder.pop();
-    }
-
-    return {
-        newOrder,
-        rows: effectiveWrapRows,
-        cols: Math.max(maxAllowedCols, maxCol + 1),
-        finalTargetCol,
-        finalTargetRow,
-        sourceCol,
-        sourceRow,
-        targetPlacement,
-        safeSourceRow: typeof safeSourceRow === "number" ? safeSourceRow : sourceRow
     };
 }
 
@@ -1404,6 +1891,9 @@ function setFocusedFolderWithHistory(folder, recordHistory = true) {
     focusedFolder = target;
     updateBreadcrumbs();
     render();
+    if (typeof announce === "function") {
+        announce(target ? `Showing folder ${target === "(root files)/" ? "root files" : target}` : "Showing all files");
+    }
 }
 
 /** Navigates back one step in breadcrumb history, or goes up to parent folder. */
@@ -1566,10 +2056,10 @@ function doesFolderCollapse(files, folderPath, isSpanning, activeW, activeH) {
     }
     const canvasW = (typeof activeW === "number" && activeW > 0)
         ? activeW
-        : ((typeof canvas !== "undefined" && canvas && canvas.clientWidth) ? (canvas.clientWidth - (GRID_SIDE_MARGIN * 2)) : (REF_CANVAS_W - (GRID_SIDE_MARGIN * 2)));
+        : (getViewportW() - (GRID_SIDE_MARGIN * 2));
     const canvasH = (typeof activeH === "number" && activeH > 0)
         ? activeH
-        : ((typeof canvas !== "undefined" && canvas && canvas.clientHeight) ? (canvas.clientHeight - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN) : (REF_CANVAS_H - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN));
+        : (getViewportH() - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN);
     const availW = Math.max(50, canvasW);
     const availH = Math.max(50, canvasH);
     const minW = (typeof data !== "undefined" && data && typeof data.minCellWidth === "number") ? data.minCellWidth : 60;
@@ -1578,9 +2068,10 @@ function doesFolderCollapse(files, folderPath, isSpanning, activeW, activeH) {
         ? isSpanning
         : (typeof data !== "undefined" && data && (data.mode === "spanning_grid" || data.layoutMode === "spanning_grid"));
     if (spanningMode) {
-        const layout = buildSpanningGridLocal(files, BASE_GRID_ASPECT);
-        const cW = availW / Math.max(1, layout.cols);
+        const layout = buildSpanningGridLocal(files, BASE_GRID_ASPECT, null, 0, 0, 60, getCompressionPct(), null, scopeFootprints(`folder:${folderPath}`), scopeFlowCells(`folder:${folderPath}`));
+        const cW = availW / Math.max(1, layout.flowCols || layout.cols);
         const cH = availH / Math.max(1, layout.rows);
+        const flowCH = availH / Math.max(1, layout.flowRows || layout.rows);
         let hasOverflow = false;
         for (const p of layout.placements) {
             if (p.nCells * cH > availH + 1) {
@@ -1588,7 +2079,7 @@ function doesFolderCollapse(files, folderPath, isSpanning, activeW, activeH) {
                 break;
             }
         }
-        return cW < minW || cH < minH || hasOverflow;
+        return cW < minW || flowCH < minH || hasOverflow;
     } else {
         const grid = buildStableGrid(files.length, BASE_GRID_ASPECT);
         const cW = availW / Math.max(1, grid.cols);
@@ -1597,11 +2088,24 @@ function doesFolderCollapse(files, folderPath, isSpanning, activeW, activeH) {
     }
 }
 
+const MIN_RENDER_VIEWPORT = 200;
+
+/** Paints a centered hint instead of an unreadable grid when the panel is narrower or shorter than MIN_RENDER_VIEWPORT. */
+function drawTooSmall(w, h) {
+    ctx.fillStyle = getThemeColor("--vscode-editor-background", "#18181c");
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = getThemeColor("--vscode-descriptionForeground", "#707075");
+    ctx.font = "12px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("Enlarge the panel to show Thumbview", w / 2, h / 2);
+    ctx.textAlign = "left";
+}
+
 /** Paints the loading/error status screen shown before repository data has arrived. */
 function drawStatus() {
-    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.clearRect(0, 0, getViewportW(), getViewportH());
     ctx.fillStyle = getThemeColor("--vscode-editor-background", "#18181c");
-    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.fillRect(0, 0, getViewportW(), getViewportH());
 
     ctx.fillStyle = getThemeColor("--vscode-foreground", "#e1e1e6");
     ctx.font = "16px system-ui";
@@ -2063,7 +2567,10 @@ function drawThumbnail(file, x, y, w, h) {
                     }
                     const loadingTask = pdfjsLib.getDocument({
                         url: file.mediaUri,
-                        withCredentials: false
+                        withCredentials: false,
+                        // The webview CSP has no 'unsafe-eval'; pdf.js must not compile font
+                        // programs with new Function (it falls back to its interpreter).
+                        isEvalSupported: false
                     });
                     loadingTask.promise.then(pdf => {
                         return pdf.getPage(1);
@@ -2164,8 +2671,7 @@ function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, use
                     }
                 }
             } else {
-                const lower = line._lowerText !== undefined ? line._lowerText : lineText.toLowerCase();
-                isMatchedLine = textMatches(lineText, lower);
+                isMatchedLine = textMatches(lineText, lowerLineText(line));
             }
         }
 
@@ -2303,22 +2809,25 @@ function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, use
     const intW = Math.round(w);
     const intH = Math.round(h);
     const useRasterCache = intW >= 30 && intH >= 30;
+    // Rasterize at device pixels so tiles stay sharp on HiDPI screens; CanvasLRU budgets real pixels.
+    const rasterDpr = Math.min(window.devicePixelRatio || 1, 2);
     const tileKey = useRasterCache
-        ? `${file.id}:${intW}:${intH}:${rawSearchQuery && !searchInvalid ? rawSearchQuery : ""}:${file.gitStatus || ""}:${file.gitChanges ? 1 : 0}:${file.errorLines ? 1 : 0}`
+        ? `${file.id}:${intW}:${intH}:${rasterDpr}:${rawSearchQuery && !searchInvalid ? `${rawSearchQuery}:${matchCase ? 1 : 0}${matchWholeWord ? 1 : 0}${useRegex ? 1 : 0}` : ""}:${file.contentVersion}:${file._decoSig}`
         : null;
 
     let cached = tileKey ? tileRasterCache.get(tileKey) : null;
     if (cached) {
-        ctx.drawImage(cached, x, y);
+        ctx.drawImage(cached, x, y, intW, intH);
     } else {
         let offscreen = null;
         let offCtx = null;
         if (useRasterCache) {
             try {
                 offscreen = document.createElement("canvas");
-                offscreen.width = intW;
-                offscreen.height = intH;
+                offscreen.width = Math.round(intW * rasterDpr);
+                offscreen.height = Math.round(intH * rasterDpr);
                 offCtx = offscreen.getContext("2d");
+                offCtx.setTransform(rasterDpr, 0, 0, rasterDpr, 0, 0);
             } catch (e) {
                 offscreen = null;
                 offCtx = null;
@@ -2332,17 +2841,13 @@ function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, use
         renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, useText, fontSize, stepY);
 
         if (offscreen && offCtx) {
-            if (tileRasterCache.size >= MAX_TILE_CACHE_ENTRIES) {
-                const firstKey = tileRasterCache.keys().next().value;
-                tileRasterCache.delete(firstKey);
-            }
             tileRasterCache.set(tileKey, offscreen);
-            ctx.drawImage(offscreen, x, y);
+            ctx.drawImage(offscreen, x, y, intW, intH);
         }
     }
 
     // Highlight editor visible viewport range in transparent gray overlay if file is open
-    const isFileOpen = openFiles.includes(file.uri);
+    const isFileOpen = openFilesSet.has(file.uri);
     if (isFileOpen && (file.uri in viewLocations)) {
         const totalRealLines = Math.max(file.lineCount || lines.length, 1);
         const viewLoc = viewLocations[file.uri];
@@ -2461,6 +2966,16 @@ function drawCloseBtn(file, x, y, w) {
 
 // MARK: drawFileTile
 /** Draws one file's tile: background, border, label, close button, and thumbnail; stores file._cell for hit-testing and dims the tile if dimForFocus is set or it's the file currently being dragged. */
+const GIT_STATUS_LETTER = { modified: "M", added: "A", untracked: "U", deleted: "D" };
+
+/** Explorer-style status text for a tile, e.g. "2, M": error count then git letter. Empty when clean. */
+function tileStatusBadge(file) {
+    const parts = [];
+    if (file.errorCount > 0) parts.push(String(file.errorCount));
+    if (file.gitStatus && GIT_STATUS_LETTER[file.gitStatus]) parts.push(GIT_STATUS_LETTER[file.gitStatus]);
+    return parts.join(", ");
+}
+
 function drawFileTile(file, x, y, w, h, dimForFocus) {
     file._cell = { x, y, w, h };
 
@@ -2495,12 +3010,20 @@ function drawFileTile(file, x, y, w, h, dimForFocus) {
     ctx.fillStyle = labelColor;
     ctx.font = TILE_LABEL_FONT;
 
-    const maxLabelWidth = isOpen ? (w - TILE_LABEL_WIDTH_MARGIN) : (w - 16);
-    if (file._lastCellW !== w || !file._fittedLabel) {
+    // Status as text, not only color (like the Explorer): error count and git letter.
+    const badge = tileStatusBadge(file);
+    const badgeW = badge ? ctx.measureText(badge).width + 6 : 0;
+    const labelRight = isOpen ? (w - TILE_LABEL_WIDTH_MARGIN) : (w - 16);
+    const maxLabelWidth = labelRight - badgeW;
+    if (file._lastCellW !== w || file._lastBadge !== badge || !file._fittedLabel) {
         file._lastCellW = w;
+        file._lastBadge = badge;
         file._fittedLabel = fitPathText(file.path, maxLabelWidth);
     }
     ctx.fillText(file._fittedLabel, x + TILE_LABEL_OFFSET_X, y + TILE_LABEL_OFFSET_Y);
+    if (badge && maxLabelWidth > 20) {
+        ctx.fillText(badge, x + TILE_LABEL_OFFSET_X + labelRight - badgeW + 6, y + TILE_LABEL_OFFSET_Y);
+    }
 
     if (isOpen) {
         drawCloseBtn(file, x, y, w);
@@ -2519,24 +3042,161 @@ function drawFileTile(file, x, y, w, h, dimForFocus) {
     ctx.restore();
 }
 
+function sameOrder(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if ((a[i] || "") !== (b[i] || "")) return false;
+    }
+    return true;
+}
+
+/** Spanning cell count for a file, matching buildSpanningGridLocal's allocation. */
+function spanningCellsForFile(f) {
+    if (!f) return 1;
+    return f.lineCount ? cellsNeeded(f.lineCount, 60, getCompressionPct()) : (f.nCells || 1);
+}
+
+/**
+ * Mirrors a reconciled layout order (and any new footprints) into `data` and asks the host to
+ * persist it (extension.ts "saveLayoutOrder": { scope: "folderFiles" | "folderCards" |
+ * "rootCards", folder, ids, footprints, wrapRows, flowCells }).
+ */
+function requestLayoutOrderSave(scope, folder, ids, footprints = {}, wrapRows = null, flowCells = {}) {
+    if (!data) return;
+    if (Object.keys(flowCells).length > 0) {
+        const flowKey = scope === "folderFiles" ? `folder:${folder}` : `cards:${scope === "folderCards" ? folder : ""}`;
+        if (!data.slotFlowCells) data.slotFlowCells = {};
+        data.slotFlowCells[flowKey] = { ...(data.slotFlowCells[flowKey] || {}), ...flowCells };
+    }
+    if (typeof wrapRows === "number") {
+        if (scope === "rootCards") {
+            data.cardWrapRows = wrapRows;
+        } else {
+            const wrapKey = scope === "folderCards" ? "folderCardWrapRows" : "folderWrapRows";
+            if (!data[wrapKey]) data[wrapKey] = {};
+            data[wrapKey][folder] = wrapRows;
+        }
+    }
+    if (Object.keys(footprints).length > 0) {
+        const scopeKey = scope === "folderFiles" ? `folder:${folder}` : `cards:${scope === "folderCards" ? folder : ""}`;
+        if (!data.slotFootprints) data.slotFootprints = {};
+        data.slotFootprints[scopeKey] = { ...(data.slotFootprints[scopeKey] || {}), ...footprints };
+    }
+    if (scope === "rootCards") {
+        data.cardOrder = [...ids];
+    } else {
+        const key = scope === "folderCards" ? "folderCardOrders" : "folderOrders";
+        if (!data[key]) data[key] = {};
+        data[key][folder] = [...ids];
+    }
+    vscode.postMessage({ command: "saveLayoutOrder", scope, folder, ids: [...ids], footprints, wrapRows, flowCells });
+}
+
+/**
+ * Flow cells to freeze for live items that have none yet in a scope: their current display
+ * height. Once frozen, later growth only changes display height, never column membership.
+ */
+function missingFlowCells(liveIds, cellsOf, footprints, frozen) {
+    const out = {};
+    for (const id of liveIds) {
+        if (frozen && frozen[id]) continue;
+        out[id] = Math.max(cellsOf(id), (footprints && footprints[id]) || 0);
+    }
+    return out;
+}
+
+/**
+ * Cell counts for simulating a spanning drag in a layout scope: frozen flow cells (what decides
+ * columns in the real layout), including holes in `order`. Using display heights here made the
+ * optimistic drop and the host's next layout disagree, and could move files between columns.
+ */
+function dragFlowAllocations(scopeKey, items, order) {
+    const frozen = scopeFlowCells(scopeKey) || {};
+    const fp = scopeFootprints(scopeKey);
+    const allocations = {};
+    for (const it of items) {
+        if (!it) continue;
+        allocations[it.id] = it.type === "folder"
+            ? 1
+            : (frozen[it.id] || Math.max(spanningCellsForFile(it.file), (fp && fp[it.id]) || 0));
+    }
+    for (const id of order || []) {
+        if (id && allocations[id] === undefined) {
+            allocations[id] = spanningHoleCells(id, fp, frozen);
+        }
+    }
+    return allocations;
+}
+
+/** Spanning layout items for card mode (folder cards are one cell). */
+function cardLayoutItems(items) {
+    return items.filter(Boolean).map(it => {
+        if (it.type === "folder") {
+            return { id: it.id, type: "folder", item: it, card: it.card, nCells: 1 };
+        }
+        const f = it.file;
+        const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount, 60, getCompressionPct()) : (f.nCells || 1));
+        return { id: it.id, type: "file", item: it, file: f, lineCount: f.lineCount, nCells };
+    });
+}
+
+/**
+ * Keeps a drill-down folder's file order spatially stable. The first view saves the order on
+ * screen; later views fill holes left by ignored/deleted files with new files (height-aware in
+ * spanning mode) instead of letting later files shift. The webview owns this because only it
+ * knows folder layouts; the host just stores the result.
+ */
+function reconcileFolderFileOrder(folder, files, spanning) {
+    const saved = data.folderOrders && data.folderOrders[folder];
+    const liveIds = files.map(f => f.id);
+    const fp = scopeFootprints(`folder:${folder}`);
+    const flow = scopeFlowCells(`folder:${folder}`);
+    const onScreen = (!saved || saved.length === 0) ? liveIds : saved;
+    const { order: next, footprints } = (!saved || saved.length === 0)
+        ? { order: liveIds, footprints: {} }
+        : fillLayoutHoles(saved, liveIds,
+            spanning ? (id => spanningCellsForFile(fileById.get(id))) : undefined,
+            spanning ? (id => spanningHoleCells(id, fp, flow)) : undefined);
+    const newFlow = spanning
+        ? missingFlowCells(liveIds, id => spanningCellsForFile(fileById.get(id)), { ...(fp || {}), ...footprints }, flow)
+        : {};
+    // Freeze the column height the user is looking at: otherwise appending files recomputes it
+    // and every column re-wraps. The root grid does the same with thumbview.spanningRows.
+    const savedWrap = data.folderWrapRows && data.folderWrapRows[folder];
+    const wrapRows = spanning && !savedWrap
+        ? buildSpanningGridLocal(files, BASE_GRID_ASPECT, onScreen, 0, 0, 60, getCompressionPct(), null, fp, flow).wrapRows
+        : null;
+    if (!sameOrder(saved, next) || wrapRows || Object.keys(newFlow).length > 0) {
+        requestLayoutOrderSave("folderFiles", folder, next, footprints, wrapRows, newFlow);
+    }
+}
+
 // MARK: render
 /** Redraws the whole canvas for the current data/filter/search/drag state — clears, computes grid geometry, then dispatches to one of three per-tile rendering modes (subfolder cards, folder drill-down, or the normal root grid). */
 function render() {
-    if (!ctx) {
+    renderScene();
+    drawKeyboardFocus();
+}
+
+function renderScene() {
+    if (!ctx || isFrameFrozen()) {
+        // Frozen: keep the last shown frame for the fast reopen path (tryFastReveal). The block
+        // lifts on reveal or showAfterTransition, which schedule a fresh render.
         return;
     }
 
-    const rectW = Math.max(canvas.clientWidth, window.innerWidth);
-    const rectH = Math.max(canvas.clientHeight, window.innerHeight);
+    const rectW = getViewportW();
+    const rectH = getViewportH();
 
-    if (document.hidden || document.visibilityState === "hidden" || rectW < 200 || rectH < 200) {
-        // Tab container is transitionally backgrounded or hidden
-        if (!resizeRafId) {
-            resizeRafId = requestAnimationFrame(() => {
-                resizeRafId = null;
-                render();
-            });
-        }
+    if (!revealPending) {
+        // The size of the frame the user is looking at; the fast reopen path compares against it.
+        lastRevealedW = rectW;
+        lastRevealedH = rectH;
+    }
+
+    if (document.hidden || document.visibilityState === "hidden" || rectW < 1 || rectH < 1) {
+        // Tab container is backgrounded or collapsed. The ResizeObserver and visibilitychange
+        // handler re-render once it has a usable size, so no retry loop here.
         return;
     }
 
@@ -2556,6 +3216,14 @@ function render() {
     }
     const light = isLightTheme();
 
+    if (rectW < MIN_RENDER_VIEWPORT || rectH < MIN_RENDER_VIEWPORT) {
+        drawTooSmall(rectW, rectH);
+        if (revealPending && data) {
+            checkRevealStable(rectW, rectH);
+        }
+        return;
+    }
+
     if ((draggingFile || draggingFolder) && dragBackgroundCanvas) {
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -2568,6 +3236,10 @@ function render() {
     if (!data) {
         drawStatus();
         return;
+    }
+
+    if (revealPending) {
+        checkRevealStable(rectW, rectH);
     }
 
     ctx.clearRect(0, 0, rectW, rectH);
@@ -2628,7 +3300,11 @@ function render() {
         }
     }
 
-    const rootCellsTooSmall = refCellW < MIN_CELL_W || refCellH < MIN_CELL_H || hasTallFileOverflow;
+    // Readability uses the pre-overflow size: rows/columns added only because a file grew must
+    // never flip the whole root into folder cards (the largest possible layout change).
+    const refFlowCellW = refAvailableW / Math.max(1, data.layout.flowCols || gridCols);
+    const refFlowCellH = refAvailableH / Math.max(1, data.layout.flowRows || gridRows);
+    const rootCellsTooSmall = refFlowCellW < MIN_CELL_W || refFlowCellH < MIN_CELL_H || hasTallFileOverflow;
 
     // Opening/focusing a directory drills down into that folder so its files span the canvas.
     const shouldOpenFolder = !!focusedFolder;
@@ -2660,10 +3336,11 @@ function render() {
     const isSpanningMode = data && (data.mode === "spanning_grid" || data.layoutMode === "spanning_grid");
 
     if (shouldOpenFolder) {
+        reconcileFolderFileOrder(focusedFolder, scopedFiles, isSpanningMode);
         const folderOrder = (data && data.folderOrders && data.folderOrders[focusedFolder]) || null;
         const folderWrapRows = (data && data.folderWrapRows && data.folderWrapRows[focusedFolder]) || null;
         if (isSpanningMode) {
-            localSpanningLayout = buildSpanningGridLocal(scopedFiles, BASE_GRID_ASPECT, folderOrder, extraCols, extraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), folderWrapRows);
+            localSpanningLayout = buildSpanningGridLocal(scopedFiles, BASE_GRID_ASPECT, folderOrder, extraCols, extraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), folderWrapRows, scopeFootprints(`folder:${focusedFolder}`), scopeFlowCells(`folder:${focusedFolder}`));
             folderCellW = availableW / Math.max(1, localSpanningLayout.cols);
             folderCellH = availableH / Math.max(1, localSpanningLayout.rows);
         } else {
@@ -2674,8 +3351,9 @@ function render() {
             folderCellW = availableW / Math.max(1, folderCols);
             folderCellH = availableH / Math.max(1, folderRows);
         }
-        const refFolderCols = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.cols : 1) : (localFolderGrid ? localFolderGrid.cols + extraCols : 1);
-        const refFolderRows = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.rows : 1) : (localFolderGrid ? localFolderGrid.rows + extraRows : 1);
+        // Pre-overflow size, so growth never flips a folder into card mode (see rootCellsTooSmall).
+        const refFolderCols = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.flowCols : 1) : (localFolderGrid ? localFolderGrid.cols + extraCols : 1);
+        const refFolderRows = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.flowRows : 1) : (localFolderGrid ? localFolderGrid.rows + extraRows : 1);
         const refFolderCellW = refAvailableW / Math.max(1, refFolderCols);
         const refFolderCellH = refAvailableH / Math.max(1, refFolderRows);
         cellsTooSmall = hasSubfolders && (doesFolderCollapse(scopedFiles, effectiveBasePath, isSpanningMode) || refFolderCellW < MIN_CELL_W || refFolderCellH < MIN_CELL_H);
@@ -2697,37 +3375,43 @@ function render() {
         // Subfolder card mode: group files into immediate child folders and render each as a clickable card.
         const { folders, rootFiles, orderedItems } = subfolderInfo;
 
-        let displayItems = [];
         const itemById = new Map(orderedItems.map(it => [it.id, it]));
-        const effectiveCardOrder = (shouldOpenFolder && focusedFolder && data.folderCardOrders && data.folderCardOrders[focusedFolder])
-            ? data.folderCardOrders[focusedFolder]
-            : (shouldOpenFolder ? null : data.cardOrder);
-        if (effectiveCardOrder && Array.isArray(effectiveCardOrder) && effectiveCardOrder.length > 0) {
-            const seenIds = new Set();
-            for (const cid of effectiveCardOrder) {
-                if (!cid) {
-                    displayItems.push(null);
-                } else {
-                    const it = itemById.get(cid);
-                    if (it) {
-                        displayItems.push(it);
-                        seenIds.add(cid);
-                    }
-                    // IMPORTANT: If cid is NOT in itemById (e.g. stale ID or uncollapsed file ID),
-                    // do NOT push null to avoid inflating grid with invalid/stale IDs.
-                }
-            }
-            for (const it of orderedItems) {
-                if (!seenIds.has(it.id)) {
-                    displayItems.push(it);
-                }
-            }
-            while (displayItems.length > 0 && !displayItems[displayItems.length - 1]) {
-                displayItems.pop();
-            }
-        } else {
-            displayItems = orderedItems;
+        // Card orders follow the same spatial-stability rule as file orders: an item that
+        // disappears (ignored file, folder dissolved) leaves a hole, new items fill the earliest
+        // hole they fit in, and nothing is trimmed. See fillLayoutHoles.
+        const cardScope = shouldOpenFolder ? "folderCards" : "rootCards";
+        const savedCardOrder = shouldOpenFolder
+            ? (focusedFolder && data.folderCardOrders && data.folderCardOrders[focusedFolder])
+            : data.cardOrder;
+        const liveCardIds = orderedItems.map(it => it.id);
+        const cardCellsOf = id => {
+            const it = itemById.get(id);
+            return it && it.type === "file" ? spanningCellsForFile(it.file) : 1;
+        };
+        const cardFootprintsKey = `cards:${shouldOpenFolder ? focusedFolder : ""}`;
+        const cardFp = scopeFootprints(cardFootprintsKey);
+        const cardFlow = scopeFlowCells(cardFootprintsKey);
+        const { order: effectiveCardOrder, footprints: newCardFootprints } = (!savedCardOrder || savedCardOrder.length === 0)
+            ? { order: liveCardIds, footprints: {} }
+            : fillLayoutHoles(savedCardOrder, liveCardIds,
+                isSpanningMode ? cardCellsOf : undefined,
+                isSpanningMode ? (id => spanningHoleCells(id, cardFp, cardFlow)) : undefined);
+        const newCardFlow = isSpanningMode
+            ? missingFlowCells(liveCardIds, cardCellsOf, { ...(cardFp || {}), ...newCardFootprints }, cardFlow)
+            : {};
+        const savedCardWrap = shouldOpenFolder
+            ? (data.folderCardWrapRows && data.folderCardWrapRows[focusedFolder])
+            : data.cardWrapRows;
+        // Freeze the card column height on first spanning view (see reconcileFolderFileOrder).
+        const freezeCardWrap = isSpanningMode && !savedCardWrap
+            ? buildSpanningGridLocal(cardLayoutItems(orderedItems), BASE_GRID_ASPECT,
+                (!savedCardOrder || savedCardOrder.length === 0) ? liveCardIds : savedCardOrder,
+                0, 0, 60, getCompressionPct(), null, cardFp, cardFlow).wrapRows
+            : null;
+        if (!sameOrder(savedCardOrder, effectiveCardOrder) || freezeCardWrap || Object.keys(newCardFlow).length > 0) {
+            requestLayoutOrderSave(cardScope, focusedFolder, effectiveCardOrder, newCardFootprints, freezeCardWrap, newCardFlow);
         }
+        const displayItems = effectiveCardOrder.map(cid => (cid && itemById.get(cid)) || null);
 
         const totalItems = orderedItems.length;
         if (totalItems === 0) return;
@@ -2741,15 +3425,7 @@ function render() {
         let itemsToRender = [];
 
         if (isSpanningMode) {
-            const spanningItems = displayItems.map(it => {
-                if (!it) return null;
-                if (it.type === "folder") {
-                    return { id: it.id, type: "folder", item: it, card: it.card, nCells: 1 };
-                }
-                const f = it.file;
-                const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
-                return { id: it.id, type: "file", item: it, file: f, lineCount: f.lineCount, nCells };
-            }).filter(Boolean);
+            const spanningItems = cardLayoutItems(displayItems);
 
             localSpanningLayout = buildSpanningGridLocal(
                 spanningItems,
@@ -2759,7 +3435,9 @@ function render() {
                 extraRows,
                 60,
                 (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05),
-                cardWrapRows
+                cardWrapRows,
+                cardFp,
+                cardFlow
             );
 
             cardCols = localSpanningLayout.cols;
@@ -2902,18 +3580,22 @@ function render() {
                 if (mosaicW >= 24 && mosaicH >= 16 && group.files && group.files.length > 0) {
                     const mosaicWInt = Math.round(mosaicW);
                     const mosaicHInt = Math.round(mosaicH);
-                    const mosaicCacheKey = `${group.path}:${mosaicWInt}:${mosaicHInt}:${isSpanningMode}:${queryActive ? rawSearchQuery : ""}:${activeFileUri}:${openFiles.length}:${light ? 1 : 0}:${group.files.length}:${data._version || 0}`;
+                    const mosaicDpr = Math.min(window.devicePixelRatio || 1, 2);
+                    const mosaicCacheKey = `${group.path}:${mosaicWInt}:${mosaicHInt}:${mosaicDpr}:${isSpanningMode}:${queryActive ? `${rawSearchQuery}:${matchCase ? 1 : 0}${matchWholeWord ? 1 : 0}${useRegex ? 1 : 0}` : ""}:${activeFileUri}:${openFilesVersion}:${light ? 1 : 0}:${groupMosaicSignature(group)}`;
 
-                    if (group._miniCache && group._miniCache.key === mosaicCacheKey) {
-                        ctx.drawImage(group._miniCache.canvas, mosaicX, mosaicY);
+                    const cachedMosaic = mosaicCache.get(mosaicCacheKey);
+                    if (cachedMosaic) {
+                        ctx.drawImage(cachedMosaic, mosaicX, mosaicY, mosaicWInt, mosaicHInt);
                     } else {
                         let miniOffscreen = null;
                         let miniCtx = null;
                         try {
+                            // Device-pixel raster for HiDPI sharpness (see drawThumbnail's rasterDpr).
                             miniOffscreen = document.createElement("canvas");
-                            miniOffscreen.width = mosaicWInt;
-                            miniOffscreen.height = mosaicHInt;
+                            miniOffscreen.width = Math.round(mosaicWInt * mosaicDpr);
+                            miniOffscreen.height = Math.round(mosaicHInt * mosaicDpr);
                             miniCtx = miniOffscreen.getContext("2d");
+                            miniCtx.setTransform(mosaicDpr, 0, 0, mosaicDpr, 0, 0);
                         } catch (e) {
                             miniOffscreen = null;
                             miniCtx = null;
@@ -2938,7 +3620,7 @@ function render() {
                                     return { id: it.id, item: it, isFolder: true, nCells: 1 };
                                 }
                                 const f = it.file;
-                                const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
+                                const nCells = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount, 60, getCompressionPct()) : (f.nCells || 1));
                                 return { id: it.id, item: it, file: f, lineCount: f.lineCount, nCells };
                             });
                             const groupFolderWrapRows = (data && data.folderWrapRows && data.folderWrapRows[group.path]) || null;
@@ -2948,7 +3630,7 @@ function render() {
                             const groupFolderExtraRows = (data && data.folderExtraRows && typeof data.folderExtraRows[group.path] === "number")
                                 ? data.folderExtraRows[group.path]
                                 : 0;
-                            const spanningLayout = buildSpanningGridLocal(itemsToLayout, BASE_GRID_ASPECT, groupFolderOrder, groupFolderExtraCols, groupFolderExtraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), groupFolderWrapRows);
+                            const spanningLayout = buildSpanningGridLocal(itemsToLayout, BASE_GRID_ASPECT, groupFolderOrder, groupFolderExtraCols, groupFolderExtraRows, 60, (typeof getCompressionPct === "function" ? getCompressionPct() : 0.05), groupFolderWrapRows, scopeFootprints(`folder:${group.path}`), scopeFlowCells(`folder:${group.path}`));
                             const miniCols = spanningLayout.cols;
                             const miniRows = spanningLayout.rows;
                             const gap = (miniCols >= 8 || miniRows >= 8) ? 1 : 2;
@@ -3125,8 +3807,8 @@ function render() {
                         }
 
                         if (miniOffscreen && miniCtx) {
-                            group._miniCache = { key: mosaicCacheKey, canvas: miniOffscreen };
-                            ctx.drawImage(miniOffscreen, mosaicX, mosaicY);
+                            mosaicCache.set(mosaicCacheKey, miniOffscreen);
+                            ctx.drawImage(miniOffscreen, mosaicX, mosaicY, mosaicWInt, mosaicHInt);
                         }
                     }
                 }
@@ -3442,7 +4124,7 @@ canvas.addEventListener("auxclick", event => {
     const { px, py } = getCanvasPos(event);
     const targetFile = findFileAt(px, py);
     if (targetFile) {
-        const isOpen = openFiles.includes(targetFile.uri);
+        const isOpen = openFilesSet.has(targetFile.uri);
         if (isOpen) {
             vscode.postMessage({
                 command: "close",
@@ -3910,7 +4592,7 @@ function updateHoverTooltip() {
         }
 
         const isMatchLine = rawSearchQuery && !searchInvalid &&
-            textMatches(lineText, line && line._lowerText !== undefined ? line._lowerText : lineText.toLowerCase());
+            textMatches(lineText, line && typeof line === "object" ? lowerLineText(line) : lineText.toLowerCase());
 
         const isErrorLine = hoveredFile.errorLines ? !!hoveredFile.errorLines[i] : false;
 
@@ -4004,7 +4686,11 @@ function updateHoverTooltip() {
 }
 
 let lastFocusRequestTime = 0;
-/** Asks the extension host to focus the webview when the window lacks OS focus, throttled to once per 500ms. */
+/**
+ * Asks the extension host to focus the panel when the webview lacks focus, throttled to once per
+ * 500ms. Called only on click: requesting focus on hover pulled focus away from the terminal or
+ * editor the user was typing in.
+ */
 function checkWindowFocus() {
     if (!document.hasFocus()) {
         const now = Date.now();
@@ -4015,10 +4701,219 @@ function checkWindowFocus() {
     }
 }
 
-window.addEventListener("mouseenter", checkWindowFocus);
+
+// Keyboard access to the canvas grid. The grid can hold thousands of tiles on one canvas, so
+// instead of a DOM element per tile the canvas is a single focusable widget: arrow keys move a
+// keyboard focus between the tiles/cards currently drawn (by position on screen), a polite live
+// region announces the focused item, and actions reuse the mouse paths (jump message, context
+// menu and drag handlers via synthetic events) so behavior cannot drift. Printable keys keep
+// going to search, so only non-character keys are used here.
+const srStatus = document.getElementById("sr-status");
+let kbFocusKey = null;
+let kbMode = false;
+let syntheticPointer = false;
+
+/** OS reduced-motion preference; sent with "jump" so the host honors workbench.reduceMotion "auto". */
+function prefersReducedMotion() {
+    try {
+        return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch {
+        return false;
+    }
+}
+
+/** Screen-reader announcement through the polite live region. */
+function announce(text) {
+    if (!srStatus || !text) return;
+    // Alternate a trailing no-break space so repeating the same text is still announced.
+    srStatus.textContent = srStatus.textContent === text ? text + "\u00a0" : text;
+}
+
+/** Items the keyboard can focus in the current view: folder cards and drawn file tiles. */
+function keyboardTargets() {
+    const out = [];
+    if (!data) return out;
+    for (const card of data._folderCards || []) {
+        out.push({ key: `card:${card.id}`, kind: "folder", rect: { x: card.x, y: card.y, w: card.w, h: card.h }, card });
+    }
+    for (const f of data.files || []) {
+        if (f._cell) out.push({ key: `file:${f.id}`, kind: "file", rect: f._cell, file: f });
+    }
+    return out;
+}
+
+function currentKeyboardTarget() {
+    if (!kbFocusKey) return null;
+    return keyboardTargets().find(t => t.key === kbFocusKey) || null;
+}
+
+function targetCenterClient(t) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: rect.left + t.rect.x + t.rect.w / 2, y: rect.top + t.rect.y + Math.min(t.rect.h / 2, 40) };
+}
+
+function describeTarget(t) {
+    if (t.kind === "folder") {
+        const g = t.card.group;
+        const count = g && typeof g.fileCount === "number" ? `, ${g.fileCount} file${g.fileCount === 1 ? "" : "s"}` : "";
+        return `Folder ${t.card.folderPath}${count}. Press Enter to open.`;
+    }
+    const f = t.file;
+    const parts = [f.path, `${f.lineCount || 0} lines`];
+    const statusWord = { modified: "modified", added: "added", untracked: "untracked", deleted: "deleted" }[f.gitStatus];
+    if (statusWord) parts.push(statusWord);
+    if (f.errorCount > 0) parts.push(`${f.errorCount} error${f.errorCount === 1 ? "" : "s"}`);
+    if (openFilesSet.has(f.uri)) parts.push("open in editor");
+    if (searchQuery && !searchInvalid && textMatches(f._combinedTextOriginal, f._combinedText)) parts.push("matches search");
+    return parts.join(", ");
+}
+
+function focusKeyboardTarget(t, announceIt = true) {
+    if (!t) return;
+    kbMode = true;
+    kbFocusKey = t.key;
+    const center = targetCenterClient(t);
+    lastMousePos = { x: center.x, y: center.y };
+    // Existing hover-based shortcuts (Ctrl magnifier, Ctrl+C/X, Delete) act on the focused tile.
+    hoveredFile = t.kind === "file" ? t.file : null;
+    if (announceIt) announce(describeTarget(t));
+    render();
+    if (isCtrlDown && hoveredFile) updateHoverTooltip();
+}
+
+/** Nearest item in a direction: must lie ahead of the current center; ties prefer alignment. */
+function neighborInDirection(from, targets, dx, dy) {
+    const fc = { x: from.rect.x + from.rect.w / 2, y: from.rect.y + from.rect.h / 2 };
+    let best = null;
+    let bestScore = Infinity;
+    for (const t of targets) {
+        if (t.key === from.key) continue;
+        const c = { x: t.rect.x + t.rect.w / 2, y: t.rect.y + t.rect.h / 2 };
+        const ahead = dx !== 0 ? (c.x - fc.x) * dx : (c.y - fc.y) * dy;
+        if (ahead <= 1) continue;
+        const across = dx !== 0 ? Math.abs(c.y - fc.y) : Math.abs(c.x - fc.x);
+        const score = ahead + across * 2;
+        if (score < bestScore) {
+            bestScore = score;
+            best = t;
+        }
+    }
+    return best;
+}
+
+function readingOrder(targets) {
+    return [...targets].sort((a, b) => (a.rect.y - b.rect.y) || (a.rect.x - b.rect.x));
+}
+
+function dispatchPointer(type, point, extra = {}) {
+    syntheticPointer = true;
+    try {
+        canvas.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: point.x, clientY: point.y, button: 0, buttons: type === "mouseup" ? 0 : 1, ...extra }));
+    } finally {
+        syntheticPointer = false;
+    }
+}
+
+/** Keyboard alternative to dragging: replays the mouse drag gesture one cell in a direction. */
+function moveFocusedTile(t, dx, dy) {
+    const grid = activeRenderGrid;
+    if (!grid || !grid.cellW || !grid.cellH) return;
+    const start = targetCenterClient(t);
+    const end = { x: start.x + dx * grid.cellW, y: start.y + dy * grid.cellH };
+    dispatchPointer("mousedown", start);
+    dispatchPointer("mousemove", { x: start.x + dx * (DRAG_THRESHOLD + 2), y: start.y + dy * (DRAG_THRESHOLD + 2) });
+    dispatchPointer("mousemove", end);
+    dispatchPointer("mouseup", end);
+    const moved = keyboardTargets().find(k => k.key === t.key);
+    if (moved) {
+        focusKeyboardTarget(moved, false);
+        announce(`Moved ${t.kind === "folder" ? t.card.folderPath : t.file.path}`);
+    }
+}
+
+function activateKeyboardTarget(t) {
+    if (t.kind === "folder") {
+        setFocusedFolderWithHistory(t.card.folderPath); // announces the folder
+        const first = readingOrder(keyboardTargets())[0];
+        if (first) focusKeyboardTarget(first, false);
+        return;
+    }
+    vscode.postMessage({
+        command: "jump",
+        uri: t.file.uri,
+        line: 0,
+        query: rawSearchQuery,
+        matchCase,
+        matchWholeWord,
+        useRegex,
+        searchInvalid,
+        reduceMotion: prefersReducedMotion()
+    });
+}
+
+window.addEventListener("keydown", event => {
+    const activeEl = document.activeElement;
+    if (activeEl && activeEl !== document.body && activeEl !== canvas) return;
+    if (!data) return;
+    const arrows = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+    const targets = keyboardTargets();
+    if (targets.length === 0) return;
+    let current = currentKeyboardTarget();
+
+    if (arrows[event.key] && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        if (!current) {
+            focusKeyboardTarget(readingOrder(targets)[0]);
+            return;
+        }
+        const [dx, dy] = arrows[event.key];
+        if (event.altKey) {
+            moveFocusedTile(current, dx, dy);
+            return;
+        }
+        const next = neighborInDirection(current, targets, dx, dy);
+        if (next) focusKeyboardTarget(next);
+        return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        const ordered = readingOrder(targets);
+        focusKeyboardTarget(event.key === "Home" ? ordered[0] : ordered[ordered.length - 1]);
+        return;
+    }
+    if (!current) return;
+    if (event.key === "Enter" || (event.key === " " && kbMode)) {
+        event.preventDefault();
+        activateKeyboardTarget(current);
+        return;
+    } else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+        event.preventDefault();
+        dispatchPointer("contextmenu", targetCenterClient(current), { button: 2, buttons: 0 });
+    }
+});
+
+/** Focus ring for the keyboard-focused item, drawn over every frame while keyboard mode is on. */
+function drawKeyboardFocus() {
+    if (!kbMode || !ctx || !data || document.hidden || isFrameFrozen()) return;
+    const t = currentKeyboardTarget();
+    if (!t) return;
+    const highContrast = document.body.classList.contains("vscode-high-contrast") || document.body.classList.contains("vscode-high-contrast-light");
+    ctx.save();
+    ctx.strokeStyle = getThemeColor(highContrast ? "--vscode-contrastActiveBorder" : "--vscode-focusBorder", "#007fd4");
+    ctx.lineWidth = highContrast ? 3 : 2;
+    ctx.setLineDash([]);
+    ctx.strokeRect(t.rect.x + 1, t.rect.y + 1, t.rect.w - 2, t.rect.h - 2);
+    ctx.restore();
+}
 
 // MARK: mousedown
 canvas.addEventListener("mousedown", event => {
+    if (!syntheticPointer && kbMode) {
+        // Pointer use hides the keyboard focus ring until the keyboard is used again.
+        kbMode = false;
+        render();
+    }
+    checkWindowFocus();
     if (event.button !== 0) return; // only fire on left-click
     if (!data) return;
     cursorPos = getCanvasPos(event);
@@ -4065,8 +4960,6 @@ canvas.addEventListener("mousemove", event => {
         tooltip.style.display = "none";
         return;
     }
-
-    checkWindowFocus();
 
     // Safety check: if no mouse button is pressed, cancel any pending candidate drag
     if ((candidateFile || candidateFolder) && event.buttons === 0) {
@@ -4187,20 +5080,12 @@ canvas.addEventListener("mouseup", event => {
             if (activeRenderGrid.isSpanning && dragTarget) {
                 const scopedItems = activeRenderGrid.spanningItems || activeRenderGrid.orderedItems.filter(Boolean);
                 const scopedIds = scopedItems.map(it => it.id);
-                const allocations = {};
-                for (const it of scopedItems) {
-                    if (it.type === "folder") {
-                        allocations[it.id] = 1;
-                    } else {
-                        const f = it.file;
-                        allocations[it.id] = (f && f.nCells && f.nCells > 1) ? f.nCells : (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
-                    }
-                }
+                const allocations = dragFlowAllocations(`cards:${targetFocusedFolder || ""}`, scopedItems, currentCardIds);
                 const wrapRows = activeRenderGrid.wrapRows || (data.layout && data.layout.wrapRows) || (data.layout && data.layout.rows) || 1;
                 const maxAllowedCols = activeRenderGrid.cols;
                 const maxAllowedRows = activeRenderGrid.rows;
 
-                const res = reorderSpanningItemsLocal(
+                const res = reorderSpanningItems(
                     scopedIds,
                     currentCardIds,
                     allocations,
@@ -4325,20 +5210,12 @@ canvas.addEventListener("mouseup", event => {
             if (activeRenderGrid.isSpanning && dragTarget) {
                 const scopedItems = activeRenderGrid.spanningItems || activeRenderGrid.orderedItems.filter(Boolean);
                 const scopedIds = scopedItems.map(it => it.id);
-                const allocations = {};
-                for (const it of scopedItems) {
-                    if (it.type === "folder") {
-                        allocations[it.id] = 1;
-                    } else {
-                        const f = it.file;
-                        allocations[it.id] = (f && f.nCells && f.nCells > 1) ? f.nCells : (f && f.lineCount ? cellsNeeded(f.lineCount) : 1);
-                    }
-                }
+                const allocations = dragFlowAllocations(`cards:${targetFocusedFolder || ""}`, scopedItems, currentCardIds);
                 const wrapRows = activeRenderGrid.wrapRows || (data.layout && data.layout.wrapRows) || (data.layout && data.layout.rows) || 1;
                 const maxAllowedCols = activeRenderGrid.cols;
                 const maxAllowedRows = activeRenderGrid.rows;
 
-                const res = reorderSpanningItemsLocal(
+                const res = reorderSpanningItems(
                     scopedIds,
                     currentCardIds,
                     allocations,
@@ -4450,15 +5327,16 @@ canvas.addEventListener("mouseup", event => {
                 const currentOrder = focusedFolder
                     ? ((data.folderOrders && data.folderOrders[focusedFolder]) ? [...data.folderOrders[focusedFolder]] : [...scopedIds])
                     : (data.fileOrder ? [...data.fileOrder] : [...scopedIds]);
-                const allocations = {};
-                for (const f of scopedFiles) {
-                    allocations[f.id] = (f.nCells && f.nCells > 1) ? f.nCells : (f.lineCount ? cellsNeeded(f.lineCount) : (f.nCells || 1));
-                }
+                const allocations = dragFlowAllocations(
+                    focusedFolder ? `folder:${focusedFolder}` : "root",
+                    scopedFiles.map(f => ({ id: f.id, type: "file", file: f })),
+                    currentOrder
+                );
                 const wrapRows = (activeRenderGrid && activeRenderGrid.wrapRows) || (data.layout && data.layout.wrapRows) || (data.layout && data.layout.rows) || 1;
                 const maxAllowedCols = (activeRenderGrid && activeRenderGrid.cols) || (data.layout && data.layout.cols) || 2;
                 const maxAllowedRows = (activeRenderGrid && activeRenderGrid.rows) || (data.layout && data.layout.rows) || 2;
 
-                spanningRes = reorderSpanningItemsLocal(
+                spanningRes = reorderSpanningItems(
                     scopedIds,
                     currentOrder,
                     allocations,
@@ -4655,6 +5533,8 @@ canvas.addEventListener("mouseup", event => {
         const cb = file._closeBtn;
         if (cb && pointInRect(cb, cursorPos.px, cursorPos.py, CLOSE_BUTTON_PADDING)) {
             openFiles = openFiles.filter(u => u !== file.uri);
+            openFilesSet.delete(file.uri);
+            openFilesVersion++;
             render();
             vscode.postMessage({
                 command: "close",
@@ -4726,7 +5606,8 @@ canvas.addEventListener("mouseup", event => {
             matchCase,
             matchWholeWord,
             useRegex,
-            searchInvalid
+            searchInvalid,
+            reduceMotion: prefersReducedMotion()
         });
     }
 });
@@ -5105,6 +5986,7 @@ const themeObserver = new MutationObserver(() => {
     themeTokensDirty = true;
     refreshThemeTokens();
     tileRasterCache.clear();
+    mosaicCache.clear();
     render();
 });
 themeObserver.observe(document.body, { attributes: true, attributeFilter: ["style", "class"] });
@@ -5137,6 +6019,11 @@ function updateSettingsModalState() {
     const mediaToggle = document.getElementById("media-thumbnails-toggle");
     if (mediaToggle) {
         mediaToggle.checked = data.renderMediaThumbnails !== false;
+    }
+
+    const fsToggle = document.getElementById("fullscreen-toggle");
+    if (fsToggle) {
+        fsToggle.checked = data.fullscreenOnOpen !== false;
     }
 
     const compInput = document.getElementById("compression-percentage-input");
@@ -5492,11 +6379,50 @@ const actionsModal = document.getElementById("actions-modal");
 const closeModal = document.getElementById("close-modal");
 
 function closeAllPopovers() {
+    const hadFocusInside = [foldersPopover, actionsModal].some(el => el && el.contains(document.activeElement));
+    const opener = actionsModal && actionsModal.style.display === "block" ? actionsBtn : foldersBtn;
     if (foldersPopover) foldersPopover.style.display = "none";
     if (actionsModal) actionsModal.style.display = "none";
-    if (foldersBtn) foldersBtn.classList.remove("active");
-    if (actionsBtn) actionsBtn.classList.remove("active");
+    if (foldersBtn) {
+        foldersBtn.classList.remove("active");
+        foldersBtn.setAttribute("aria-expanded", "false");
+    }
+    if (actionsBtn) {
+        actionsBtn.classList.remove("active");
+        actionsBtn.setAttribute("aria-expanded", "false");
+    }
+    // Return keyboard focus to the button that opened the dialog, as dialogs are expected to.
+    if (hadFocusInside && opener) opener.focus();
 }
+
+/** Opens a toolbar dialog: marks its button expanded and moves focus to its first control. */
+function openToolbarDialog(dialog, button) {
+    dialog.style.display = "block";
+    button.classList.add("active");
+    button.setAttribute("aria-expanded", "true");
+    const first = dialog.querySelector("button, input, select, [tabindex]:not([tabindex='-1'])");
+    if (first) first.focus();
+}
+
+/** Keeps Tab / Shift+Tab inside an open modal dialog. */
+function trapFocus(dialog) {
+    dialog.addEventListener("keydown", event => {
+        if (event.key !== "Tab") return;
+        const focusable = Array.from(dialog.querySelectorAll("button, input, select, [tabindex]:not([tabindex='-1'])"))
+            .filter(el => !el.disabled && el.offsetParent !== null);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
+}
+if (actionsModal) trapFocus(actionsModal);
 
 if (foldersBtn && foldersPopover) {
     foldersBtn.onclick = (e) => {
@@ -5506,16 +6432,12 @@ if (foldersBtn && foldersPopover) {
         if (!isOpen) {
             updateFoldersPopover();
             updateIgnoresPopover();
-            foldersPopover.style.display = "block";
-            foldersBtn.classList.add("active");
+            openToolbarDialog(foldersPopover, foldersBtn);
         }
     };
 }
 if (closeFoldersPopover && foldersPopover) {
-    closeFoldersPopover.onclick = () => {
-        foldersPopover.style.display = "none";
-        if (foldersBtn) foldersBtn.classList.remove("active");
-    };
+    closeFoldersPopover.onclick = () => closeAllPopovers();
 }
 
 function handleAddIgnore() {
@@ -5552,16 +6474,12 @@ if (actionsBtn && actionsModal) {
         closeAllPopovers();
         if (!isOpen) {
             updateSettingsModalState();
-            actionsModal.style.display = "block";
-            actionsBtn.classList.add("active");
+            openToolbarDialog(actionsModal, actionsBtn);
         }
     };
 }
 if (closeModal && actionsModal) {
-    closeModal.onclick = () => {
-        actionsModal.style.display = "none";
-        if (actionsBtn) actionsBtn.classList.remove("active");
-    };
+    closeModal.onclick = () => closeAllPopovers();
 }
 
 // Settings modal buttons
@@ -5588,6 +6506,48 @@ if (dragSwapBtn) {
 if (dragShiftBtn) {
     dragShiftBtn.onclick = () => {
         vscode.postMessage({ command: "setDragReorderMode", mode: "shift" });
+    };
+}
+
+const fullscreenNotice = document.getElementById("fullscreen-notice");
+const fullscreenToggle = document.getElementById("fullscreen-toggle");
+
+/** Shows the one-time fullscreen banner (extension.ts "fullscreenNotice"); announced, not focused, so it never interrupts typing. */
+function showFullscreenNotice(keybinding) {
+    if (!fullscreenNotice || !fullscreenNotice.hidden) return;
+    const keyEl = document.getElementById("fullscreen-notice-key");
+    if (keyEl && keybinding) keyEl.textContent = keybinding;
+    fullscreenNotice.hidden = false;
+    const text = document.getElementById("fullscreen-notice-text");
+    if (text) announce(text.textContent);
+}
+
+function hideFullscreenNotice() {
+    if (fullscreenNotice) fullscreenNotice.hidden = true;
+}
+
+const fullscreenKeepBtn = document.getElementById("fullscreen-notice-keep");
+if (fullscreenKeepBtn) {
+    fullscreenKeepBtn.onclick = () => {
+        hideFullscreenNotice();
+        vscode.postMessage({ command: "dismissFullscreenNotice" });
+        canvas.focus();
+    };
+}
+const fullscreenTabBtn = document.getElementById("fullscreen-notice-tab");
+if (fullscreenTabBtn) {
+    fullscreenTabBtn.onclick = () => {
+        hideFullscreenNotice();
+        if (fullscreenToggle) fullscreenToggle.checked = false;
+        vscode.postMessage({ command: "setFullscreenOnOpen", enabled: false });
+        announce("Thumbview will open as a tab. Change this in Settings.");
+        canvas.focus();
+    };
+}
+if (fullscreenToggle) {
+    fullscreenToggle.onchange = () => {
+        hideFullscreenNotice();
+        vscode.postMessage({ command: "setFullscreenOnOpen", enabled: fullscreenToggle.checked });
     };
 }
 
@@ -5673,7 +6633,7 @@ function applyLocalSpanningCompression(pct) {
     const order = data.files.map(f => f.id);
     const extraCols = data.extraCols || 0;
     const extraRows = data.extraRows || 0;
-    const layout = buildSpanningGridLocal(data.files, BASE_GRID_ASPECT, order, extraCols, extraRows, 60, clampedPct, null);
+    const layout = buildSpanningGridLocal(data.files, BASE_GRID_ASPECT, order, extraCols, extraRows, 60, clampedPct, null, scopeFootprints("root"));
     if (layout && layout.placements) {
         data.layout = {
             cols: layout.cols,

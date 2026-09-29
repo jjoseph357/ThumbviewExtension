@@ -1,9 +1,11 @@
-// Walks the workspace, applies a hand-rolled .gitignore emulation, and reads every
-// remaining file into per-line records (RepoFile[]) for the layout builders to place
-// and the webview to tokenize/draw. Runs on the extension-host side only.
+// Lists workspace files (file_discovery.ts: .gitignore via git, files.exclude), applies the user's
+// Thumbview ignore patterns, and reads every remaining text file into per-line records
+// (RepoFile[]) for the layout builders to place and the webview to tokenize/draw.
+// Runs on the extension-host side only.
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import { listWorkspaceFiles, looksBinary } from "./file_discovery";
 
 export interface MiniLine {
     text: string;
@@ -290,39 +292,28 @@ export function invalidateScanFile(filePath: string): void {
     scanFileCache.delete(filePath);
 }
 
+export const MAX_SCANNED_FILES = 10000;
+let scanCapNotified = false;
+// Ids already on the map (extension.ts registers the persisted layout order). When the cap
+// applies, these keep their place first so tiles never vanish because unrelated files were added.
+let scanPriorityProvider: () => Iterable<string> = () => [];
+export function setScanPriorityProvider(provider: () => Iterable<string>): void {
+    scanPriorityProvider = provider;
+}
+
 export async function scanRepository(
     ignoreState: ScanIgnoreState,
     persistIgnore: (updated: ScanIgnoreState) => Promise<void>
 ): Promise<RepoFile[]> {
-    // Scan all files but exclude non-code, library, or build folders
-    const files = await vscode.workspace.findFiles(
-        "**/*",
-        "**/{node_modules,.git,dist,build,out,target,coverage,venv,.venv,env,.env,lib,lib64,vendor,__pycache__,.pytest_cache,.mypy_cache}/**"
-    );
+    // The user's own rules decide what is source: every .gitignore level (via git), files.exclude,
+    // and .git/node_modules. A blanket folder-name blocklist used to hide real code such as lib/.
+    const files = await listWorkspaceFiles();
 
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
     const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
 
     const gitignoreRules = [...ignoreState.ignorePatterns];
     const autoIgnoreExclusions = ignoreState.autoIgnoreExclusions;
-
-    // Read workspace .gitignore rules so legitimate gitignore entries are never pruned
-    const actualGitignoreRules = new Set<string>();
-    if (wsFolder) {
-        const gitignorePath = path.join(wsFolder.uri.fsPath, ".gitignore");
-        if (fs.existsSync(gitignorePath)) {
-            try {
-                const content = fs.readFileSync(gitignorePath, "utf-8");
-                content.split("\n")
-                    .map(line => line.trim())
-                    .filter(line => line && !line.startsWith("#"))
-                    .forEach(rule => {
-                        actualGitignoreRules.add(rule);
-                        actualGitignoreRules.add(rule.replace(/^\/+|\/+$/g, ""));
-                    });
-            } catch {}
-        }
-    }
 
     // Prioritize auto-ignoring top-level dense folders & library subdirectories (>threshold files)
     const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
@@ -389,6 +380,28 @@ export async function scanRepository(
         return relA.localeCompare(relB, undefined, { numeric: true, sensitivity: "base" });
     });
 
+    // Safety net after auto-ignore (thumbview.autoIgnoreThreshold, which already hides any folder
+    // with too many files): a monorepo of many small folders can still list 100k+ files. Read only
+    // the first MAX_SCANNED_FILES in layout order and tell the user once per session.
+    if (validFiles.length > MAX_SCANNED_FILES) {
+        if (!scanCapNotified) {
+            scanCapNotified = true;
+            vscode.window.showWarningMessage(
+                `Thumbview is showing the first ${MAX_SCANNED_FILES.toLocaleString()} of ${validFiles.length.toLocaleString()} files. Ignore large folders from the Folders & Ignored menu (or with .gitignore / files.exclude) to see the rest.`
+            );
+        }
+        // Spatial stability: files already shown stay shown; new files take the remaining slots
+        // in layout order. Sort order alone would let one added file push another off the map.
+        const shown = new Set(scanPriorityProvider());
+        const kept = validFiles.filter(file => shown.has(file.fsPath)).slice(0, MAX_SCANNED_FILES);
+        const room = MAX_SCANNED_FILES - kept.length;
+        const added = room > 0 ? validFiles.filter(file => !shown.has(file.fsPath)).slice(0, room) : [];
+        const keep = new Set([...kept, ...added]);
+        const capped = validFiles.filter(file => keep.has(file));
+        validFiles.length = 0;
+        validFiles.push(...capped);
+    }
+
     // Parallel chunked processing (batch size 50) to prevent thread block while speeding up scan by ~5x
     const CHUNK_SIZE = 50;
     for (let c = 0; c < validFiles.length; c += CHUNK_SIZE) {
@@ -415,6 +428,10 @@ export async function scanRepository(
                 let statMtime = 0;
                 let statSize = 0;
                 try {
+                    if (file.scheme !== "file") {
+                        // Virtual/remote URIs: fsPath could name an unrelated local file.
+                        throw new Error("non-file scheme");
+                    }
                     const st = await fs.promises.stat(file.fsPath);
                     statMtime = st.mtimeMs;
                     statSize = st.size;
@@ -459,6 +476,9 @@ export async function scanRepository(
 
                 let rawText: string | null = null;
                 try {
+                    if (file.scheme !== "file") {
+                        throw new Error("non-file scheme");
+                    }
                     rawText = await fs.promises.readFile(file.fsPath, "utf-8");
                 } catch {
                     if (vscode.workspace.fs && typeof vscode.workspace.fs.readFile === "function") {
@@ -483,7 +503,7 @@ export async function scanRepository(
                     }
                 }
 
-                if (rawText === null) {
+                if (rawText === null || looksBinary(rawText)) {
                     return null;
                 }
 

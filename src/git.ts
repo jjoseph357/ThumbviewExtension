@@ -33,6 +33,11 @@ export async function fetchWorkspaceGitDiff(): Promise<WorkspaceGitDiff> {
         return cachedGitDiff;
     }
 
+    // In Restricted Mode git must not run: a repository's own config can execute commands
+    // (e.g. core.fsmonitor). Tiles simply show no git markers there.
+    if (!vscode.workspace.isTrusted) {
+        return new Map();
+    }
     const folders = vscode.workspace.workspaceFolders;
     if (!folders || folders.length === 0) {
         return new Map();

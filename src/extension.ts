@@ -1,8 +1,12 @@
 import * as vscode from "vscode";
-import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache, invalidateScanFile } from "./scanner";
+import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache, invalidateScanFile, setScanPriorityProvider } from "./scanner";
+import { isAlwaysExcluded } from "./file_discovery";
+import { isSafeWebviewMessage } from "./message_guard";
 import { buildStableGrid, slotToIndex, findSlotIndex, MIN_GRID_COLS, MIN_GRID_ROWS } from "./layout";
-import { buildSpanningGrid, cellsNeeded, integrateNewFilesPreservingPositions, SpanningPlacement, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT } from "./spanning_layout";
+import { buildSpanningGrid, cellsNeeded, SpanningPlacement, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
+import { createReentrantLock, createCoalescedToggle } from "./locks";
+import { applyZenOverrides, ConfigLike, ZEN_ENTERED_KEY, ZEN_OWNER_HEARTBEAT_MS, ZEN_OWNER_STALE_MS, claimZenOwnership, hasOtherLiveOwners, releaseZenOwnership } from "./zen_settings";
 
 function getCompressionPct(): number {
     const raw = vscode.workspace.getConfiguration("thumbview").get<number>("compressionPercentage") ?? 5;
@@ -124,6 +128,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const fileOrder = new PersistentFileOrder();
+    setScanPriorityProvider(() => fileOrder.getOrder().filter(Boolean));
     const savedOrder = context.workspaceState.get<string[]>("thumbview.seenFiles");
     if (savedOrder) {
         fileOrder.update(savedOrder);
@@ -234,84 +239,30 @@ export async function activate(context: vscode.ExtensionContext) {
             .join("+");
     };
 
+    // Shows the user's own binding for thumbview.open in the UI. There is no API for resolved
+    // keybindings, so read the file VS Code uses for this profile: the nearest keybindings.json
+    // above this extension's globalStorage (User/ for the default profile, User/profiles/<id>/
+    // for others). Under Remote/WSL the extension runs on the remote host, where no such file
+    // exists, so the label falls back to "F4". Cached by mtime: consulted on every payload.
+    let keybindingLabelCache: { mtimeMs: number; label: string } | undefined;
     const detectOpenKeybinding = (): string => {
         try {
-            const home = process.env.HOME || process.env.USERPROFILE || "";
             const candidates: string[] = [];
-
-            if (context.globalStorageUri && context.globalStorageUri.fsPath) {
-                candidates.push(path.resolve(context.globalStorageUri.fsPath, "..", "..", "keybindings.json"));
-                candidates.push(path.resolve(context.globalStorageUri.fsPath, "..", "keybindings.json"));
-            }
-            if (context.logUri && context.logUri.fsPath) {
-                candidates.push(path.resolve(context.logUri.fsPath, "..", "..", "keybindings.json"));
-                candidates.push(path.resolve(context.logUri.fsPath, "..", "..", "..", "keybindings.json"));
-            }
-
-            if (process.platform === "win32") {
-                const appData = process.env.APPDATA || "";
-                candidates.push(path.join(appData, "Code", "User", "keybindings.json"));
-                candidates.push(path.join(appData, "Code - Insiders", "User", "keybindings.json"));
-                candidates.push(path.join(appData, "Code - OSS", "User", "keybindings.json"));
-                candidates.push(path.join(appData, "VSCodium", "User", "keybindings.json"));
-            } else if (process.platform === "darwin") {
-                candidates.push(path.join(home, "Library", "Application Support", "Code", "User", "keybindings.json"));
-                candidates.push(path.join(home, "Library", "Application Support", "Code - Insiders", "User", "keybindings.json"));
-                candidates.push(path.join(home, "Library", "Application Support", "Code - OSS", "User", "keybindings.json"));
-                candidates.push(path.join(home, "Library", "Application Support", "VSCodium", "User", "keybindings.json"));
-            } else {
-                candidates.push(path.join(home, ".config", "Code", "User", "keybindings.json"));
-                candidates.push(path.join(home, ".config", "Code - OSS", "User", "keybindings.json"));
-                candidates.push(path.join(home, ".config", "Code - Insiders", "User", "keybindings.json"));
-                candidates.push(path.join(home, ".config", "VSCodium", "User", "keybindings.json"));
-                candidates.push(path.join(home, ".vscode-oss-dev", "User", "keybindings.json"));
-                candidates.push(path.join(home, ".vscode-insiders", "User", "keybindings.json"));
+            if (context.globalStorageUri && context.globalStorageUri.scheme === "file") {
+                for (let up = 1; up <= 3; up++) {
+                    candidates.push(path.resolve(context.globalStorageUri.fsPath, ...new Array(up).fill(".."), "keybindings.json"));
+                }
             }
 
             for (const keybindingsPath of candidates) {
                 if (keybindingsPath && fs.existsSync(keybindingsPath)) {
-                    const raw = fs.readFileSync(keybindingsPath, "utf-8");
-                    
-                    let foundPositiveBinding: string | null = null;
-                    let hasUnassigned = false;
-
-                    try {
-                        const stripped = raw
-                            .replace(/\/\/.*$/gm, "")
-                            .replace(/\/\*[\s\S]*?\*\//g, "")
-                            .replace(/,\s*([}\]])/g, "$1");
-                        const parsed = JSON.parse(stripped);
-                        if (Array.isArray(parsed)) {
-                            for (let i = parsed.length - 1; i >= 0; i--) {
-                                const entry = parsed[i];
-                                if (entry && entry.command === "thumbview.open" && typeof entry.key === "string" && !foundPositiveBinding) {
-                                    foundPositiveBinding = formatKeybindingString(entry.key);
-                                }
-                                if (entry && entry.command === "-thumbview.open") {
-                                    hasUnassigned = true;
-                                }
-                            }
-                        }
-                    } catch {
+                    const mtimeMs = fs.statSync(keybindingsPath).mtimeMs;
+                    if (keybindingLabelCache && keybindingLabelCache.mtimeMs === mtimeMs) {
+                        return keybindingLabelCache.label;
                     }
-
-                    if (foundPositiveBinding) {
-                        return foundPositiveBinding;
-                    }
-
-                    // Robust Regex extraction for positive binding
-                    const positiveMatches = Array.from(raw.matchAll(/\{[^{}]*?"command"\s*:\s*"thumbview\.open"[^{}]*?\}/gi));
-                    if (positiveMatches.length > 0) {
-                        const lastPosMatch = positiveMatches[positiveMatches.length - 1][0];
-                        const keyMatch = /"key"\s*:\s*"([^"]+)"/i.exec(lastPosMatch);
-                        if (keyMatch && keyMatch[1]) {
-                            return formatKeybindingString(keyMatch[1]);
-                        }
-                    }
-
-                    if (hasUnassigned || /"command"\s*:\s*"-thumbview\.open"/i.test(raw)) {
-                        return "Unassigned";
-                    }
+                    const label = labelFromKeybindingsFile(fs.readFileSync(keybindingsPath, "utf-8"));
+                    keybindingLabelCache = { mtimeMs, label };
+                    return label;
                 }
             }
         } catch {
@@ -319,9 +270,67 @@ export async function activate(context: vscode.ExtensionContext) {
         return "F4";
     };
 
+    const labelFromKeybindingsFile = (raw: string): string => {
+        let foundPositiveBinding: string | null = null;
+        let hasUnassigned = false;
+        try {
+            const stripped = raw
+                .replace(/\/\/.*$/gm, "")
+                .replace(/\/\*[\s\S]*?\*\//g, "")
+                .replace(/,\s*([}\]])/g, "$1");
+            const parsed = JSON.parse(stripped);
+            if (Array.isArray(parsed)) {
+                for (let i = parsed.length - 1; i >= 0; i--) {
+                    const entry = parsed[i];
+                    if (entry && entry.command === "thumbview.open" && typeof entry.key === "string" && !foundPositiveBinding) {
+                        foundPositiveBinding = formatKeybindingString(entry.key);
+                    }
+                    if (entry && entry.command === "-thumbview.open") {
+                        hasUnassigned = true;
+                    }
+                }
+            }
+        } catch {
+        }
+        if (foundPositiveBinding) {
+            return foundPositiveBinding;
+        }
+
+        // Fallback when the file is not valid JSONC after stripping (e.g. mid-edit).
+        const positiveMatches = Array.from(raw.matchAll(/\{[^{}]*?"command"\s*:\s*"thumbview\.open"[^{}]*?\}/gi));
+        if (positiveMatches.length > 0) {
+            const lastPosMatch = positiveMatches[positiveMatches.length - 1][0];
+            const keyMatch = /"key"\s*:\s*"([^"]+)"/i.exec(lastPosMatch);
+            if (keyMatch && keyMatch[1]) {
+                return formatKeybindingString(keyMatch[1]);
+            }
+        }
+        if (hasUnassigned || /"command"\s*:\s*"-thumbview\.open"/i.test(raw)) {
+            return "Unassigned";
+        }
+        return "F4";
+    };
+
     const getOpenKeybindingLabel = (): string => detectOpenKeybinding();
 
     let cachedScannedFiles: RepoFile[] | null = null;
+    // Updates that arrive while the retained panel is hidden are deferred to the next reveal
+    // instead of re-posting the whole workspace payload to a webview nobody can see.
+    let hiddenRefreshPending: "layout" | "rescan" | null = null;
+
+    // The scanner reuses a RepoFile object while its file is unchanged and updateDocumentInCache
+    // replaces the object on edit, so object identity is a content version. The webview keys its
+    // search index and tile rasters on it instead of re-deriving a content signature.
+    const contentVersions = new WeakMap<RepoFile, number>();
+    let nextContentVersion = 1;
+    const getContentVersion = (file: RepoFile): number => {
+        let version = contentVersions.get(file);
+        if (version === undefined) {
+            version = nextContentVersion++;
+            contentVersions.set(file, version);
+        }
+        return version;
+    };
 
     const updateDocumentInCache = (doc: vscode.TextDocument) => {
         if (doc.uri.scheme !== "file" || doc.lineCount === 0 || !cachedScannedFiles) {
@@ -448,7 +457,70 @@ export async function activate(context: vscode.ExtensionContext) {
         return cachedIgnoreCountsResult;
     };
 
-    const updateLayoutFromCache = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
+    // Serializes every read-modify-write of persisted layout orders (fileOrder, folderOrders,
+    // folderCardOrders, cardOrder). Drag handlers await between their read and write, so without
+    // this a concurrent payload or saveLayoutOrder could overwrite their change and move a tile.
+    // Re-entrant through AsyncLocalStorage: a handler that already holds the lock and calls
+    // updateLayoutFromCache runs it inline instead of deadlocking.
+    const withOrderLock = createReentrantLock();
+
+    // Every Zen/maximize layout sequence (open, close, jump, switchTab, view-state exit) runs one at
+    // a time. Overlapping sequences stacked blind toggleZenMode/toggleMaximizeEditorGroup calls,
+    // desynced fullscreenActive from the real Zen state, and hammered the workbench layout.
+    const withLayoutLock = createReentrantLock();
+    // Timer callbacks scheduled inside a locked task inherit its AsyncLocalStorage context; run
+    // them detached so they queue for the locks like any other caller.
+    const detachFromLocks = <T>(fn: () => T): T => withLayoutLock.exit(() => withOrderLock.exit(fn));
+
+    // Minimum spanning cell counts for files that filled a taller hole (fillLayoutHoles in state.ts),
+    // per layout scope: "root", "folder:<path>" (drill-down files), "cards:<path>" ("cards:" = root
+    // cards). Scoped because a file filling a hole in one view must not grow, and re-flow, another.
+    type FootprintsByScope = { [scope: string]: { [id: string]: number } };
+    const getAllSlotFootprints = () => context.workspaceState.get<FootprintsByScope>("thumbview.slotFootprints") || {};
+    const getSlotFootprints = (scope: string) => getAllSlotFootprints()[scope] || {};
+    const mergeSlotFootprints = async (scope: string, added: { [id: string]: number }) => {
+        if (Object.keys(added).length === 0) {
+            return;
+        }
+        const all = getAllSlotFootprints();
+        all[scope] = { ...(all[scope] || {}), ...added };
+        await context.workspaceState.update("thumbview.slotFootprints", all);
+    };
+    // Frozen flow cells (column-membership heights) for webview-owned scopes, same keys as footprints.
+    const getAllSlotFlowCells = () => context.workspaceState.get<FootprintsByScope>("thumbview.slotFlowCells") || {};
+    const mergeSlotFlowCells = async (scope: string, added: { [id: string]: number }) => {
+        if (Object.keys(added).length === 0) {
+            return;
+        }
+        const all = getAllSlotFlowCells();
+        all[scope] = { ...(all[scope] || {}), ...added };
+        await context.workspaceState.update("thumbview.slotFlowCells", all);
+    };
+    const layoutScopeKey = (scope: unknown, folder: unknown) =>
+        scope === "folderFiles" ? `folder:${folder}` : `cards:${scope === "folderCards" ? folder : ""}`;
+
+    // Delta payloads: contentVersion of each file whose lines the webview already holds. Unchanged
+    // files are sent without `lines`/`fullLines` (`linesOmitted: true`), so a diagnostics or git
+    // update no longer re-serializes the whole workspace. Reset whenever a fresh webview loads
+    // ("ready"); the webview asks for anything it is missing ("requestFileLines").
+    const postedContentVersions = new Map<string, number>();
+    // Lines go out as plain strings: the webview reads only their text, and string arrays are
+    // about half the size of {text, indent, length, category} objects and several times faster
+    // to clone across the webview boundary (see DESIGN.md "Scale benchmark").
+    const withDeltaLines = <T extends { id: string; contentVersion: number; lines: { text: string }[]; fullLines?: unknown }>(files: T[]) =>
+        files.map(file => {
+            if (postedContentVersions.get(file.id) === file.contentVersion) {
+                const { lines: _lines, fullLines: _fullLines, ...rest } = file;
+                return { ...rest, lines: [] as string[], linesOmitted: true };
+            }
+            postedContentVersions.set(file.id, file.contentVersion);
+            return { ...file, lines: file.lines.map(line => line.text) };
+        });
+
+    const updateLayoutFromCache = (panel: vscode.WebviewPanel, forceBreakBeforeId?: string): Promise<void> =>
+        withOrderLock(() => updateLayoutFromCacheLocked(panel, forceBreakBeforeId));
+
+    const updateLayoutFromCacheLocked = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
         if (!cachedScannedFiles) {
             await refreshThumbview(panel);
             return;
@@ -465,33 +537,37 @@ export async function activate(context: vscode.ExtensionContext) {
 
             const activeFileIds = activeFiles.map(f => f.id);
             const mode = getLayoutMode();
+            const folderOrders = context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {};
+
+            // Natural spanning cell counts, recorded in every layout mode and kept for ignored/deleted
+            // ids too, so a hole is sized as its file was even after switching modes, and webview
+            // folder/card views can size holes (spanningHoleCells).
+            const naturalCompressionPct = getCompressionPct();
+            const cellsById = new Map(activeFiles.map(f => [f.id, cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, naturalCompressionPct)]));
+            const naturalCells = context.workspaceState.get<{ [id: string]: number }>("thumbview.naturalCells") || {};
+            let naturalChanged = false;
+            for (const [id, cells] of cellsById) {
+                if (naturalCells[id] !== cells) {
+                    naturalCells[id] = cells;
+                    naturalChanged = true;
+                }
+            }
+            if (naturalChanged) {
+                await context.workspaceState.update("thumbview.naturalCells", naturalCells);
+            }
 
             if (mode === "spanning_grid") {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                let savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
 
-                const config = vscode.workspace.getConfiguration("thumbview");
-                const compressionPct = getCompressionPct();
-
-                if (lastSpanningPlacements.length > 0) {
-                    const prevIds = new Set(lastSpanningPlacements.map(p => p.file.id));
-                    const newIds = activeFileIds.filter(id => !prevIds.has(id));
-                    if (newIds.length > 0) {
-                        const validPrevPlacements = lastSpanningPlacements.filter(p => activeFileIds.includes(p.file.id));
-                        const currentAllocations = { ...savedAllocations };
-                        for (const f of activeFiles) {
-                            currentAllocations[f.id] = cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, compressionPct);
-                        }
-                        const integrated = integrateNewFilesPreservingPositions(validPrevPlacements, newIds, currentAllocations, 16 / 9);
-                        fileOrder.setOrder(integrated.newOrder);
-                        savedRows = integrated.wrapRows;
-                        await context.workspaceState.update("thumbview.spanningRows", integrated.wrapRows);
-                    } else {
-                        fileOrder.update(activeFileIds);
-                    }
-                } else {
-                    fileOrder.update(activeFileIds);
-                }
+                // New files fill the earliest hole they fit in (a hole keeps the removed file's
+                // frozen height) and otherwise append; savedRows is left alone, so no existing
+                // tile moves. See fillLayoutHoles in state.ts.
+                const newFootprints = fileOrder.update(
+                    activeFileIds,
+                    id => cellsById.get(id) ?? 1,
+                    id => savedAllocations[id] ?? naturalCells[id] ?? 1
+                );
+                await mergeSlotFootprints("root", newFootprints);
             } else {
                 fileOrder.update(activeFileIds);
             }
@@ -526,6 +602,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
                 return {
                     ...file,
+                    contentVersion: getContentVersion(file),
                     mediaUri,
                     gitStatus: gitInfo?.status,
                     gitChanges: gitInfo?.lines,
@@ -539,29 +616,47 @@ export async function activate(context: vscode.ExtensionContext) {
                 const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
                 let savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
 
-                const currentAllocations: { [id: string]: number } = { ...savedAllocations };
+                // Flow cells (persisted in spanningAllocations) are frozen when a file is first
+                // placed and decide its column; display cells follow the current line count. So a
+                // growing or shrinking file pushes files within its column but never re-wraps
+                // anything into another column. A file that filled a taller hole displays at least
+                // the hole's height (footprint). Reflow clears both.
+                const flowAllocations: { [id: string]: number } = { ...savedAllocations };
+                const displayCells: { [id: string]: number } = {};
+                const footprints = getSlotFootprints("root");
                 for (const f of filesWithWebviewUris) {
-                    currentAllocations[f.id] = cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, compressionPct);
+                    const shown = Math.max(cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, compressionPct), footprints[f.id] || 0);
+                    displayCells[f.id] = shown;
+                    if (flowAllocations[f.id] === undefined) {
+                        flowAllocations[f.id] = shown;
+                    }
                 }
 
-                const layout = buildSpanningGrid(filesWithWebviewUris, order, currentAllocations, savedRows, forceBreakBeforeId ?? null, 16 / 9, DEFAULT_BASE_LINES_PER_CELL, compressionPct);
+                const layout = buildSpanningGrid(filesWithWebviewUris, order, flowAllocations, savedRows, forceBreakBeforeId ?? null, 16 / 9, DEFAULT_BASE_LINES_PER_CELL, compressionPct, displayCells);
                 lastSpanningPlacements = layout.placements;
 
                 await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
                 await context.workspaceState.update("thumbview.spanningRows", layout.wrapRows);
 
-                const filesWithSlots = layout.placements.map(p => ({
+                const filesWithSlots = withDeltaLines(layout.placements.map(p => ({
                     ...p.file,
                     slot: [p.col, p.row],
                     nCells: p.nCells,
                     slots: p.slots
-                }));
+                })));
 
                 panel.webview.postMessage({
                     command: "data",
                     mode: "spanning_grid",
+                    // naturalCells (including ignored/deleted ids) and per-scope slotFootprints let
+                    // webview folder/card views size holes and filled holes (overview.js spanningHoleCells).
+                    naturalCells: context.workspaceState.get<{ [id: string]: number }>("thumbview.naturalCells") || {},
+                    slotFootprints: getAllSlotFootprints(),
+                    // "root" carries the host's frozen root flow cells so webview drags simulate the same flow.
+                    slotFlowCells: { ...getAllSlotFlowCells(), root: layout.allocations },
                     dragReorderMode,
                     renderMediaThumbnails,
+                    fullscreenOnOpen: isFullscreenOnOpen(),
                     compressionPercentage,
                     autoIgnoreThreshold,
                     minCellWidth,
@@ -574,7 +669,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     extraRows,
                     cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
                     cardWrapRows: context.workspaceState.get<number>("thumbview.cardWrapRows") || null,
-                    folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
+                    folderOrders,
                     folderCardOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {},
                     folderCardWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {},
                     folderWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {},
@@ -585,22 +680,27 @@ export async function activate(context: vscode.ExtensionContext) {
                     layout: {
                         cols: layout.cols + extraCols,
                         rows: layout.rows + extraRows,
-                        wrapRows: layout.wrapRows
+                        wrapRows: layout.wrapRows,
+                        flowCols: layout.flowCols + extraCols,
+                        flowRows: layout.flowRows + extraRows
                     }
                 });
             } else { // uniform grid (default)
                 const layout = buildStableGrid(order.length);
 
+                const orderIndex = new Map(order.map((id, i) => [id, i]));
+                const slotIndexOf = (id: string) => orderIndex.get(id) ?? -1;
                 const filesWithSlots = filesWithWebviewUris.map(file => ({
                     ...file,
-                    slot: layout.slots[order.indexOf(file.id)],
+                    slot: layout.slots[slotIndexOf(file.id)],
                     nCells: 1,
-                    slots: [layout.slots[order.indexOf(file.id)]]
+                    slots: [layout.slots[slotIndexOf(file.id)]]
                 }));
-                
+
                 // sort so that array order reflects the user's custom order because subfolder views
                 // build their grids by iterating this array directly (ignoring slot position)
-                filesWithSlots.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+                filesWithSlots.sort((a, b) => slotIndexOf(a.id) - slotIndexOf(b.id));
+                const deltaFiles = withDeltaLines(filesWithSlots);
 
                 let ugMaxCol = 0, ugMaxRow = 0;
                 for (const f of filesWithSlots) {
@@ -615,6 +715,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     mode: "uniform_grid",
                     dragReorderMode,
                     renderMediaThumbnails,
+                    fullscreenOnOpen: isFullscreenOnOpen(),
                     compressionPercentage,
                     autoIgnoreThreshold,
                     minCellWidth,
@@ -627,14 +728,14 @@ export async function activate(context: vscode.ExtensionContext) {
                     extraRows,
                     cardOrder: context.workspaceState.get<string[]>("thumbview.cardOrder") || [],
                     cardWrapRows: context.workspaceState.get<number>("thumbview.cardWrapRows") || null,
-                    folderOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {},
+                    folderOrders,
                     folderCardOrders: context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {},
                     folderCardWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {},
                     folderWrapRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {},
                     folderExtraCols: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {},
                     folderExtraRows: context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {},
                     fileOrder: order,
-                    files: filesWithSlots,
+                    files: deltaFiles,
                     layout: {
                         cols: Math.max(layout.cols + extraCols, ugMaxCol + 1),
                         rows: Math.max(layout.rows + extraRows, ugMaxRow + 1),
@@ -664,16 +765,34 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
-    const refreshThumbview = async (panel: vscode.WebviewPanel) => {
+    // Raw result of the last scan. The scanner reuses a RepoFile object while its file is unchanged,
+    // so an identical array means nothing visible changed (e.g. a build writing a gitignored folder).
+    let lastRawScan: RepoFile[] | null = null;
+    const sameScan = (a: RepoFile[] | null, b: RepoFile[]) =>
+        !!a && a.length === b.length && a.every((file, i) => file === b[i]);
+
+    const refreshThumbview = async (panel: vscode.WebviewPanel, onlyIfChanged = false) => {
         try {
-            panel.webview.postMessage({
-                command: "status",
-                text: "Refreshing Thumbview...",
-                clearData: false
-            });
+            if (!onlyIfChanged) {
+                panel.webview.postMessage({
+                    command: "status",
+                    text: "Refreshing Thumbview...",
+                    clearData: false
+                });
+            }
 
             const files = await scanRepository(getIgnoreState(), persistIgnoreState);
+            if (onlyIfChanged && sameScan(lastRawScan, files)) {
+                return;
+            }
+            lastRawScan = files;
             cachedScannedFiles = files;
+            // The scan reads disk; re-apply unsaved buffers so their tiles keep showing the edits.
+            for (const doc of vscode.workspace.textDocuments) {
+                if (doc.isDirty) {
+                    updateDocumentInCache(doc);
+                }
+            }
 
             await updateLayoutFromCache(panel);
         } catch (err: any) {
@@ -685,6 +804,45 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    const refreshOrDefer = (kind: "layout" | "rescan") => {
+        if (!activePanel) {
+            return;
+        }
+        if (!activePanel.visible) {
+            if (hiddenRefreshPending !== "rescan") {
+                hiddenRefreshPending = kind;
+            }
+            return;
+        }
+        if (kind === "rescan") {
+            refreshThumbview(activePanel, true);
+        } else {
+            updateLayoutFromCache(activePanel);
+        }
+    };
+
+    // Runs after the reveal has painted, so the instant reveal shows the retained frame first and
+    // the (full-payload) catch-up update lands afterwards instead of stalling the reveal.
+    const HIDDEN_REFRESH_FLUSH_DELAY_MS = 250;
+    const flushHiddenRefresh = (panel: vscode.WebviewPanel) => {
+        if (!hiddenRefreshPending) {
+            return;
+        }
+        setTimeout(() => detachFromLocks(() => {
+            const kind = hiddenRefreshPending;
+            hiddenRefreshPending = null;
+            if (!panel.visible) {
+                hiddenRefreshPending = kind;
+                return;
+            }
+            if (kind === "rescan") {
+                refreshThumbview(panel, true);
+            } else if (kind === "layout") {
+                updateLayoutFromCache(panel);
+            }
+        }), HIDDEN_REFRESH_FLUSH_DELAY_MS);
+    };
+
     // Fullscreen = Zen Mode (natively hides AND restores sidebar/panel/aux bar —
     // extensions cannot read workbench visibility state, so VS Code must do the
     // snapshotting). All layout ops are serialized through layoutQueue; concurrent
@@ -694,47 +852,136 @@ export async function activate(context: vscode.ExtensionContext) {
     let groupMaximizedByUs = false;
     let layoutOpsInFlight = 0;
 
-    const initZenSettings = () => {
-        try {
-            const config = vscode.workspace.getConfiguration();
-            if (config.get<boolean>("zenMode.centerLayout") !== false) {
-                config.update("zenMode.centerLayout", false, vscode.ConfigurationTarget.Global);
-            }
-            if (config.get<boolean>("zenMode.fullScreen") !== false) {
-                config.update("zenMode.fullScreen", false, vscode.ConfigurationTarget.Global);
-            }
-            if (config.get<boolean>("zenMode.hideActivityBar") !== false) {
-                config.update("zenMode.hideActivityBar", false, vscode.ConfigurationTarget.Global);
-            }
-            if (config.get<boolean>("zenMode.hideLineNumbers") !== false) {
-                config.update("zenMode.hideLineNumbers", false, vscode.ConfigurationTarget.Global);
-            }
-            if (config.get<string>("zenMode.showTabs") !== "none") {
-                config.update("zenMode.showTabs", "none", vscode.ConfigurationTarget.Global);
-            }
-            if (config.get<boolean>("zenMode.singleTabGroup") !== true) {
-                config.update("zenMode.singleTabGroup", true, vscode.ConfigurationTarget.Global);
-            }
-        } catch {
+    // Every layout transition (open, reopen, close, jump, switchTab) gets an id. The webview hides on
+    // hideForTransition and only treats showAfterTransition carrying the latest id as "layout settled",
+    // so a delayed message from an earlier close cannot reveal a later open mid-expansion.
+    // Protocol: hideForTransition { transitionId }, showAfterTransition { transitionId } (overview.js).
+    let transitionSeq = 0;
+    // `hide: false` (jump/switchTab) only supersedes older transitions: the target editor covers
+    // Thumbview immediately, so hiding its page first would just flash the empty background.
+    // `fromHidden` (reopen) tells the webview the panel really was hidden, enabling its fast
+    // reopen path even when no close hid the page. Fields: { transitionId, fromHidden? }.
+    const beginTransition = (panel: vscode.WebviewPanel | undefined, options: { hide?: boolean; fromHidden?: boolean } = {}): number => {
+        const id = ++transitionSeq;
+        if (options.hide !== false) {
+            panel?.webview.postMessage({ command: "hideForTransition", transitionId: id, fromHidden: !!options.fromHidden });
+        }
+        return id;
+    };
+    const endTransition = (panel: vscode.WebviewPanel | undefined, id: number = transitionSeq) => {
+        if (panel && id === transitionSeq) {
+            panel.webview.postMessage({ command: "showAfterTransition", transitionId: id });
         }
     };
-    initZenSettings();
 
-    // Background pre-scan and git diff fetch so opening Thumbview is instant O(1)
-    scanRepository(getIgnoreState(), persistIgnoreState).then(files => {
-        cachedScannedFiles = files;
-    }).catch(() => {});
+    // Layout ops release 400ms late so onDidChangeViewState ignores the events they cause. If the
+    // user returns to a visible Thumbview inside that window, the view-state handler skipped it,
+    // so the last release settles the current transition instead of leaving the page hidden.
+    const releaseLayoutOp = () => {
+        setTimeout(() => detachFromLocks(() => {
+            layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
+            if (layoutOpsInFlight === 0 && activePanel && activePanel.visible) {
+                endTransition(activePanel);
+            }
+        }), 400);
+    };
+
+    // Thumbview never changes the user's settings at activation. The zenMode.* overrides it needs
+    // are applied on the first fullscreen open of a session and kept until the session ends, so
+    // toggling does not rewrite the global settings.json twice per F4 (Settings Sync churn, config
+    // listeners, open-editor flicker, added open latency). They are restored at deactivate, or by
+    // the next activation after a crash, once no other live window still uses them (zen_settings.ts).
+    const zenConfig: ConfigLike = {
+        inspect: key => vscode.workspace.getConfiguration().inspect(key),
+        update: (key, value) => vscode.workspace.getConfiguration().update(key, value, vscode.ConfigurationTarget.Global),
+    };
+    const isFullscreenOnOpen = () => vscode.workspace.getConfiguration("thumbview").get<boolean>("fullscreenOnOpen") ?? true;
+    const zenSessionId = vscode.env.sessionId;
+    let zenOverridesApplied = false;
+    let zenHeartbeat: NodeJS.Timeout | undefined;
+    const recoverZenSettings = async (): Promise<void> => {
+        if (zenOverridesApplied) {
+            return;
+        }
+        if (hasOtherLiveOwners(context.globalState, zenSessionId, Date.now())) {
+            // Another window is using the overrides, or a window that just crashed / reloaded has
+            // not gone stale yet (sessionId changes on reload). Re-check once it would be stale.
+            setTimeout(() => recoverZenSettings().catch(() => {}), ZEN_OWNER_STALE_MS + 1000);
+            return;
+        }
+        if (context.globalState.get<boolean>(ZEN_ENTERED_KEY)) {
+            // VS Code restores Zen mode across restarts; leave the one Thumbview entered before a crash.
+            try {
+                await vscode.commands.executeCommand("workbench.action.exitZenMode");
+            } catch { }
+            await context.globalState.update(ZEN_ENTERED_KEY, false);
+        }
+        await releaseZenOwnership(zenConfig, context.globalState, zenSessionId, Date.now());
+    };
+    recoverZenSettings().catch(() => {});
+    const ensureZenOverrides = async () => {
+        if (!zenOverridesApplied) {
+            await applyZenOverrides(zenConfig, context.globalState);
+            zenOverridesApplied = true;
+        }
+        await claimZenOwnership(context.globalState, zenSessionId, Date.now());
+        if (!zenHeartbeat) {
+            zenHeartbeat = setInterval(() => {
+                claimZenOwnership(context.globalState, zenSessionId, Date.now()).catch(() => {});
+            }, ZEN_OWNER_HEARTBEAT_MS);
+        }
+    };
+    deactivateHook = async () => {
+        if (zenHeartbeat) {
+            clearInterval(zenHeartbeat);
+            zenHeartbeat = undefined;
+        }
+        // Release even if this session never opened Thumbview, so its own entry never lingers.
+        await releaseZenOwnership(zenConfig, context.globalState, zenSessionId, Date.now());
+    };
+
+    // Background pre-scan and git diff fetch so opening Thumbview is instant O(1).
+    // The promise is kept so a "ready" that arrives mid-scan awaits it instead of starting a second full scan.
+    let prescanPromise: Promise<void> | undefined = scanRepository(getIgnoreState(), persistIgnoreState).then(files => {
+        if (!cachedScannedFiles) {
+            cachedScannedFiles = files;
+            lastRawScan = files;
+        }
+    }).catch(() => {}).finally(() => {
+        prescanPromise = undefined;
+    });
     fetchWorkspaceGitDiff().catch(() => {});
     getAllWorkspaceRelativePaths().catch(() => {});
 
     const enterFullscreen = async (): Promise<void> => {
-        if (fullscreenActive) {
+        if (fullscreenActive || !isFullscreenOnOpen()) {
             return;
         }
         fullscreenActive = true;
+        // Settings are best effort: a failed write must never keep Thumbview out of fullscreen.
         try {
+            await ensureZenOverrides();
+            await context.globalState.update(ZEN_ENTERED_KEY, true);
+        } catch {
+        }
+        try {
+            // Blind toggle: extensions cannot read whether Zen is already on. thumbviewEnteredZenMode
+            // ensures Thumbview only ever exits a Zen mode it entered itself.
             await vscode.commands.executeCommand("workbench.action.toggleZenMode");
         } catch {
+        }
+    };
+
+    // One-time explanation of fullscreen, shown as a banner inside Thumbview: Zen mode's default
+    // zenMode.silentNotifications would hide a VS Code notification. Recorded as shown when it is
+    // sent, so closing Thumbview without answering never brings it back. Protocol: host -> webview
+    // "fullscreenNotice" { keybinding } and "fullscreenSetting" { enabled }; webview -> host
+    // "dismissFullscreenNotice" or "setFullscreenOnOpen" { enabled }.
+    const FULLSCREEN_NOTICE_KEY = "thumbview.fullscreenNoticeShown";
+    const maybeShowFullscreenNotice = (panel: vscode.WebviewPanel) => {
+        if (fullscreenActive && !context.globalState.get<boolean>(FULLSCREEN_NOTICE_KEY)) {
+            context.globalState.update(FULLSCREEN_NOTICE_KEY, true);
+            panel.webview.postMessage({ command: "fullscreenNotice", keybinding: getOpenKeybindingLabel() });
         }
     };
 
@@ -745,6 +992,7 @@ export async function activate(context: vscode.ExtensionContext) {
         fullscreenActive = false;
         try {
             await vscode.commands.executeCommand("workbench.action.exitZenMode");
+            await context.globalState.update(ZEN_ENTERED_KEY, false);
         } catch {
         }
     };
@@ -852,7 +1100,61 @@ export async function activate(context: vscode.ExtensionContext) {
         return { preferred, tabs };
     };
 
-    const closeActiveThumbview = async (): Promise<void> => {
+
+    const closeActiveThumbview = (): Promise<void> => withLayoutLock(closeActiveThumbviewLocked);
+
+    // Defense in depth for message_guard: for file URIs compare the resolved real path against each
+    // workspace folder, since getWorkspaceFolder compares unnormalized paths.
+    const isUriInsideWorkspace = (uriString: string): boolean => {
+        const uri = vscode.Uri.parse(uriString);
+        if (uri.scheme !== "file") {
+            return !!vscode.workspace.getWorkspaceFolder(uri);
+        }
+        const target = path.resolve(uri.fsPath);
+        return (vscode.workspace.workspaceFolders || []).some(folder => {
+            if (folder.uri.scheme !== "file") {
+                return false;
+            }
+            const root = path.resolve(folder.uri.fsPath);
+            return target === root || target.startsWith(root + path.sep);
+        });
+    };
+
+    // After jump/switchTab has shown the target editor over Thumbview: exit the Zen mode and group
+    // maximize Thumbview entered. The editor opened in Thumbview's own group, so unmaximizing
+    // restores the user's other groups around it.
+    const leaveFullscreenAfterSwitch = async (): Promise<void> => {
+        if (thumbviewEnteredZenMode) {
+            thumbviewEnteredZenMode = false;
+            await exitFullscreen();
+        }
+        if (groupMaximizedByUs) {
+            await unmaximizeIfSplits();
+        }
+    };
+
+    // Leaves fullscreen and shows the target in the same workbench update. Callers load the
+    // document first, so the Zen exit, the unmaximize, and the show are sent back to back: the
+    // file appears directly in the normal layout instead of first in Zen mode and then again when
+    // the layout is restored. All three settle before returning, so a failed show never releases
+    // the layout lock while the layout is still changing.
+    const switchLeavingFullscreen = async <T>(show: () => Thenable<T>): Promise<T> => {
+        const exiting = thumbviewEnteredZenMode ? (thumbviewEnteredZenMode = false, exitFullscreen()) : Promise.resolve();
+        const unmaximizing = groupMaximizedByUs ? unmaximizeIfSplits() : Promise.resolve();
+        let shown: Thenable<T>;
+        try {
+            shown = show();
+        } catch (err) {
+            shown = Promise.reject(err);
+        }
+        const [, , result] = await Promise.allSettled([exiting, unmaximizing, shown]);
+        if (result.status === "rejected") {
+            throw result.reason;
+        }
+        return result.value;
+    };
+
+    const closeActiveThumbviewLocked = async (): Promise<void> => {
         if (!activePanel) {
             return;
         }
@@ -874,16 +1176,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 activePanel.dispose();
                 activePanel = undefined;
             } finally {
-                setTimeout(() => {
-                    layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
-                }, 400);
+                releaseLayoutOp();
             }
             return;
         }
 
         layoutOpsInFlight++;
+        const closeTransitionId = beginTransition(activePanel);
         try {
-            activePanel.webview.postMessage({ command: "hideForTransition" });
 
             if (thumbviewEnteredZenMode) {
                 thumbviewEnteredZenMode = false;
@@ -954,45 +1254,58 @@ export async function activate(context: vscode.ExtensionContext) {
             // If Thumbview is still visible (e.g. user stayed on Thumbview or switch failed),
             // ensure opacity is restored so it is never stuck as a blank canvas.
             if (activePanel && activePanel.visible) {
-                activePanel.webview.postMessage({ command: "showAfterTransition" });
+                endTransition(activePanel, closeTransitionId);
             }
         } finally {
-            setTimeout(() => {
+            setTimeout(() => detachFromLocks(() => {
                 layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
                 if (layoutOpsInFlight === 0 && activePanel && activePanel.visible) {
-                    activePanel.webview.postMessage({ command: "showAfterTransition" });
+                    endTransition(activePanel, closeTransitionId);
                 }
-            }, 400);
+            }), 400);
         }
     };
 
-    const disposable = vscode.commands.registerCommand(
-        "thumbview.open",
-        async () => {
-            console.log("THUMBVIEW COMMAND EXECUTED");
+    const TOGGLE_INTENT_TRUST_MS = 1000;
+    let lastToggleIntent: "open" | "close" | null = null;
+    let lastToggleAt = 0;
+
+    // F4 presses that arrive while a toggle is running are coalesced (see createCoalescedToggle),
+    // so spamming the key can never queue a burst of Zen/maximize layout sequences.
+    const toggleThumbview = createCoalescedToggle(async () => {
 
             if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.uri.scheme !== "vscode-webview") {
                 lastActiveTextEditor = vscode.window.activeTextEditor;
             }
 
-            if (activePanel && activePanel.visible) {
+            // panel.visible updates asynchronously after reveal(), so a coalesced replay right after
+            // our own open could misread it as closed; trust our last intent for a moment.
+            const recentlyOpened = lastToggleIntent === "open" && Date.now() - lastToggleAt < TOGGLE_INTENT_TRUST_MS;
+            if (activePanel && (activePanel.visible || recentlyOpened)) {
+                lastToggleIntent = "close";
+                lastToggleAt = Date.now();
                 await closeActiveThumbview();
                 return;
             }
+            lastToggleIntent = "open";
+            lastToggleAt = Date.now();
 
-            // Sync currently open modified documents into memory cache
+            // Sync unsaved buffers into the memory cache (saved files are rescanned by the watcher)
             for (const doc of vscode.workspace.textDocuments) {
-                updateDocumentInCache(doc);
+                if (doc.isDirty) {
+                    updateDocumentInCache(doc);
+                }
             }
             fetchWorkspaceGitDiff().catch(() => {});
 
             if (activePanel) {
                 layoutOpsInFlight++;
+                const reopenTransitionId = beginTransition(activePanel, { fromHidden: true });
                 try {
                     thumbviewEnteredZenMode = true;
                     await enterFullscreen();
 
-                    if (vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
+                    if (isFullscreenOnOpen() && vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
                         groupMaximizedByUs = true;
                         try {
                             await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
@@ -1009,11 +1322,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
                     // Settle delay before revealing opacity: allow webview resize & render to paint at full size
                     await new Promise(r => setTimeout(r, 40));
-                    activePanel.webview.postMessage({ command: "showAfterTransition" });
+                    endTransition(activePanel, reopenTransitionId);
+                    flushHiddenRefresh(activePanel);
+                    maybeShowFullscreenNotice(activePanel);
                 } finally {
-                    setTimeout(() => {
-                        layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
-                    }, 400);
+                    releaseLayoutOp();
                 }
                 return;
             }
@@ -1023,7 +1336,7 @@ export async function activate(context: vscode.ExtensionContext) {
             thumbviewEnteredZenMode = true;
             await enterFullscreen();
 
-            if (vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
+            if (isFullscreenOnOpen() && vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
                 groupMaximizedByUs = true;
                 try {
                     await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
@@ -1056,7 +1369,10 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             panel.webview.onDidReceiveMessage(async msg => {
-                console.log("THUMBVIEW WEBVIEW MESSAGE:", msg);
+                if (!isSafeWebviewMessage(msg, isUriInsideWorkspace)) {
+                    console.warn("THUMBVIEW: rejected webview message targeting a path outside the workspace", msg && msg.command);
+                    return;
+                }
 
                 if (msg.command === "exitThumbview") {
                     await closeActiveThumbview();
@@ -1069,12 +1385,85 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (msg.command === "ready") {
+                    postedContentVersions.clear();
+                    if (!cachedScannedFiles && prescanPromise) {
+                        await prescanPromise;
+                    }
                     if (cachedScannedFiles && cachedScannedFiles.length > 0) {
                         updateLayoutFromCache(panel);
                     } else {
                         refreshThumbview(panel);
                     }
-                    panel.webview.postMessage({ command: "showAfterTransition" });
+                    endTransition(panel);
+                    maybeShowFullscreenNotice(panel);
+                }
+
+                if (msg.command === "dismissFullscreenNotice") {
+                    await context.globalState.update(FULLSCREEN_NOTICE_KEY, true);
+                    return;
+                }
+
+                // From the fullscreen banner or the settings toggle. The configuration listener
+                // applies it (leaving fullscreen when turned off), exactly as for a settings.json
+                // edit, so a failed write never leaves the window out of step with the setting.
+                if (msg.command === "setFullscreenOnOpen") {
+                    await context.globalState.update(FULLSCREEN_NOTICE_KEY, true);
+                    try {
+                        await vscode.workspace.getConfiguration("thumbview").update("fullscreenOnOpen", !!msg.enabled, vscode.ConfigurationTarget.Global);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to change fullscreen setting: ${err?.message ?? String(err)}`);
+                        panel.webview.postMessage({ command: "fullscreenSetting", enabled: isFullscreenOnOpen() });
+                    }
+                    return;
+                }
+
+                // The webview lacks lines for these ids (e.g. a delta payload arrived after one it
+                // skipped). Fields: { ids: string[] } — see applyDataMessage in overview.js.
+                if (msg.command === "requestFileLines" && Array.isArray(msg.ids)) {
+                    for (const id of msg.ids) {
+                        postedContentVersions.delete(String(id));
+                    }
+                    await updateLayoutFromCache(panel);
+                    return;
+                }
+
+                // The webview reconciles folder-file and card orders (it owns those layouts) and
+                // persists them here. Fields: { scope: "folderFiles" | "folderCards" | "rootCards",
+                // folder, ids, footprints?, wrapRows?, flowCells? } — see requestLayoutOrderSave in overview.js.
+                if (msg.command === "saveLayoutOrder" && Array.isArray(msg.ids)) {
+                    const ids: string[] = msg.ids.map((id: unknown) => (typeof id === "string" ? id : ""));
+                    await withOrderLock(async () => {
+                        if (msg.scope === "rootCards") {
+                            await context.workspaceState.update("thumbview.cardOrder", ids);
+                            return;
+                        }
+                        if (typeof msg.folder !== "string" || !msg.folder) {
+                            return;
+                        }
+                        const key = msg.scope === "folderCards" ? "thumbview.folderCardOrders" : "thumbview.folderOrders";
+                        const orders = context.workspaceState.get<{ [folder: string]: string[] }>(key) || {};
+                        orders[msg.folder] = ids;
+                        await context.workspaceState.update(key, orders);
+                    });
+                    if (typeof msg.wrapRows === "number" && msg.wrapRows > 0) {
+                        await withOrderLock(async () => {
+                            if (msg.scope === "rootCards") {
+                                await context.workspaceState.update("thumbview.cardWrapRows", msg.wrapRows);
+                            } else if (typeof msg.folder === "string" && msg.folder) {
+                                const wrapKey = msg.scope === "folderCards" ? "thumbview.folderCardWrapRows" : "thumbview.folderWrapRows";
+                                const wraps = context.workspaceState.get<{ [folder: string]: number }>(wrapKey) || {};
+                                wraps[msg.folder] = msg.wrapRows;
+                                await context.workspaceState.update(wrapKey, wraps);
+                            }
+                        });
+                    }
+                    if (msg.footprints && typeof msg.footprints === "object") {
+                        await withOrderLock(() => mergeSlotFootprints(layoutScopeKey(msg.scope, msg.folder), msg.footprints));
+                    }
+                    if (msg.flowCells && typeof msg.flowCells === "object") {
+                        await withOrderLock(() => mergeSlotFlowCells(layoutScopeKey(msg.scope, msg.folder), msg.flowCells));
+                    }
+                    return;
                 }
 
                 if (msg.command === "focusWindow") {
@@ -1084,155 +1473,154 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (msg.command === "switchTab") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        layoutOpsInFlight++;
+                    await withLayoutLock(async () => {
                         try {
-                            activePanel?.webview.postMessage({ command: "hideForTransition" });
-                            if (thumbviewEnteredZenMode) {
-                                thumbviewEnteredZenMode = false;
-                                await exitFullscreen();
-                                await new Promise(r => setTimeout(r, 70));
-                            }
-                            if (groupMaximizedByUs) {
-                                await unmaximizeIfSplits();
-                                await new Promise(r => setTimeout(r, 30));
-                            }
-
-                            if (msg.uri.toLowerCase().endsWith(".pdf")) {
-                                await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
-                            } else {
-                                try {
-                                    const doc = await vscode.workspace.openTextDocument(uri);
-                                    await vscode.window.showTextDocument(doc, { preview: false });
-                                } catch {
-                                    await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+                            const uri = vscode.Uri.parse(msg.uri);
+                            layoutOpsInFlight++;
+                            try {
+                                // Load the target, then show it while leaving fullscreen in one
+                                // update: no hidden-page flash and no fixed settle sleeps.
+                                beginTransition(activePanel, { hide: false });
+                                let doc: vscode.TextDocument | undefined;
+                                if (!msg.uri.toLowerCase().endsWith(".pdf")) {
+                                    try {
+                                        doc = await vscode.workspace.openTextDocument(uri);
+                                    } catch {
+                                        doc = undefined;
+                                    }
                                 }
+                                const textDoc = doc;
+                                await switchLeavingFullscreen(() => textDoc
+                                    ? vscode.window.showTextDocument(textDoc, { preview: false })
+                                    : vscode.commands.executeCommand("vscode.open", uri, { preview: false }));
+                            } finally {
+                                releaseLayoutOp();
                             }
-                        } finally {
-                            setTimeout(() => {
-                                layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
-                            }, 400);
+                        } catch (err: any) {
+                            console.error("THUMBVIEW SWITCH TAB ERROR:", err);
+                            vscode.window.showErrorMessage(`Thumbview could not open ${vscode.Uri.parse(msg.uri).path.split("/").pop()}: ${err?.message ?? String(err)}`);
                         }
-                    } catch (err: any) {
-                        console.error("THUMBVIEW SWITCH TAB ERROR:", err);
-                    }
+                    });
                 }
 
                 if (msg.command === "jump") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        layoutOpsInFlight++;
+                    await withLayoutLock(async () => {
                         try {
-                            activePanel?.webview.postMessage({ command: "hideForTransition" });
-                            if (thumbviewEnteredZenMode) {
-                                thumbviewEnteredZenMode = false;
-                                await exitFullscreen();
-                                await new Promise(r => setTimeout(r, 70));
-                            }
-                            if (groupMaximizedByUs) {
-                                await unmaximizeIfSplits();
-                                await new Promise(r => setTimeout(r, 30));
-                            }
-
-                            let doc: vscode.TextDocument;
+                            const uri = vscode.Uri.parse(msg.uri);
+                            layoutOpsInFlight++;
                             try {
-                                doc = await vscode.workspace.openTextDocument(uri);
-                            } catch {
-                                // Binary/media file fallback
-                                await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
-                                return;
-                            }
+                                // Load the target, then show it while leaving fullscreen in one
+                                // update: no hidden-page flash and no fixed settle sleeps.
+                                beginTransition(activePanel, { hide: false });
 
-                        const safeLine = Math.max(
-                            0,
-                            Math.min(Number(msg.line) || 0, doc.lineCount - 1)
-                        );
-                        const pos = new vscode.Position(safeLine, 0);
-
-                        const editor = await vscode.window.showTextDocument(doc, {
-                            preview: false,
-                            selection: new vscode.Range(pos, pos)
-                        });
-
-                        editor.revealRange(
-                            new vscode.Range(pos, pos),
-                            vscode.TextEditorRevealType.InCenter
-                        );
-                        // Flash all matching lines pink in the document and fade away.
-                        // The regex/whole-word pattern-building here is duplicated in
-                        // media/overview.js's rebuildSearchState — keep both in sync.
-                        const query = (msg.query || "").trim();
-                        if (query && !msg.searchInvalid) {
-                            let isMatch: (lineText: string) => boolean;
-                            if (msg.useRegex || msg.matchWholeWord) {
-                                let pattern = msg.useRegex ? query : query.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
-                                if (msg.matchWholeWord) pattern = `\\b(?:${pattern})\\b`;
+                                let doc: vscode.TextDocument;
                                 try {
-                                    const re = new RegExp(pattern, msg.matchCase ? "" : "i");
-                                    isMatch = (lineText: string) => re.test(lineText);
+                                    doc = await vscode.workspace.openTextDocument(uri);
                                 } catch {
-                                    isMatch = () => false;
+                                    // Binary/media file fallback
+                                    await switchLeavingFullscreen(() => vscode.commands.executeCommand("vscode.open", uri, { preview: false }));
+                                    return;
                                 }
-                            } else if (msg.matchCase) {
-                                isMatch = (lineText: string) => lineText.includes(query);
-                            } else {
-                                const lowerQuery = query.toLowerCase();
-                                isMatch = (lineText: string) => lineText.toLowerCase().includes(lowerQuery);
-                            }
 
-                            const matchingRanges: vscode.Range[] = [];
-                            for (let i = 0; i < doc.lineCount; i++) {
-                                if (isMatch(doc.lineAt(i).text)) {
-                                    matchingRanges.push(new vscode.Range(new vscode.Position(i, 0), new vscode.Position(i, 0)));
-                                }
-                            }
-                            if (matchingRanges.length > 0) {
-                                // Chained setTimeouts step through searchFlashSteps to fake
-                                // a fade-out, since decoration opacity can't be animated.
-                                setTimeout(() => {
-                                    if (editor && !editor.document.isClosed) {
-                                        // Step 1: 0.35 opacity (lasts 1500ms)
-                                        editor.setDecorations(searchFlashSteps[0], matchingRanges);
+                            const safeLine = Math.max(
+                                0,
+                                Math.min(Number(msg.line) || 0, doc.lineCount - 1)
+                            );
+                            const pos = new vscode.Position(safeLine, 0);
 
-                                        // Step 2: 0.22 opacity (starts at 1500ms, lasts 150ms)
-                                        setTimeout(() => {
-                                            if (editor && !editor.document.isClosed) {
-                                                editor.setDecorations(searchFlashSteps[0], []);
-                                                editor.setDecorations(searchFlashSteps[1], matchingRanges);
-                                            }
-                                        }, 1500);
+                            const editor = await switchLeavingFullscreen(() => vscode.window.showTextDocument(doc, {
+                                preview: false,
+                                selection: new vscode.Range(pos, pos)
+                            }));
 
-                                        // Step 3: 0.12 opacity (starts at 1650ms, lasts 150ms)
-                                        setTimeout(() => {
-                                            if (editor && !editor.document.isClosed) {
-                                                editor.setDecorations(searchFlashSteps[1], []);
-                                                editor.setDecorations(searchFlashSteps[2], matchingRanges);
-                                            }
-                                        }, 1650);
-
-                                        // Step 4: 0.05 opacity (starts at 1800ms, lasts 200ms)
-                                        // Clear all (at 2000ms)
-                                        setTimeout(() => {
-                                            if (editor && !editor.document.isClosed) {
-                                                editor.setDecorations(searchFlashSteps[3], []);
-                                            }
-                                        }, 2000);
+                            editor.revealRange(
+                                new vscode.Range(pos, pos),
+                                vscode.TextEditorRevealType.InCenter
+                            );
+                            // Flash all matching lines pink in the document and fade away.
+                            // The regex/whole-word pattern-building here is duplicated in
+                            // media/overview.js's rebuildSearchState — keep both in sync.
+                            const query = (msg.query || "").trim();
+                            if (query && !msg.searchInvalid) {
+                                let isMatch: (lineText: string) => boolean;
+                                if (msg.useRegex || msg.matchWholeWord) {
+                                    let pattern = msg.useRegex ? query : query.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+                                    if (msg.matchWholeWord) pattern = `\\b(?:${pattern})\\b`;
+                                    try {
+                                        const re = new RegExp(pattern, msg.matchCase ? "" : "i");
+                                        isMatch = (lineText: string) => re.test(lineText);
+                                    } catch {
+                                        isMatch = () => false;
                                     }
-                                }, 150);
+                                } else if (msg.matchCase) {
+                                    isMatch = (lineText: string) => lineText.includes(query);
+                                } else {
+                                    const lowerQuery = query.toLowerCase();
+                                    isMatch = (lineText: string) => lineText.toLowerCase().includes(lowerQuery);
+                                }
+
+                                const matchingRanges: vscode.Range[] = [];
+                                for (let i = 0; i < doc.lineCount; i++) {
+                                    if (isMatch(doc.lineAt(i).text)) {
+                                        matchingRanges.push(new vscode.Range(new vscode.Position(i, 0), new vscode.Position(i, 0)));
+                                    }
+                                }
+                                // "auto" (the default) follows the OS preference, which only the webview can read.
+                                const reduceMotionSetting = vscode.workspace.getConfiguration("workbench").get<string>("reduceMotion");
+                                const reduceMotion = reduceMotionSetting === "on" || (reduceMotionSetting !== "off" && msg.reduceMotion === true);
+                                if (matchingRanges.length > 0 && reduceMotion) {
+                                    // Reduced motion: one steady highlight, no fade steps.
+                                    editor.setDecorations(searchFlashSteps[0], matchingRanges);
+                                    setTimeout(() => {
+                                        if (!editor.document.isClosed) {
+                                            editor.setDecorations(searchFlashSteps[0], []);
+                                        }
+                                    }, 2000);
+                                } else if (matchingRanges.length > 0) {
+                                    // Chained setTimeouts step through searchFlashSteps to fake
+                                    // a fade-out, since decoration opacity can't be animated.
+                                    setTimeout(() => {
+                                        if (editor && !editor.document.isClosed) {
+                                            // Step 1: 0.35 opacity (lasts 1500ms)
+                                            editor.setDecorations(searchFlashSteps[0], matchingRanges);
+
+                                            // Step 2: 0.22 opacity (starts at 1500ms, lasts 150ms)
+                                            setTimeout(() => {
+                                                if (editor && !editor.document.isClosed) {
+                                                    editor.setDecorations(searchFlashSteps[0], []);
+                                                    editor.setDecorations(searchFlashSteps[1], matchingRanges);
+                                                }
+                                            }, 1500);
+
+                                            // Step 3: 0.12 opacity (starts at 1650ms, lasts 150ms)
+                                            setTimeout(() => {
+                                                if (editor && !editor.document.isClosed) {
+                                                    editor.setDecorations(searchFlashSteps[1], []);
+                                                    editor.setDecorations(searchFlashSteps[2], matchingRanges);
+                                                }
+                                            }, 1650);
+
+                                            // Step 4: 0.05 opacity (starts at 1800ms, lasts 200ms)
+                                            // Clear all (at 2000ms)
+                                            setTimeout(() => {
+                                                if (editor && !editor.document.isClosed) {
+                                                    editor.setDecorations(searchFlashSteps[3], []);
+                                                }
+                                            }, 2000);
+                                        }
+                                    }, 150);
+                                }
                             }
+                        } finally {
+                            releaseLayoutOp();
                         }
-                    } finally {
-                        setTimeout(() => {
-                            layoutOpsInFlight = Math.max(0, layoutOpsInFlight - 1);
-                        }, 400);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(
+                            `Thumbview jump failed: ${err?.message ?? String(err)}`
+                        );
                     }
-                } catch (err: any) {
-                    vscode.window.showErrorMessage(
-                        `Thumbview jump failed: ${err?.message ?? String(err)}`
-                    );
+                    });
                 }
-            }
 
                 if (msg.command === "getHoverLines") {
                     try {
@@ -1347,19 +1735,9 @@ export async function activate(context: vscode.ExtensionContext) {
                     try {
                         const uri = vscode.Uri.parse(msg.uri);
                         const fileName = vscode.workspace.asRelativePath(uri);
-                        const confirm = await vscode.window.showWarningMessage(
-                            `Are you sure you want to delete '${fileName}'?`,
-                            { modal: true },
-                            "Move to Trash",
-                            "Delete Permanently"
-                        );
-                        if (confirm === "Move to Trash") {
-                            await vscode.workspace.fs.delete(uri, { useTrash: true });
-                            if (activePanel) {
-                                refreshThumbview(activePanel);
-                            }
-                        } else if (confirm === "Delete Permanently") {
-                            await vscode.workspace.fs.delete(uri, { useTrash: false });
+                        const mode = await askDeleteMode(`'${fileName}'`);
+                        if (mode) {
+                            await vscode.workspace.fs.delete(uri, { useTrash: mode === "trash" });
                             if (activePanel) {
                                 refreshThumbview(activePanel);
                             }
@@ -1573,19 +1951,9 @@ export async function activate(context: vscode.ExtensionContext) {
                         if (wsFolder) {
                             const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
                             const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
-                            const confirm = await vscode.window.showWarningMessage(
-                                `Are you sure you want to delete folder '${folderRel}' and all its contents?`,
-                                { modal: true },
-                                "Move to Trash",
-                                "Delete Permanently"
-                            );
-                            if (confirm === "Move to Trash") {
-                                await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: true });
-                                if (activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            } else if (confirm === "Delete Permanently") {
-                                await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: false });
+                            const mode = await askDeleteMode(`folder '${folderRel}' and all its contents`);
+                            if (mode) {
+                                await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: mode === "trash" });
                                 if (activePanel) {
                                     refreshThumbview(activePanel);
                                 }
@@ -1855,167 +2223,178 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (msg.command === "reorderFile") {
-                    const mode = getDragReorderMode();
-                    const layoutMode = getLayoutMode();
+                    await withOrderLock(async () => {
+                        const mode = getDragReorderMode();
+                        const layoutMode = getLayoutMode();
 
-                    try {
-                        let forceBreakBeforeId: string | undefined;
+                        try {
+                            let forceBreakBeforeId: string | undefined;
 
-                        if (msg.focusedFolder) {
-                            const { ignorePatterns } = getIgnoreState();
-                            const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
-                            const scopedFiles = activeFiles.filter(f => f.path && (msg.focusedFolder === "(root files)/" ? !f.path.includes("/") : f.path.startsWith(msg.focusedFolder)));
-                            const fullOrder = fileOrder.getOrder();
-                            const folderOrders = context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {};
-                            let currentFolderOrder = folderOrders[msg.focusedFolder] ? [...folderOrders[msg.focusedFolder]] : [];
+                            if (msg.focusedFolder) {
+                                const { ignorePatterns } = getIgnoreState();
+                                const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
+                                const scopedFiles = activeFiles.filter(f => f.path && (msg.focusedFolder === "(root files)/" ? !f.path.includes("/") : f.path.startsWith(msg.focusedFolder)));
+                                const fullOrder = fileOrder.getOrder();
+                                const folderOrders = context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderOrders") || {};
+                                let currentFolderOrder = folderOrders[msg.focusedFolder] ? [...folderOrders[msg.focusedFolder]] : [];
 
-                            const scopedIds = scopedFiles.map(f => f.id);
-                            if (currentFolderOrder.length === 0) {
-                                currentFolderOrder = [...scopedIds];
-                            } else {
-                                const presentIds = new Set(currentFolderOrder.filter(Boolean));
-                                for (const sid of scopedIds) {
-                                    if (!presentIds.has(sid)) {
-                                        const holeIdx = currentFolderOrder.indexOf("");
-                                        if (holeIdx !== -1) {
-                                            currentFolderOrder[holeIdx] = sid;
-                                        } else {
-                                            currentFolderOrder.push(sid);
+                                const scopedIds = scopedFiles.map(f => f.id);
+                                if (currentFolderOrder.length === 0) {
+                                    currentFolderOrder = [...scopedIds];
+                                } else {
+                                    const presentIds = new Set(currentFolderOrder.filter(Boolean));
+                                    for (const sid of scopedIds) {
+                                        if (!presentIds.has(sid)) {
+                                            const holeIdx = currentFolderOrder.indexOf("");
+                                            if (holeIdx !== -1) {
+                                                currentFolderOrder[holeIdx] = sid;
+                                            } else {
+                                                currentFolderOrder.push(sid);
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            if (layoutMode === "spanning_grid") {
-                                const folderWrapRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {};
-                                if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
-                                    currentFolderOrder = msg.currentOrder;
-                                    if (typeof msg.wrapRows === "number") {
-                                        folderWrapRowsMap[msg.focusedFolder] = msg.wrapRows;
+                                if (layoutMode === "spanning_grid") {
+                                    const folderWrapRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {};
+                                    if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
+                                        currentFolderOrder = msg.currentOrder;
+                                        if (typeof msg.wrapRows === "number") {
+                                            folderWrapRowsMap[msg.focusedFolder] = msg.wrapRows;
+                                            await context.workspaceState.update("thumbview.folderWrapRows", folderWrapRowsMap);
+                                        }
+                                    } else {
+                                        const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
+                                        const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
+                                        const extraCols = folderColsMap[msg.focusedFolder] || 0;
+                                        const extraRows = folderRowsMap[msg.focusedFolder] || 0;
+                                        const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))));
+                                        const wrapRows = folderWrapRowsMap[msg.focusedFolder] || msg.targetWrapRows || (baseWrapRows + extraRows);
+                                        const maxAllowedCols = Math.max(2, msg.targetGridCols || (Math.max(2, Math.ceil(Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))) * (16 / 9))) + extraCols));
+                                        const maxAllowedRows = Math.max(1, wrapRows, msg.targetGridRows || (baseWrapRows + extraRows));
+
+                                        // Folder scope uses its own frozen flow cells (column membership),
+                                        // never the root's or the current line count; see slotFlowCells.
+                                        const naturalCells = context.workspaceState.get<{ [id: string]: number }>("thumbview.naturalCells") || {};
+                                        const folderFlow = getAllSlotFlowCells()[`folder:${msg.focusedFolder}`] || {};
+                                        const currentAllocations: { [id: string]: number } = { ...naturalCells, ...folderFlow };
+                                        for (const f of scopedFiles) {
+                                            if (folderFlow[f.id] === undefined) {
+                                                currentAllocations[f.id] = cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, getCompressionPct());
+                                            }
+                                        }
+
+                                        const res = reorderSpanningItems(
+                                            scopedIds,
+                                            currentFolderOrder,
+                                            currentAllocations,
+                                            msg.sourceId,
+                                            msg.targetCol,
+                                            msg.targetRow,
+                                            maxAllowedCols,
+                                            maxAllowedRows,
+                                            wrapRows
+                                        );
+                                        currentFolderOrder = res.newOrder;
+                                        folderWrapRowsMap[msg.focusedFolder] = res.rows;
                                         await context.workspaceState.update("thumbview.folderWrapRows", folderWrapRowsMap);
                                     }
                                 } else {
-                                    const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                                    const folderColsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraCols") || {};
-                                    const folderRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderExtraRows") || {};
-                                    const extraCols = folderColsMap[msg.focusedFolder] || 0;
-                                    const extraRows = folderRowsMap[msg.focusedFolder] || 0;
-                                    const baseWrapRows = Math.max(1, Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))));
-                                    const wrapRows = folderWrapRowsMap[msg.focusedFolder] || msg.targetWrapRows || (baseWrapRows + extraRows);
-                                    const maxAllowedCols = Math.max(2, msg.targetGridCols || (Math.max(2, Math.ceil(Math.round(Math.sqrt(Math.max(scopedFiles.length, 1) / (16 / 9))) * (16 / 9))) + extraCols));
-                                    const maxAllowedRows = Math.max(1, wrapRows, msg.targetGridRows || (baseWrapRows + extraRows));
+                                    const gridCols = Math.max(1, msg.targetGridCols || 1);
+                                    const gridRows = Math.max(1, msg.targetGridRows || Math.ceil(currentFolderOrder.length / gridCols));
+                                    const maxCapacity = gridCols * gridRows;
+                                    const targetSlotIdx = (typeof msg.targetSlotIdx === "number" && msg.targetSlotIdx >= 0)
+                                        ? msg.targetSlotIdx
+                                        : (typeof msg.targetRow === "number" && typeof msg.targetCol === "number"
+                                            ? msg.targetRow * gridCols + msg.targetCol
+                                            : findSlotIndex(msg.targetCol, msg.targetRow, currentFolderOrder.length));
 
-                                    const currentAllocations: { [id: string]: number } = { ...savedAllocations };
-                                    for (const f of scopedFiles) {
-                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, getCompressionPct());
-                                    }
-
-                                    const res = reorderSpanningItems(
-                                        scopedIds,
+                                    currentFolderOrder = reorderFolderItems(
                                         currentFolderOrder,
-                                        currentAllocations,
                                         msg.sourceId,
-                                        msg.targetCol,
-                                        msg.targetRow,
-                                        maxAllowedCols,
-                                        maxAllowedRows,
-                                        wrapRows
+                                        !!msg.targetIsEmpty,
+                                        msg.targetId || null,
+                                        targetSlotIdx,
+                                        maxCapacity,
+                                        mode
                                     );
-                                    currentFolderOrder = res.newOrder;
-                                    folderWrapRowsMap[msg.focusedFolder] = res.rows;
-                                    await context.workspaceState.update("thumbview.folderWrapRows", folderWrapRowsMap);
                                 }
-                            } else {
-                                const gridCols = Math.max(1, msg.targetGridCols || 1);
-                                const gridRows = Math.max(1, msg.targetGridRows || Math.ceil(currentFolderOrder.length / gridCols));
-                                const maxCapacity = gridCols * gridRows;
-                                const targetSlotIdx = (typeof msg.targetSlotIdx === "number" && msg.targetSlotIdx >= 0)
-                                    ? msg.targetSlotIdx
-                                    : (typeof msg.targetRow === "number" && typeof msg.targetCol === "number"
-                                        ? msg.targetRow * gridCols + msg.targetCol
-                                        : findSlotIndex(msg.targetCol, msg.targetRow, currentFolderOrder.length));
 
-                                currentFolderOrder = reorderFolderItems(
-                                    currentFolderOrder,
-                                    msg.sourceId,
-                                    !!msg.targetIsEmpty,
-                                    msg.targetId || null,
-                                    targetSlotIdx,
-                                    maxCapacity,
-                                    mode
-                                );
-                            }
-
-                            folderOrders[msg.focusedFolder] = currentFolderOrder;
-                            await context.workspaceState.update("thumbview.folderOrders", folderOrders);
-                        } else if (layoutMode === "spanning_grid") {
-                            if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
-                                fileOrder.setOrder(msg.currentOrder);
-                                if (typeof msg.wrapRows === "number") {
-                                    await context.workspaceState.update("thumbview.spanningRows", msg.wrapRows);
-                                }
-                            } else {
-                                const { ignorePatterns } = getIgnoreState();
-                                const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
-                                const activeFileIds = activeFiles.map(f => f.id);
-                                const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
-                                const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
-                                const currentLayout = buildSpanningGrid(activeFiles, fileOrder.getOrder(), savedAllocations, savedRows);
-                                const sourceCells = savedAllocations[msg.sourceId] || 1;
-                                const targetCells = msg.targetId ? (savedAllocations[msg.targetId] || 1) : 1;
-
-                                if (!msg.targetIsEmpty && mode === "shift" && sourceCells === targetCells) {
-                                    fileOrder.move(msg.sourceId, msg.targetId);
+                                folderOrders[msg.focusedFolder] = currentFolderOrder;
+                                await context.workspaceState.update("thumbview.folderOrders", folderOrders);
+                            } else if (layoutMode === "spanning_grid") {
+                                if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
+                                    fileOrder.setOrder(msg.currentOrder);
+                                    if (typeof msg.wrapRows === "number") {
+                                        await context.workspaceState.update("thumbview.spanningRows", msg.wrapRows);
+                                    }
                                 } else {
+                                    const { ignorePatterns } = getIgnoreState();
+                                    const activeFiles = (cachedScannedFiles || []).filter(file => !shouldIgnore(file.path, ignorePatterns));
+                                    const activeFileIds = activeFiles.map(f => f.id);
+                                    const savedAllocations = context.workspaceState.get<{ [id: string]: number }>("thumbview.spanningAllocations") || {};
+                                    const savedRows = context.workspaceState.get<number | null>("thumbview.spanningRows") || null;
+                                    const currentLayout = buildSpanningGrid(activeFiles, fileOrder.getOrder(), savedAllocations, savedRows);
+                                    const sourceCells = savedAllocations[msg.sourceId] || 1;
+                                    const targetCells = msg.targetId ? (savedAllocations[msg.targetId] || 1) : 1;
+
+                                    if (!msg.targetIsEmpty && mode === "shift" && sourceCells === targetCells) {
+                                        fileOrder.move(msg.sourceId, msg.targetId);
+                                    } else {
+                                        const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
+                                        const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
+                                        const maxAllowedRows = msg.targetGridRows || (Math.max(currentLayout.rows, currentLayout.wrapRows, savedRows || 0) + extraRows);
+                                        const maxAllowedCols = msg.targetGridCols || (Math.max(currentLayout.cols, 2) + extraCols);
+                                        const wrapRows = savedRows || currentLayout.wrapRows;
+
+                                        // Frozen flow cells decide columns; only files never laid out fall back
+                                        // to their current line count.
+                                        const currentAllocations: { [id: string]: number } = { ...savedAllocations };
+                                        for (const f of activeFiles) {
+                                            if (currentAllocations[f.id] === undefined) {
+                                                currentAllocations[f.id] = cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, getCompressionPct());
+                                            }
+                                        }
+
+                                        const res = reorderSpanningItems(
+                                            activeFileIds,
+                                            fileOrder.getOrder(),
+                                            currentAllocations,
+                                            msg.sourceId,
+                                            msg.targetCol,
+                                            msg.targetRow,
+                                            maxAllowedCols,
+                                            maxAllowedRows,
+                                            wrapRows
+                                        );
+
+                                        fileOrder.setOrder(res.newOrder);
+                                        await context.workspaceState.update("thumbview.spanningRows", res.rows);
+                                    }
+                                }
+                            } else {
+                                if (msg.targetIsEmpty) {
                                     const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
                                     const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                                    const maxAllowedRows = msg.targetGridRows || (Math.max(currentLayout.rows, currentLayout.wrapRows, savedRows || 0) + extraRows);
-                                    const maxAllowedCols = msg.targetGridCols || (Math.max(currentLayout.cols, 2) + extraCols);
-                                    const wrapRows = savedRows || currentLayout.wrapRows;
+                                    const layout = buildStableGrid(fileOrder.getOrder().length);
+                                    const maxCols = layout.cols + extraCols;
+                                    const maxRows = layout.rows + extraRows;
+                                    const maxCapacity = maxCols * maxRows;
 
-                                    const currentAllocations: { [id: string]: number } = { ...savedAllocations };
-                                    for (const f of activeFiles) {
-                                        currentAllocations[f.id] = (f as any).nCells || cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, getCompressionPct());
-                                    }
-
-                                    const res = reorderSpanningItems(
-                                        activeFileIds,
-                                        fileOrder.getOrder(),
-                                        currentAllocations,
-                                        msg.sourceId,
-                                        msg.targetCol,
-                                        msg.targetRow,
-                                        maxAllowedCols,
-                                        maxAllowedRows,
-                                        wrapRows
-                                    );
-
-                                    fileOrder.setOrder(res.newOrder);
-                                    await context.workspaceState.update("thumbview.spanningRows", res.rows);
+                                    const clamped = clampTargetToGridCapacity(msg.targetCol, msg.targetRow, 1, maxCols, maxRows);
+                                    const rawTargetIndex = findSlotIndex(clamped.col, clamped.row, fileOrder.getOrder().length);
+                                    const targetIndex = Math.min(rawTargetIndex, maxCapacity - 1);
+                                    fileOrder.moveToEmptySlot(msg.sourceId, targetIndex);
+                                } else if (mode === "shift") {
+                                    fileOrder.move(msg.sourceId, msg.targetId);
+                                } else {
+                                    fileOrder.swap(msg.sourceId, msg.targetId);
                                 }
                             }
-                        } else {
-                            if (msg.targetIsEmpty) {
-                                const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
-                                const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
-                                const layout = buildStableGrid(fileOrder.getOrder().length);
-                                const maxCols = layout.cols + extraCols;
-                                const maxRows = layout.rows + extraRows;
-                                const maxCapacity = maxCols * maxRows;
-
-                                const clamped = clampTargetToGridCapacity(msg.targetCol, msg.targetRow, 1, maxCols, maxRows);
-                                const rawTargetIndex = findSlotIndex(clamped.col, clamped.row, fileOrder.getOrder().length);
-                                const targetIndex = Math.min(rawTargetIndex, maxCapacity - 1);
-                                fileOrder.moveToEmptySlot(msg.sourceId, targetIndex);
-                            } else if (mode === "shift") {
-                                fileOrder.move(msg.sourceId, msg.targetId);
-                            } else {
-                                fileOrder.swap(msg.sourceId, msg.targetId);
-                            }
+                        } catch (err: any) {
+                            vscode.window.showErrorMessage(`Failed to reorder file: ${err?.message ?? String(err)}`);
                         }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to reorder file: ${err?.message ?? String(err)}`);
-                    }
+                    });
                 }
 
                 if (msg.command === "moveFolderToFolder") {
@@ -2046,138 +2425,136 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (msg.command === "reorderFolder") {
-                    try {
-                        const srcFolderRel = (msg.sourceFolder || "").replace(/^\/+|\/+$/g, "") + "/";
-                        const currentOrder = fileOrder.getOrder();
-                        const srcFiles = currentOrder.filter(id => {
-                            const f = (cachedScannedFiles || []).find(cf => cf.id === id);
-                            return f && f.path.startsWith(srcFolderRel);
-                        });
+                    await withOrderLock(async () => {
+                        try {
+                            const srcFolderRel = (msg.sourceFolder || "").replace(/^\/+|\/+$/g, "") + "/";
+                            const currentOrder = fileOrder.getOrder();
+                            const pathById = new Map((cachedScannedFiles || []).map(cf => [cf.id, cf.path]));
+                            const srcFiles = currentOrder.filter(id => (pathById.get(id) || "").startsWith(srcFolderRel) && pathById.has(id));
 
-                        if (srcFiles.length > 0) {
-                            const remainingOrder = currentOrder.filter(id => !srcFiles.includes(id));
-                            let insertIdx = remainingOrder.length;
+                            if (srcFiles.length > 0) {
+                                const srcSet = new Set(srcFiles);
+                                const remainingOrder = currentOrder.filter(id => !srcSet.has(id));
+                                let insertIdx = remainingOrder.length;
 
-                            if (msg.targetFolder) {
-                                const tgtFolderRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "") + "/";
-                                const tgtFirstIdx = remainingOrder.findIndex(id => {
-                                    const f = (cachedScannedFiles || []).find(cf => cf.id === id);
-                                    return f && f.path.startsWith(tgtFolderRel);
-                                });
-                                if (tgtFirstIdx !== -1) {
-                                    insertIdx = tgtFirstIdx;
+                                if (msg.targetFolder) {
+                                    const tgtFolderRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "") + "/";
+                                    const tgtFirstIdx = remainingOrder.findIndex(id => pathById.has(id) && (pathById.get(id) || "").startsWith(tgtFolderRel));
+                                    if (tgtFirstIdx !== -1) {
+                                        insertIdx = tgtFirstIdx;
+                                    }
+                                }
+                                remainingOrder.splice(insertIdx, 0, ...srcFiles);
+                                fileOrder.setOrder(remainingOrder);
+                                if (activePanel) {
+                                    updateLayoutFromCache(activePanel);
                                 }
                             }
-                            remainingOrder.splice(insertIdx, 0, ...srcFiles);
-                            fileOrder.setOrder(remainingOrder);
-                            if (activePanel) {
-                                updateLayoutFromCache(activePanel);
-                            }
+                        } catch (err: any) {
+                            vscode.window.showErrorMessage(`Failed to reorder folder: ${err?.message ?? String(err)}`);
                         }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to reorder folder: ${err?.message ?? String(err)}`);
-                    }
+                    });
                 }
 
                 if (msg.command === "swapCardItems") {
-                    try {
-                        const fullOrder = fileOrder.getOrder();
-                        const activeFiles = (cachedScannedFiles || []);
+                    await withOrderLock(async () => {
+                        try {
+                            const fullOrder = fileOrder.getOrder();
+                            const pathById = new Map((cachedScannedFiles || []).map(cf => [cf.id, cf.path]));
 
-                        const getIdsForItem = (itemId: string): string[] => {
-                            if (!itemId) return [];
-                            if (itemId.startsWith("folder:")) {
-                                const folderRel = itemId.substring(7);
-                                return fullOrder.filter(id => {
-                                    const f = activeFiles.find(cf => cf.id === id);
-                                    return f && f.path.startsWith(folderRel);
-                                });
-                            } else {
-                                return [itemId];
-                            }
-                        };
-
-                        const isFolderTarget = !!msg.focusedFolder;
-                        const folderCardOrders = isFolderTarget
-                            ? (context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {})
-                            : {};
-                        let cardOrder: string[] = [];
-                        if (Array.isArray(msg.currentCardIds) && msg.currentCardIds.length > 0) {
-                            cardOrder = [...msg.currentCardIds];
-                        } else if (isFolderTarget) {
-                            cardOrder = folderCardOrders[msg.focusedFolder] ? [...folderCardOrders[msg.focusedFolder]] : [];
-                        } else {
-                            cardOrder = context.workspaceState.get<string[]>("thumbview.cardOrder") || [];
-                        }
-                        if (msg.sourceId && !cardOrder.includes(msg.sourceId)) {
-                            cardOrder.push(msg.sourceId);
-                        }
-
-                        if (msg.isSpanning) {
-                            if (isFolderTarget) {
-                                folderCardOrders[msg.focusedFolder] = cardOrder;
-                                if (typeof msg.wrapRows === "number") {
-                                    const folderCardWrapRows = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {};
-                                    folderCardWrapRows[msg.focusedFolder] = msg.wrapRows;
-                                    await context.workspaceState.update("thumbview.folderCardWrapRows", folderCardWrapRows);
+                            const getIdsForItem = (itemId: string): string[] => {
+                                if (!itemId) return [];
+                                if (itemId.startsWith("folder:")) {
+                                    const folderRel = itemId.substring(7);
+                                    return fullOrder.filter(id => pathById.has(id) && (pathById.get(id) || "").startsWith(folderRel));
+                                } else {
+                                    return [itemId];
                                 }
-                                await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
+                            };
+
+                            const isFolderTarget = !!msg.focusedFolder;
+                            const folderCardOrders = isFolderTarget
+                                ? (context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {})
+                                : {};
+                            let cardOrder: string[] = [];
+                            if (Array.isArray(msg.currentCardIds) && msg.currentCardIds.length > 0) {
+                                cardOrder = [...msg.currentCardIds];
+                            } else if (isFolderTarget) {
+                                cardOrder = folderCardOrders[msg.focusedFolder] ? [...folderCardOrders[msg.focusedFolder]] : [];
                             } else {
-                                if (typeof msg.wrapRows === "number") {
-                                    await context.workspaceState.update("thumbview.cardWrapRows", msg.wrapRows);
+                                cardOrder = context.workspaceState.get<string[]>("thumbview.cardOrder") || [];
+                            }
+                            if (msg.sourceId && !cardOrder.includes(msg.sourceId)) {
+                                cardOrder.push(msg.sourceId);
+                            }
+
+                            if (msg.isSpanning) {
+                                if (isFolderTarget) {
+                                    folderCardOrders[msg.focusedFolder] = cardOrder;
+                                    if (typeof msg.wrapRows === "number") {
+                                        const folderCardWrapRows = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {};
+                                        folderCardWrapRows[msg.focusedFolder] = msg.wrapRows;
+                                        await context.workspaceState.update("thumbview.folderCardWrapRows", folderCardWrapRows);
+                                    }
+                                    await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
+                                } else {
+                                    if (typeof msg.wrapRows === "number") {
+                                        await context.workspaceState.update("thumbview.cardWrapRows", msg.wrapRows);
+                                    }
+                                    await context.workspaceState.update("thumbview.cardOrder", cardOrder);
                                 }
-                                await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+                                return;
                             }
-                            return;
-                        }
 
-                        if (msg.targetIsEmpty) {
-                            const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
-                            cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
-                            if (isFolderTarget) {
-                                folderCardOrders[msg.focusedFolder] = cardOrder;
-                                await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
-                            } else {
-                                await context.workspaceState.update("thumbview.cardOrder", cardOrder);
-                            }
-                            return;
-                        }
-
-                        const srcIds = getIdsForItem(msg.sourceId);
-                        const tgtIds = getIdsForItem(msg.targetId);
-
-                        if (srcIds.length > 0 && tgtIds.length > 0 && msg.sourceId !== msg.targetId) {
-                            if (cardOrder.length > 0) {
-                                cardOrder = reorderCardItems(cardOrder, msg.sourceId, false, msg.targetId, 0, cardOrder.length);
+                            if (msg.targetIsEmpty) {
+                                const maxCapacity = Math.max(1, msg.maxCapacity || cardOrder.length || 1);
+                                cardOrder = reorderCardItems(cardOrder, msg.sourceId, true, null, msg.targetSlotIdx, maxCapacity);
                                 if (isFolderTarget) {
                                     folderCardOrders[msg.focusedFolder] = cardOrder;
                                     await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
                                 } else {
                                     await context.workspaceState.update("thumbview.cardOrder", cardOrder);
                                 }
+                                return;
                             }
 
-                            if (!isFolderTarget) {
-                                const srcFirst = fullOrder.indexOf(srcIds[0]);
-                                const tgtFirst = fullOrder.indexOf(tgtIds[0]);
+                            const srcIds = getIdsForItem(msg.sourceId);
+                            const tgtIds = getIdsForItem(msg.targetId);
 
-                                if (srcFirst !== -1 && tgtFirst !== -1) {
-                                    const remaining = fullOrder.filter(id => !srcIds.includes(id));
-                                    const newTgtIdx = remaining.indexOf(tgtIds[0]);
-                                    if (newTgtIdx !== -1) {
-                                        if (srcFirst < tgtFirst) {
-                                            remaining.splice(newTgtIdx + tgtIds.length, 0, ...srcIds);
-                                        } else {
-                                            remaining.splice(newTgtIdx, 0, ...srcIds);
+                            if (srcIds.length > 0 && tgtIds.length > 0 && msg.sourceId !== msg.targetId) {
+                                if (cardOrder.length > 0) {
+                                    cardOrder = reorderCardItems(cardOrder, msg.sourceId, false, msg.targetId, 0, cardOrder.length);
+                                    if (isFolderTarget) {
+                                        folderCardOrders[msg.focusedFolder] = cardOrder;
+                                        await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
+                                    } else {
+                                        await context.workspaceState.update("thumbview.cardOrder", cardOrder);
+                                    }
+                                }
+
+                                if (!isFolderTarget) {
+                                    const srcFirst = fullOrder.indexOf(srcIds[0]);
+                                    const tgtFirst = fullOrder.indexOf(tgtIds[0]);
+
+                                    if (srcFirst !== -1 && tgtFirst !== -1) {
+                                        const srcIdSet = new Set(srcIds);
+                                        const remaining = fullOrder.filter(id => !srcIdSet.has(id));
+                                        const newTgtIdx = remaining.indexOf(tgtIds[0]);
+                                        if (newTgtIdx !== -1) {
+                                            if (srcFirst < tgtFirst) {
+                                                remaining.splice(newTgtIdx + tgtIds.length, 0, ...srcIds);
+                                            } else {
+                                                remaining.splice(newTgtIdx, 0, ...srcIds);
+                                            }
+                                            fileOrder.setOrder(remaining);
                                         }
-                                        fileOrder.setOrder(remaining);
                                     }
                                 }
                             }
+                        } catch (err: any) {
+                            vscode.window.showErrorMessage(`Failed to swap items: ${err?.message ?? String(err)}`);
                         }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to swap items: ${err?.message ?? String(err)}`);
-                    }
+                    });
                 }
 
                 if (msg.command === "expandSpace") {
@@ -2363,6 +2740,14 @@ export async function activate(context: vscode.ExtensionContext) {
                             await context.workspaceState.update("thumbview.folderCardWrapRows", folderCardWrapRows);
                             await context.workspaceState.update("thumbview.folderExtraCols", folderExtraCols);
                             await context.workspaceState.update("thumbview.folderExtraRows", folderExtraRows);
+                            const allFootprints = getAllSlotFootprints();
+                            delete allFootprints[`folder:${targetFolder}`];
+                            delete allFootprints[`cards:${targetFolder}`];
+                            await context.workspaceState.update("thumbview.slotFootprints", allFootprints);
+                            const allFlowCells = getAllSlotFlowCells();
+                            delete allFlowCells[`folder:${targetFolder}`];
+                            delete allFlowCells[`cards:${targetFolder}`];
+                            await context.workspaceState.update("thumbview.slotFlowCells", allFlowCells);
 
                             if (activePanel) {
                                 await updateLayoutFromCache(activePanel);
@@ -2425,6 +2810,11 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             panel.onDidChangeViewState(async e => {
+                if (!e.webviewPanel.visible) {
+                    // Sent even mid-transition: the webview's fast reopen path needs to know the
+                    // panel really was backgrounded (protocol: "panelHidden", no fields).
+                    panel.webview.postMessage({ command: "panelHidden" });
+                }
                 if (layoutOpsInFlight > 0) {
                     return;
                 }
@@ -2434,24 +2824,28 @@ export async function activate(context: vscode.ExtensionContext) {
                         await closeActiveThumbview();
                         return;
                     }
+                    flushHiddenRefresh(panel);
                     sendOpenState();
-                    panel.webview.postMessage({ command: "showAfterTransition" });
+                    endTransition(panel);
                 } else if (e.webviewPanel.visible) {
-                    panel.webview.postMessage({ command: "showAfterTransition" });
+                    flushHiddenRefresh(panel);
+                    endTransition(panel);
                 } else if (!e.webviewPanel.visible && fullscreenActive) {
                     // Exit only when Thumbview is truly backgrounded — an inactive
                     // but still visible panel is just a focus shift, not leaving
-                    if (thumbviewEnteredZenMode) {
-                        thumbviewEnteredZenMode = false;
-                        await exitFullscreen();
-                    }
-                    if (groupMaximizedByUs) {
-                        await unmaximizeIfSplits();
-                    }
+                    await withLayoutLock(async () => {
+                        if (thumbviewEnteredZenMode) {
+                            thumbviewEnteredZenMode = false;
+                            await exitFullscreen();
+                        }
+                        if (groupMaximizedByUs) {
+                            await unmaximizeIfSplits();
+                        }
+                    });
                 }
             });
 
-            panel.onDidDispose(async () => {
+            panel.onDidDispose(() => withLayoutLock(async () => {
                 if (activePanel === panel) {
                     activePanel = undefined;
                 }
@@ -2460,10 +2854,10 @@ export async function activate(context: vscode.ExtensionContext) {
                     thumbviewEnteredZenMode = false;
                     await exitFullscreen();
                 }
-            });
-        }
-    );
+            }));
+    }, withLayoutLock);
 
+    const disposable = vscode.commands.registerCommand("thumbview.open", () => toggleThumbview());
     context.subscriptions.push(disposable);
 
     const reflowDisposable = vscode.commands.registerCommand("thumbview.reflow", async () => {
@@ -2482,6 +2876,9 @@ export async function activate(context: vscode.ExtensionContext) {
         await context.workspaceState.update("thumbview.extraRows", undefined);
         await context.workspaceState.update("thumbview.folderExtraCols", undefined);
         await context.workspaceState.update("thumbview.folderExtraRows", undefined);
+        await context.workspaceState.update("thumbview.slotFootprints", undefined);
+        await context.workspaceState.update("thumbview.naturalCells", undefined);
+        await context.workspaceState.update("thumbview.slotFlowCells", undefined);
         lastSpanningPlacements = [];
 
         if (activePanel) {
@@ -2574,18 +2971,6 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(configureHotkeyDisposable);
 
-    try {
-        const keybindingWatcher = vscode.workspace.createFileSystemWatcher("**/keybindings.json");
-        const onKbChange = () => {
-            if (activePanel) {
-                updateLayoutFromCache(activePanel);
-            }
-        };
-        keybindingWatcher.onDidChange(onKbChange);
-        keybindingWatcher.onDidCreate(onKbChange);
-        context.subscriptions.push(keybindingWatcher);
-    } catch {
-    }
 
     const refreshProviders = () => {
         if (activePanel) {
@@ -2742,15 +3127,10 @@ export async function activate(context: vscode.ExtensionContext) {
         });
 
         const labelStr = itemPaths.length === 1 ? `'${itemPaths[0].path}'` : `${itemPaths.length} items`;
-        const confirm = await vscode.window.showWarningMessage(
-            `Are you sure you want to delete ${labelStr}?`,
-            { modal: true },
-            "Move to Trash",
-            "Delete Permanently"
-        );
+        const mode = await askDeleteMode(labelStr);
 
-        if (confirm === "Move to Trash" || confirm === "Delete Permanently") {
-            const useTrash = confirm === "Move to Trash";
+        if (mode) {
+            const useTrash = mode === "trash";
             const ignoreState = getIgnoreState();
             const patternsToRemove: string[] = [];
 
@@ -2791,6 +3171,21 @@ export async function activate(context: vscode.ExtensionContext) {
     // layoutMode, renderMediaThumbnails, and autoIgnoreThreshold are real settings)
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
         if (!activePanel) return;
+        if (e.affectsConfiguration("thumbview.fullscreenOnOpen")) {
+            const enabled = isFullscreenOnOpen();
+            activePanel.webview.postMessage({ command: "fullscreenSetting", enabled });
+            if (!enabled) {
+                // Turned off while open: leave fullscreen now and keep Thumbview as a normal tab.
+                withLayoutLock(async () => {
+                    layoutOpsInFlight++;
+                    try {
+                        await leaveFullscreenAfterSwitch();
+                    } finally {
+                        releaseLayoutOp();
+                    }
+                }).catch(() => {});
+            }
+        }
         if (e.affectsConfiguration("thumbview.autoIgnoreThreshold")) {
             clearScanCache();
             refreshThumbview(activePanel);
@@ -2865,6 +3260,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // instead of flooding the webview with a message per file event.
     const watcher = vscode.workspace.createFileSystemWatcher("**/*");
     let debounceTimer: NodeJS.Timeout | undefined;
+    let pendingSaveGitDiff: Promise<unknown> = Promise.resolve();
     const triggerUpdate = (uri?: vscode.Uri) => {
         if (uri) {
             invalidateScanFile(uri.fsPath);
@@ -2875,59 +3271,136 @@ export async function activate(context: vscode.ExtensionContext) {
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(async () => {
+            // A save starts a git diff fetch; wait for it so the rescan's single payload carries fresh git markers.
+            await pendingSaveGitDiff;
             await getAllWorkspaceRelativePaths().catch(() => {});
             refreshProviders();
-            if (activePanel) {
-                await refreshThumbview(activePanel);
-            }
+            refreshOrDefer("rescan");
         }, 200);
     };
 
-    watcher.onDidCreate(uri => triggerUpdate(uri));
-    watcher.onDidDelete(uri => triggerUpdate(uri));
-    watcher.onDidChange(uri => triggerUpdate(uri));
-
-    const docChangeDisposable = vscode.workspace.onDidChangeTextDocument(e => {
-        updateDocumentInCache(e.document);
-        if (activePanel) {
-            updateLayoutFromCache(activePanel);
+    // .git churn and dependency installs never touch shown files. Other ignored output (e.g.
+    // `npm run watch` writing a gitignored out/) still reaches the debounced rescan, which posts
+    // nothing when the scanned file set is unchanged (see refreshThumbview).
+    const isUnscannedPath = (uri: vscode.Uri) =>
+        isAlwaysExcluded(vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/"));
+    const onWatcherEvent = (uri: vscode.Uri) => {
+        if (!isUnscannedPath(uri)) {
+            triggerUpdate(uri);
         }
+    };
+    watcher.onDidCreate(onWatcherEvent);
+    watcher.onDidDelete(onWatcherEvent);
+    watcher.onDidChange(onWatcherEvent);
+
+    // Debounced so typing rebuilds the cached document and re-posts the workspace payload once
+    // per pause, not once per keystroke.
+    let docChangeDebounceTimer: NodeJS.Timeout | undefined;
+    const pendingChangedDocs = new Map<string, vscode.TextDocument>();
+    const docChangeDisposable = vscode.workspace.onDidChangeTextDocument(e => {
+        if (e.contentChanges.length === 0) {
+            return;
+        }
+        pendingChangedDocs.set(e.document.uri.toString(), e.document);
+        if (docChangeDebounceTimer) {
+            clearTimeout(docChangeDebounceTimer);
+        }
+        docChangeDebounceTimer = setTimeout(() => {
+            for (const doc of pendingChangedDocs.values()) {
+                updateDocumentInCache(doc);
+            }
+            pendingChangedDocs.clear();
+            refreshOrDefer("layout");
+        }, 300);
     });
     context.subscriptions.push(docChangeDisposable);
 
+    // The save's own watcher event (or this triggerUpdate) rescans the file from disk, so a save
+    // produces one payload instead of a git-diff layout post followed by a rescan post.
     const docSaveDisposable = vscode.workspace.onDidSaveTextDocument(doc => {
-        updateDocumentInCache(doc);
-        fetchWorkspaceGitDiff().then(() => {
-            if (activePanel) {
-                updateLayoutFromCache(activePanel);
-            }
-        }).catch(() => {});
+        pendingChangedDocs.delete(doc.uri.toString());
+        pendingSaveGitDiff = fetchWorkspaceGitDiff().catch(() => {});
         triggerUpdate(doc.uri);
     });
     context.subscriptions.push(docSaveDisposable);
 
     let diagDebounceTimer: NodeJS.Timeout | undefined;
+    let lastErrorDiagnosticsSignature = "";
+    const errorDiagnosticsSignature = (): string => {
+        const parts: string[] = [];
+        for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+            if (uri.scheme !== "file") {
+                continue;
+            }
+            for (const d of diags) {
+                if (d.severity === vscode.DiagnosticSeverity.Error) {
+                    parts.push(`${uri.toString()}|${d.range.start.line}-${d.range.end.line}|${d.message}`);
+                }
+            }
+        }
+        return parts.sort().join("\n");
+    };
     const diagDisposable = vscode.languages.onDidChangeDiagnostics(() => {
         if (diagDebounceTimer) {
             clearTimeout(diagDebounceTimer);
         }
+        // Language servers publish diagnostics in bursts while warming up; 500ms collapses a burst into one update.
         diagDebounceTimer = setTimeout(() => {
-            if (activePanel) {
-                updateLayoutFromCache(activePanel);
+            // Tiles only show error markers, and every editor switch (including each Thumbview
+            // open/close) republishes warnings and hints. Skip the full workspace payload unless
+            // the set of errors actually changed.
+            const signature = errorDiagnosticsSignature();
+            if (signature === lastErrorDiagnosticsSignature) {
+                return;
             }
-        }, 100);
+            lastErrorDiagnosticsSignature = signature;
+            refreshOrDefer("layout");
+        }, 500);
     });
     context.subscriptions.push(diagDisposable);
 
     context.subscriptions.push(watcher);
 }
 
-export function deactivate() { }
+// Set by activate(): restores the user's zenMode.* settings if Thumbview is fullscreen when the
+// extension host shuts down.
+let deactivateHook: (() => Promise<void>) | undefined;
+
+/**
+ * Asks how to delete `label`. Moving to the Trash is the first, recoverable choice; a permanent
+ * delete needs a second, explicit confirmation because it cannot be undone.
+ */
+async function askDeleteMode(label: string): Promise<"trash" | "permanent" | undefined> {
+    const choice = await vscode.window.showWarningMessage(
+        `Delete ${label}?`,
+        { modal: true, detail: "Moving to the Trash can be undone from your system's Trash." },
+        "Move to Trash",
+        "Delete Permanently"
+    );
+    if (choice === "Move to Trash") {
+        return "trash";
+    }
+    if (choice !== "Delete Permanently") {
+        return undefined;
+    }
+    const confirmed = await vscode.window.showWarningMessage(
+        `Permanently delete ${label}?`,
+        { modal: true, detail: "This cannot be undone." },
+        "Delete Permanently"
+    );
+    return confirmed === "Delete Permanently" ? "permanent" : undefined;
+}
+
+export function deactivate(): Promise<void> | undefined {
+    return deactivateHook?.();
+}
+
 
 // Builds the webview's HTML shell. media/overview.js is loaded via a nonce'd <script>
 // tag under a strict CSP (script-src limited to that nonce) so no inline/remote script
 // can run in the panel — see getNonce() below.
-function getHtml(
+// Exported for scripts/capture-screenshots.mjs, which renders this exact page headlessly for the README.
+export function getHtml(
     webview: vscode.Webview,
     context: vscode.ExtensionContext,
     openKeybindingLabel: string = "F4",
@@ -2950,10 +3423,11 @@ function getHtml(
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <title>Thumbview</title>
 
     <meta
         http-equiv="Content-Security-Policy"
-        content="default-src 'none'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'unsafe-eval' ${webview.cspSource}; worker-src blob: data: ${webview.cspSource}; connect-src ${webview.cspSource} blob: data:;"
+        content="default-src 'none'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource}; worker-src blob: data: ${webview.cspSource}; connect-src ${webview.cspSource} blob: data:;"
     >
 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -2975,6 +3449,59 @@ function getHtml(
             color: var(--vscode-foreground, #e1e1e6);
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             user-select: none;
+        }
+
+        /* Hidden until overview.js reveals a frame rendered at a stable size (inline opacity wins). */
+        body {
+            opacity: 0;
+        }
+
+        /* Visually hidden but read by screen readers. */
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        /* Keyboard focus is always visible on DOM controls; the canvas draws its own ring. */
+        button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+            outline: 2px solid var(--vscode-focusBorder, #007fd4);
+            outline-offset: 1px;
+        }
+        canvas:focus-visible {
+            outline: none;
+        }
+
+        /* High contrast themes: controls get explicit borders; state is not conveyed by fill alone. */
+        body.vscode-high-contrast button, body.vscode-high-contrast-light button,
+        body.vscode-high-contrast input, body.vscode-high-contrast-light input {
+            border: 1px solid var(--vscode-contrastBorder, CanvasText) !important;
+        }
+        body.vscode-high-contrast button.active, body.vscode-high-contrast-light button.active {
+            outline: 2px solid var(--vscode-contrastActiveBorder, Highlight);
+        }
+
+        @media (forced-colors: active) {
+            button, input, .menu-popover, .menu-modal {
+                border: 1px solid ButtonText !important;
+                forced-color-adjust: auto;
+            }
+            button.active {
+                outline: 2px solid Highlight;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                transition: none !important;
+                animation: none !important;
+            }
         }
 
         #canvas-container {
@@ -3432,6 +3959,10 @@ function getHtml(
             color: var(--vscode-list-activeSelectionForeground, #ffffff);
             font-weight: 500;
         }
+        /* The dimmed count color fails contrast on the selection background. */
+        .popover-item.active .popover-item-count {
+            color: inherit;
+        }
 
         .popover-chevron-btn {
             display: inline-flex;
@@ -3856,6 +4387,64 @@ function getHtml(
         }
 
         /* Clean Desktop Toggle Control with Accent */
+        .fullscreen-notice {
+            position: absolute;
+            left: 50%;
+            bottom: 20px;
+            transform: translateX(-50%);
+            z-index: 60;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            max-width: calc(100% - 32px);
+            box-sizing: border-box;
+            padding: 10px 12px 10px 16px;
+            border-radius: 6px;
+            background: var(--vscode-editorWidget-background, #252526);
+            color: var(--vscode-foreground, #cccccc);
+            border: 1px solid var(--vscode-widget-border, #454545);
+            box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+            font-size: 13px;
+        }
+        .fullscreen-notice[hidden] {
+            display: none;
+        }
+        .fullscreen-notice kbd {
+            font-family: inherit;
+            padding: 1px 5px;
+            border-radius: 3px;
+            background: var(--vscode-keybindingLabel-background, rgba(128, 128, 128, 0.17));
+            border: 1px solid var(--vscode-keybindingLabel-border, rgba(51, 51, 51, 0.6));
+        }
+        .notice-btn {
+            flex: none;
+            padding: 4px 10px;
+            border-radius: 2px;
+            border: 1px solid var(--vscode-button-secondaryBorder, transparent);
+            background: var(--vscode-button-secondaryBackground, #3a3d41);
+            color: var(--vscode-button-secondaryForeground, #ffffff);
+            font: inherit;
+            cursor: pointer;
+        }
+        .notice-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground, #45494e);
+        }
+        .notice-btn-primary {
+            background: var(--vscode-button-background, #0e639c);
+            color: var(--vscode-button-foreground, #ffffff);
+        }
+        .notice-btn-primary:hover {
+            background: var(--vscode-button-hoverBackground, #1177bb);
+        }
+        .notice-btn:focus-visible {
+            outline: 1px solid var(--vscode-focusBorder, #007fd4);
+            outline-offset: 2px;
+        }
+        @media (max-width: 560px) {
+            .fullscreen-notice {
+                flex-wrap: wrap;
+            }
+        }
         .toggle-control {
             position: relative;
             display: inline-flex;
@@ -3954,18 +4543,21 @@ function getHtml(
     </style>
 </head>
 <body>
-    <div id="canvas-container">
-        <canvas id="map"></canvas>
+    <div id="canvas-container" role="main">
+        <h1 class="sr-only">Thumbview</h1>
+        <canvas id="map" tabindex="0" role="application" aria-roledescription="file grid" aria-label="Thumbview files" aria-describedby="grid-help"></canvas>
+        <div id="grid-help" class="sr-only">Arrow keys move between files and folders. Home and End jump to the first and last. Enter opens. Shift+F10 opens the context menu. Hold Control to magnify the focused file. Alt+Arrow moves the focused tile. Type to search.</div>
+        <div id="sr-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
         <div id="hover-tooltip"></div>
         <div id="context-menu"></div>
         
-        <div id="folders-popover" class="menu-popover" style="display: none; width: 720px; max-width: 94vw; height: 560px; max-height: 82vh;">
+        <div id="folders-popover" class="menu-popover" role="dialog" aria-modal="false" aria-labelledby="folders-popover-title" style="display: none; width: 720px; max-width: 94vw; height: 560px; max-height: 82vh;">
             <div class="popover-header">
                 <div class="popover-header-title">
                     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" style="opacity:0.9;"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z" fill="currentColor" fill-opacity="0.08"/></svg>
-                    <span>Folders &amp; Ignored Items</span>
+                    <span id="folders-popover-title">Folders &amp; Ignored Items</span>
                 </div>
-                <button class="popover-close" id="close-folders-popover" title="Close (Esc)">
+                <button class="popover-close" id="close-folders-popover" title="Close (Esc)" aria-label="Close Folders and Ignored Items">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5"/></svg>
                 </button>
             </div>
@@ -3997,13 +4589,13 @@ function getHtml(
             </div>
         </div>
 
-        <div id="actions-modal" class="menu-modal">
+        <div id="actions-modal" class="menu-modal" role="dialog" aria-modal="true" aria-labelledby="actions-modal-title">
             <div class="modal-header">
                 <div class="modal-header-title">
                     <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" style="opacity:0.9;"><path d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.8-1.3 2 .8.8 2-1.3.8.3.4 2.3h1.2l.5-2.4.8-.3 2 1.3.8-.8-1.3-2 .3-.8 2.3-.4V7.4l-2.4-.5-.3-.7 1.3-2-.8-.9-2 1.3-.7-.2zM8 10.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
-                    <span>Settings &amp; Shortcuts</span>
+                    <span id="actions-modal-title">Settings &amp; Shortcuts</span>
                 </div>
-                <button class="modal-close" id="close-modal" title="Close (Esc)">
+                <button class="modal-close" id="close-modal" title="Close (Esc)" aria-label="Close Settings and Shortcuts">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5"/></svg>
                 </button>
             </div>
@@ -4032,11 +4624,11 @@ function getHtml(
                     </div>
                     <div class="setting-row">
                         <div class="setting-text">
-                            <div class="setting-name">Media Thumbnails</div>
+                            <div class="setting-name" id="media-thumbnails-setting-name">Media Thumbnails</div>
                             <div class="setting-desc">Render image and PDF page 1 previews directly inside thumbnail tiles</div>
                         </div>
                         <label class="toggle-control">
-                            <input type="checkbox" id="media-thumbnails-toggle" checked>
+                            <input type="checkbox" id="media-thumbnails-toggle" aria-labelledby="media-thumbnails-setting-name" checked>
                             <span class="toggle-track">
                                 <span class="toggle-thumb"></span>
                             </span>
@@ -4044,11 +4636,23 @@ function getHtml(
                     </div>
                     <div class="setting-row">
                         <div class="setting-text">
-                            <div class="setting-name">Compression Percentage</div>
+                            <div class="setting-name" id="fullscreen-setting-name">Open Fullscreen</div>
+                            <div class="setting-desc">Open Thumbview in Zen mode so code stays readable. Turn off to open it as a normal editor tab.</div>
+                        </div>
+                        <label class="toggle-control">
+                            <input type="checkbox" id="fullscreen-toggle" aria-labelledby="fullscreen-setting-name" checked>
+                            <span class="toggle-track">
+                                <span class="toggle-thumb"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name" id="compression-setting-name">Compression Percentage</div>
                             <div class="setting-desc">When code shrinks to this percentage of its height in a cell, the tile expands one cell taller (0% disables, 1% to 20% recommended)</div>
                         </div>
                         <div class="setting-input-wrapper">
-                            <input type="number" id="compression-percentage-input" class="setting-input" min="0" max="25" step="1" value="5">
+                            <input type="number" id="compression-percentage-input" aria-labelledby="compression-setting-name" class="setting-input" min="0" max="25" step="1" value="5">
                             <span class="setting-input-unit">%</span>
                         </div>
                     </div>
@@ -4058,19 +4662,19 @@ function getHtml(
                             <div class="setting-desc">Minimum tile width and height in pixels before grouping files into folder cards</div>
                         </div>
                         <div class="setting-dimension-group">
-                            <input type="number" id="min-cell-width-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="60" title="Minimum width (px)">
+                            <input type="number" id="min-cell-width-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="60" title="Minimum width (px)" aria-label="Minimum tile width in pixels">
                             <span class="setting-dim-sep">×</span>
-                            <input type="number" id="min-cell-height-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="40" title="Minimum height (px)">
+                            <input type="number" id="min-cell-height-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="40" title="Minimum height (px)" aria-label="Minimum tile height in pixels">
                             <span class="setting-input-unit">px</span>
                         </div>
                     </div>
                     <div class="setting-row">
                         <div class="setting-text">
-                            <div class="setting-name">Auto-Ignore Threshold</div>
+                            <div class="setting-name" id="auto-ignore-setting-name">Auto-Ignore Threshold</div>
                             <div class="setting-desc">Automatically ignore folders containing more than this number of files (0 disables)</div>
                         </div>
                         <div class="setting-input-wrapper">
-                            <input type="number" id="auto-ignore-threshold-input" class="setting-input" min="0" max="10000" step="5" value="30">
+                            <input type="number" id="auto-ignore-threshold-input" aria-labelledby="auto-ignore-setting-name" class="setting-input" min="0" max="10000" step="5" value="30">
                             <span class="setting-input-unit">files</span>
                         </div>
                     </div>
@@ -4122,26 +4726,31 @@ function getHtml(
             </div>
         </div>
         <div class="controls-overlay">
-            <div class="search-container">
-                <input type="text" id="search-input" class="search-input" title="Begin typing with the Thumbview open to Search" placeholder="Search files (e.g. auth)...">
-                <button id="search-match-case" class="search-option-btn" title="Match Case (${isMac ? "⌥C" : "Alt+C"})">Aa</button>
-                <button id="search-match-word" class="search-option-btn" title="Match Whole Word (${isMac ? "⌥W" : "Alt+W"})">[ab]</button>
-                <button id="search-use-regex" class="search-option-btn" title="Use Regular Expression (${isMac ? "⌥X" : "Alt+X"})">.*</button>
-                <button id="clear-search" class="search-option-btn" title="Clear Search (${isMac ? "⌘⌫" : "Ctrl+Backspace"})" style="display: none;">&times;</button>
+            <div class="search-container" role="search">
+                <input type="text" id="search-input" class="search-input" title="Begin typing with the Thumbview open to Search" aria-label="Search files" placeholder="Search files (e.g. auth)...">
+                <button id="search-match-case" class="search-option-btn" aria-label="Match Case" aria-pressed="false" title="Match Case (${isMac ? "⌥C" : "Alt+C"})">Aa</button>
+                <button id="search-match-word" class="search-option-btn" aria-label="Match Whole Word" aria-pressed="false" title="Match Whole Word (${isMac ? "⌥W" : "Alt+W"})">[ab]</button>
+                <button id="search-use-regex" class="search-option-btn" aria-label="Use Regular Expression" aria-pressed="false" title="Use Regular Expression (${isMac ? "⌥X" : "Alt+X"})">.*</button>
+                <button id="clear-search" class="search-option-btn" aria-label="Clear search" title="Clear Search (${isMac ? "⌘⌫" : "Ctrl+Backspace"})" style="display: none;">&times;</button>
             </div>
             <div id="breadcrumbs" class="breadcrumb-container" style="display: none;">
                 <span class="breadcrumb-item" id="breadcrumb-root">root</span>
             </div>
             <div class="top-bar-actions">
-                <button id="folders-btn" class="toolbar-btn" title="Folders &amp; Ignored">
+                <button id="folders-btn" class="toolbar-btn" title="Folders &amp; Ignored" aria-haspopup="dialog" aria-expanded="false" aria-controls="folders-popover">
                     <svg class="toolbar-btn-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M1.75 3.75C1.75 3.06 2.31 2.5 3 2.5H6.05C6.46 2.5 6.84 2.69 7.09 3.01L7.91 4.09C8.16 4.41 8.54 4.6 8.95 4.6H13C13.69 4.6 14.25 5.16 14.25 5.85V12.4C14.25 13.09 13.69 13.65 13 13.65H3C2.31 13.65 1.75 13.09 1.75 12.4V3.75Z" fill="currentColor" fill-opacity="0.1"/></svg>
                     <span>Folders &amp; Ignored</span>
                 </button>
-                <button id="actions-btn" class="toolbar-btn" title="Settings &amp; Shortcuts">
+                <button id="actions-btn" class="toolbar-btn" title="Settings &amp; Shortcuts" aria-haspopup="dialog" aria-expanded="false" aria-controls="actions-modal">
                     <svg class="toolbar-btn-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.8-1.3 2 .8.8 2-1.3.8.3.4 2.3h1.2l.5-2.4.8-.3 2 1.3.8-.8-1.3-2 .3-.8 2.3-.4V7.4l-2.4-.5-.3-.7 1.3-2-.8-.9-2 1.3-.7-.2zM8 10.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
                     <span>Settings</span>
                 </button>
             </div>
+        </div>
+        <div id="fullscreen-notice" class="fullscreen-notice" role="region" aria-labelledby="fullscreen-notice-text" hidden>
+            <span id="fullscreen-notice-text">Thumbview opens fullscreen so code stays readable. Press <kbd id="fullscreen-notice-key">F4</kbd> or open a file to go back.</span>
+            <button id="fullscreen-notice-keep" class="notice-btn notice-btn-primary">Got it</button>
+            <button id="fullscreen-notice-tab" class="notice-btn">Open as a tab instead</button>
         </div>
     </div>
     <script nonce="${nonce}">
