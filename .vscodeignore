@@ -1,12 +1,23 @@
+# Only dist/extension.js (the esbuild bundle), media/ runtime files, package.json, README,
+# CHANGELOG, and LICENSE ship. Everything else is source, tooling, or repository material.
 .vscode/**
 .vscode-test/**
+.github/**
 .agents/**
 demo-workspace/**
-src/**
 venv/**
+src/**
+out/**
+scripts/**
+node_modules/**
+dist/**/*.map
+media/*.png
+!media/icon.png
+media/screenshots/**
+media/generate_icons.py
+media/icon-store.svg
 .gitignore
 .yarnrc
-vsc-extension-quickstart.md
 **/tsconfig.json
 **/eslint.config.mjs
 **/*.map
@@ -16,4 +27,3 @@ vsc-extension-quickstart.md
 *.md
 !README.md
 !CHANGELOG.md
-

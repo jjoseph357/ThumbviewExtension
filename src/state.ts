@@ -2,38 +2,26 @@
 // buildSpanningGrid (layout.ts/spanning_layout.ts) assign grid slots purely by index
 // into getOrder()'s array, so an existing file must never change index just because
 // other files were added or removed elsewhere in the workspace.
+
+import { fillLayoutHoles } from "./layout_core";
+
+// fillLayoutHoles lives in layout_core.ts, shared with the webview.
+export { fillLayoutHoles } from "./layout_core";
+export type { HoleFillResult } from "./layout_core";
+
 export class PersistentFileOrder {
 
     private seenFiles: string[] = [];
 
-    // Deleted files leave "holes" (their old index) rather than shifting everything
-    // down; newly discovered files fill the oldest hole first, and only append past
-    // the end once no holes remain. This is what keeps every other file's grid slot
-    // untouched when the file set changes.
-    update(ids: string[]) {
-
-        const current = new Set(ids);
-
-        const holes: number[] = [];
-
-        for (let i = 0; i < this.seenFiles.length; i++) {
-            if (this.seenFiles[i] && !current.has(this.seenFiles[i])) {
-                holes.push(i);
-            }
-        }
-
-        const newFiles = ids.filter(x => !this.seenFiles.includes(x));
-
-        for (const id of newFiles) {
-
-            const hole = holes.shift();
-
-            if (hole !== undefined) {
-                this.seenFiles[hole] = id;
-            } else {
-                this.seenFiles.push(id);
-            }
-        }
+    // Deleted/ignored files leave "holes" (their old entry) rather than shifting everything
+    // down; newly discovered files fill the earliest hole they fit in, and only append past
+    // the end once none fits. This is what keeps every other file's grid slot untouched
+    // when the file set changes. In spanning mode pass cell counts: see fillLayoutHoles.
+    // Returns footprints for files that filled a taller hole; callers persist them.
+    update(ids: string[], cellsOf?: (id: string) => number, holeCellsOf?: (id: string) => number): { [id: string]: number } {
+        const { order, footprints } = fillLayoutHoles(this.seenFiles, ids, cellsOf, holeCellsOf);
+        this.seenFiles = order;
+        return footprints;
     }
 
     // Unlike update(), this resets the layout order strictly to currentIds (which are

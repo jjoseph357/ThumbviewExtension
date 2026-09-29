@@ -1,0 +1,7 @@
+# LF everywhere, including Windows checkouts: several tests slice media/overview.js with
+# "\n"-anchored patterns, and generated code (npm run sync-core) is compared byte for byte.
+* text=auto eol=lf
+*.png binary
+*.gif binary
+*.pdf binary
+*.vsix binary

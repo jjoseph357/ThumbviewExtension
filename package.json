@@ -1,17 +1,49 @@
 {
   "name": "thumbview",
   "displayName": "Thumbview",
+  "description": "See every file in your workspace at once as a stable, syntax-highlighted minimap grid. Search them all and jump to any line in one click.",
   "publisher": "Thumbview",
-  "version": "0.4.8",
-  "icon": "media/icon.png",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/jjoseph357/ThumbviewExtension"
+  "author": {
+    "name": "Woody Morrice and Joseph Elliott"
   },
+  "version": "0.5.0",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1e1e24",
+    "theme": "dark"
+  },
+  "license": "MIT",
+  "qna": "marketplace",
   "engines": {
     "vscode": "^1.107.0"
   },
-  "main": "./out/extension.js",
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "minimap",
+    "overview",
+    "code map",
+    "workspace",
+    "file navigation",
+    "navigator",
+    "grid",
+    "thumbnails",
+    "search",
+    "spatial"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Files are read through VS Code's file system API. Git status markers and .gitignore-based file listing are unavailable; files.exclude still applies."
+    },
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode Thumbview does not run git, so git status markers are hidden and .gitignore rules are not applied (files.exclude still is)."
+    }
+  },
+  "main": "./dist/extension.js",
   "contributes": {
     "configuration": {
       "title": "Thumbview",
@@ -68,6 +100,11 @@
           "type": "number",
           "default": 40,
           "description": "Minimum tile height in pixels before grouping workspace files into subfolder cards."
+        },
+        "thumbview.fullscreenOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open Thumbview fullscreen (Zen mode, other editor groups hidden). The first time you open Thumbview in a session it adjusts a few zenMode.* settings (no OS fullscreen, no centered layout, no tabs) and restores your values when VS Code closes. Disable to open Thumbview as a normal editor tab and leave Zen settings untouched."
         }
       }
     },
@@ -154,7 +191,8 @@
     "keybindings": [
       {
         "command": "thumbview.open",
-        "key": "f4"
+        "key": "f4",
+        "when": "!searchViewletFocus && !referenceSearchVisible"
       }
     ],
     "viewsContainers": {
@@ -183,13 +221,21 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run check-core && tsc -p ./ --noEmit && node scripts/build.mjs --production",
+    "compile": "npm run sync-core && tsc -p ./ && node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "sync-core": "node scripts/sync-webview-core.mjs",
+    "check-core": "node scripts/sync-webview-core.mjs --check",
+    "package": "vsce package --baseImagesUrl https://raw.githubusercontent.com/jjoseph357/thumbview-assets/main/",
+    "screenshots": "node scripts/capture-screenshots.mjs",
+    "publish-assets": "node scripts/publish-assets.mjs",
+    "test:a11y": "node scripts/a11y-audit.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js && node src/test/settings_modal_and_config.test.js && node src/test/reflow_empty_columns_and_drag_explosion.test.js && node src/test/expand_reduce_gap_preservation.test.js && node src/test/tab_switch_and_opacity.test.js && node src/test/hover_alignment_and_subfolder_latency.test.js"
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js && node src/test/settings_modal_and_config.test.js && node src/test/reflow_empty_columns_and_drag_explosion.test.js && node src/test/expand_reduce_gap_preservation.test.js && node src/test/tab_switch_and_opacity.test.js && node src/test/hover_alignment_and_subfolder_latency.test.js && node src/test/instant_open.test.js && node src/test/folder_ignore_stability.test.js && node src/test/crash_resilience.test.js && node src/test/respectful_guest.test.js && node src/test/robust_scale.test.js && node src/test/accessibility.test.js && node src/test/bundle_smoke.test.js",
+    "publish:marketplace": "vsce publish --baseImagesUrl https://raw.githubusercontent.com/jjoseph357/thumbview-assets/main/"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -197,7 +243,11 @@
     "@types/vscode": "~1.107.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^4.0.0",
+    "axe-core": "^4.13.0",
+    "esbuild": "^0.28.2",
     "eslint": "^10.8.1",
+    "puppeteer-core": "^25.12.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.1"
   },

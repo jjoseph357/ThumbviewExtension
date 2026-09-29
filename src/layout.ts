@@ -1,53 +1,13 @@
-export const DEFAULT_TARGET_ASPECT = 16 / 9;
-export const MIN_GRID_ROWS = 1;
-export const MIN_GRID_COLS = 2;
+import { buildStableGrid } from "./layout_core";
+
+// buildStableGrid lives in layout_core.ts, shared with the webview.
+export { buildStableGrid, DEFAULT_TARGET_ASPECT, MIN_GRID_ROWS, MIN_GRID_COLS } from "./layout_core";
 
 export interface Placement {
     x: number;
     y: number;
     width: number;
     height: number;
-}
-
-export function buildStableGrid(
-    nCells: number,
-    targetAspect = DEFAULT_TARGET_ASPECT
-) {
-    let rows = MIN_GRID_ROWS;
-    let cols = Math.max(MIN_GRID_COLS, Math.ceil(rows * targetAspect));
-
-    const slots: Array<[number, number]> = [];
-
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            slots.push([c, r]);
-        }
-    }
-
-    while (slots.length < nCells) {
-        const errCol = Math.abs((cols + 1) / rows - targetAspect);
-        const errRow = Math.abs(cols / (rows + 1) - targetAspect);
-
-        if (errCol <= errRow) {
-            const newCol = cols;
-            for (let r = 0; r < rows; r++) {
-                slots.push([newCol, r]);
-            }
-            cols++;
-        } else {
-            const newRow = rows;
-            for (let c = 0; c < cols; c++) {
-                slots.push([c, newRow]);
-            }
-            rows++;
-        }
-    }
-
-    return {
-        rows,
-        cols,
-        slots
-    };
 }
 
 export function slotToIndex(col: number, row: number, cols: number): number {

@@ -1,55 +1,50 @@
 // Pure-logic module computing variable-height cell allocations and assigning files to column-major grid slots.
 // Returns row/col bounding dimensions, wrapRows stride, and per-file cell placements.
 import { RepoFile } from "./scanner";
+import { cellsNeeded, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT, DEFAULT_TARGET_ASPECT, MIN_GRID_ROWS, MIN_GRID_COLS } from "./layout_core";
 
-export const DEFAULT_BASE_LINES_PER_CELL = 60;
-export const DEFAULT_COMPRESSION_PCT = 0.05;
-export const MAX_COMPRESSION_PCT = 0.25;
-export const DEFAULT_TARGET_ASPECT = 16 / 9;
-export const MIN_GRID_ROWS = 1;
-export const MIN_GRID_COLS = 2;
+// cellsNeeded and the layout constants live in layout_core.ts, shared with the webview.
+export { cellsNeeded, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT, MAX_COMPRESSION_PCT, DEFAULT_TARGET_ASPECT, MIN_GRID_ROWS, MIN_GRID_COLS } from "./layout_core";
 
-export interface SpanningPlacement {
-    file: RepoFile;
+// Generic over the file type so callers that pass enriched files (contentVersion, git and
+// diagnostics fields) get the same type back in placements.
+export interface SpanningPlacement<F extends RepoFile = RepoFile> {
+    file: F;
     col: number;
     row: number;
     nCells: number;
     slots: Array<[number, number]>;
 }
 
-export interface SpanningLayoutResult {
+export interface SpanningLayoutResult<F extends RepoFile = RepoFile> {
     rows: number;
     cols: number;
-    placements: SpanningPlacement[];
+    placements: SpanningPlacement<F>[];
     allocations: { [id: string]: number };
     wrapRows: number;
+    // Grid size before grown tiles overflowed their columns. Readability checks (folder-card
+    // collapse) use these so typing into a file can never flip a view into card mode.
+    flowRows: number;
+    flowCols: number;
 }
 
-export function cellsNeeded(
-    lineCount: number,
-    baseLinesPerCell = DEFAULT_BASE_LINES_PER_CELL,
-    compressionPct = DEFAULT_COMPRESSION_PCT
-): number {
-    if (lineCount <= baseLinesPerCell || compressionPct <= 0) {
-        return 1;
-    }
-    const clampedPct = Math.min(compressionPct, MAX_COMPRESSION_PCT);
-    const repLines = Math.max(lineCount * clampedPct, baseLinesPerCell);
-    return Math.ceil(repLines / baseLinesPerCell);
-}
-
-export function buildSpanningGrid(
-    files: RepoFile[],
+export function buildSpanningGrid<F extends RepoFile>(
+    files: F[],
     seenFileOrder: string[],
     existingAllocations: { [id: string]: number } = {},
     savedGridRows: number | null = null,
     forceBreakBeforeId: string | null = null,
     targetAspect = DEFAULT_TARGET_ASPECT,
     baseLinesPerCell = DEFAULT_BASE_LINES_PER_CELL,
-    compressionPct = DEFAULT_COMPRESSION_PCT
-): SpanningLayoutResult {
+    compressionPct = DEFAULT_COMPRESSION_PCT,
+    displayCells: { [id: string]: number } | null = null
+): SpanningLayoutResult<F> {
+    // `allocations` are flow cells: they decide column membership and are frozen once a file is
+    // placed. `displayCells` (default: the same) are the tile heights actually drawn. A file that
+    // grows or shrinks pushes the files below it within its column, but no file changes column;
+    // an overflowing column adds rows (and columns, keeping the cell aspect) instead of wrapping.
     const allocations: { [id: string]: number } = { ...existingAllocations };
-    const filesById = new Map<string, RepoFile>();
+    const filesById = new Map<string, F>();
     for (const f of files) {
         filesById.set(f.id, f);
     }
@@ -80,13 +75,16 @@ export function buildSpanningGrid(
     }
 
     let currCol = 0;
-    let currRow = 0;
+    let currRow = 0;        // flow position: decides column breaks
+    let currDisplayRow = 0; // drawn position: follows current tile heights
     let maxRowUsed = 1;
-    const placements: SpanningPlacement[] = [];
+    let maxFlowRowUsed = 1;
+    const placements: SpanningPlacement<F>[] = [];
 
     for (const fid of seenFileOrder) {
         const file = fid ? filesById.get(fid) : undefined;
         const nCells = fid ? (allocations[fid] || 1) : 1;
+        const shownCells = fid && displayCells && displayCells[fid] ? displayCells[fid] : nCells;
 
         const mustBreak = fid === forceBreakBeforeId
             ? currRow > 0
@@ -95,26 +93,31 @@ export function buildSpanningGrid(
         if (mustBreak) {
             currCol++;
             currRow = 0;
+            currDisplayRow = 0;
         }
 
         if (file) {
             const slots: Array<[number, number]> = [];
-            for (let i = 0; i < nCells; i++) {
-                slots.push([currCol, currRow + i]);
+            for (let i = 0; i < shownCells; i++) {
+                slots.push([currCol, currDisplayRow + i]);
             }
 
             placements.push({
                 file,
                 col: currCol,
-                row: currRow,
-                nCells,
+                row: currDisplayRow,
+                nCells: shownCells,
                 slots
             });
         }
 
         currRow += nCells;
-        if (currRow > maxRowUsed) {
-            maxRowUsed = currRow;
+        currDisplayRow += file ? shownCells : nCells;
+        if (currDisplayRow > maxRowUsed) {
+            maxRowUsed = currDisplayRow;
+        }
+        if (currRow > maxFlowRowUsed) {
+            maxFlowRowUsed = currRow;
         }
     }
 
@@ -130,14 +133,23 @@ export function buildSpanningGrid(
     const naturalColsNeeded = Math.ceil(totalCells / wrapRows);
     const baseCols = Math.max(MIN_GRID_COLS, naturalColsNeeded);
     const finalRows = Math.max(MIN_GRID_ROWS, reqRows);
-    const finalCols = Math.max(baseCols, reqCols);
+    let finalCols = Math.max(baseCols, reqCols);
+    // Rows added only because grown tiles overflow their columns: add columns in proportion so
+    // cells keep their aspect ratio instead of being squashed vertically.
+    const flowRows = Math.max(MIN_GRID_ROWS, Math.min(finalRows, Math.max(wrapRows, maxFlowRowUsed)));
+    const flowCols = finalCols;
+    if (finalRows > flowRows) {
+        finalCols = Math.max(finalCols, Math.ceil(finalCols * finalRows / flowRows));
+    }
 
     return {
         rows: finalRows,
         cols: finalCols,
         placements,
         allocations,
-        wrapRows
+        wrapRows,
+        flowRows,
+        flowCols
     };
 }
 
