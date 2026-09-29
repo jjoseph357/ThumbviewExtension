@@ -14,6 +14,9 @@
   },
   "license": "MIT",
   "qna": "marketplace",
+  "bugs": {
+    "url": "https://github.com/jjoseph357/thumbview-issues/issues"
+  },
   "engines": {
     "vscode": "^1.107.0"
   },
@@ -218,6 +221,69 @@
         "view": "thumbview-sidebar",
         "contents": "Thumbview is a full-workspace visual minimap grid.\n\n[Open Thumbview](command:thumbview.open)\n\n[Configure Hotkey](command:thumbview.configureHotkey)"
       }
+    ],
+    "walkthroughs": [
+      {
+        "id": "gettingStarted",
+        "title": "Get started with Thumbview",
+        "description": "See your whole workspace at once, and learn the few keys that make Thumbview fast.",
+        "steps": [
+          {
+            "id": "open",
+            "title": "Open Thumbview",
+            "description": "Press F4 to see every file as a tile that keeps its place. F4 or Esc takes you back.\n[Open Thumbview](command:thumbview.open)",
+            "media": {
+              "markdown": "media/walkthrough/open.md"
+            },
+            "completionEvents": [
+              "onCommand:thumbview.open"
+            ]
+          },
+          {
+            "id": "search",
+            "title": "Search every file by typing",
+            "description": "With Thumbview open, just start typing. Matches light up across every tile.",
+            "media": {
+              "markdown": "media/walkthrough/search.md"
+            }
+          },
+          {
+            "id": "magnify",
+            "title": "Read code without opening it",
+            "description": "Hold Left Ctrl over a tile to magnify the code under the pointer.",
+            "media": {
+              "markdown": "media/walkthrough/magnify.md"
+            }
+          },
+          {
+            "id": "navigate",
+            "title": "Jump to any line",
+            "description": "Click a line to open the file there, or a folder card to look inside. Everything also works from the keyboard.",
+            "media": {
+              "markdown": "media/walkthrough/navigate.md"
+            }
+          },
+          {
+            "id": "tidy",
+            "title": "Hide what you don't need",
+            "description": "Ignore files and folders from the tile menu or Folders & Ignored. Nothing else moves.",
+            "media": {
+              "markdown": "media/walkthrough/tidy.md"
+            }
+          },
+          {
+            "id": "fullscreen",
+            "title": "Fullscreen or a tab",
+            "description": "Choose how Thumbview opens.\n[Open the setting](command:workbench.action.openSettings?%5B%22thumbview.fullscreenOnOpen%22%5D)",
+            "media": {
+              "markdown": "media/walkthrough/fullscreen.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:thumbview.fullscreenOnOpen"
+            ]
+          }
+        ]
+      }
     ]
   },
   "scripts": {
@@ -234,7 +300,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js && node src/test/settings_modal_and_config.test.js && node src/test/reflow_empty_columns_and_drag_explosion.test.js && node src/test/expand_reduce_gap_preservation.test.js && node src/test/tab_switch_and_opacity.test.js && node src/test/hover_alignment_and_subfolder_latency.test.js && node src/test/instant_open.test.js && node src/test/folder_ignore_stability.test.js && node src/test/crash_resilience.test.js && node src/test/respectful_guest.test.js && node src/test/robust_scale.test.js && node src/test/accessibility.test.js && node src/test/bundle_smoke.test.js",
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js && node src/test/settings_modal_and_config.test.js && node src/test/reflow_empty_columns_and_drag_explosion.test.js && node src/test/expand_reduce_gap_preservation.test.js && node src/test/tab_switch_and_opacity.test.js && node src/test/hover_alignment_and_subfolder_latency.test.js && node src/test/instant_open.test.js && node src/test/folder_ignore_stability.test.js && node src/test/crash_resilience.test.js && node src/test/respectful_guest.test.js && node src/test/robust_scale.test.js && node src/test/accessibility.test.js && node src/test/bundle_smoke.test.js && node src/test/editor_groups.test.js",
     "publish:marketplace": "vsce publish --baseImagesUrl https://raw.githubusercontent.com/jjoseph357/thumbview-assets/main/"
   },
   "devDependencies": {
