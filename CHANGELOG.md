@@ -5,6 +5,92 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.0] - 2026-09-29
+
+### Added
+- **Choose fullscreen or tab on first use**: the first fullscreen open shows a short banner explaining why Thumbview goes fullscreen, with **Open as a tab instead**. Settings now has an **Open Fullscreen** toggle.
+- **Keyboard and screen reader support**: move between tiles with the arrow keys (Home/End for first/last), open with Enter, open the context menu with Shift+F10, move a tile with Alt+Arrow, and hold Ctrl to magnify the focused tile. The focused tile, search result counts, and folder changes are announced to screen readers. Toolbar controls and dialogs are labelled, dialogs move focus in and back out, and focus is always visible.
+- **Status badges**: tiles show error counts and git status as text (for example `2, M`), not only as color.
+- **High contrast and reduced motion**: high contrast themes and forced colors get explicit borders and outlines; animations respect reduced-motion settings.
+- **`thumbview.fullscreenOnOpen` setting** (default on): turn it off to open Thumbview as a normal editor tab without Zen mode or maximizing editor groups.
+
+### Changed
+- **Feedback goes through the Marketplace Q&A tab**; the listing no longer links to the source repository.
+- **Smaller, faster-loading package**: the extension now ships as a single bundled file with only its runtime assets, instead of compiled sources, screenshots, and build leftovers.
+- **Marketplace listing**: added a description, categories, keywords, license, and links, an animated demo and current screenshots, plus README sections on accessibility, what Thumbview changes in VS Code, and limits.
+- **Space opens the keyboard-focused tile**, like Enter. With no tile focused, Space still types into search.
+- **Reduced motion follows your operating system** when `workbench.reduceMotion` is `auto`.
+- **The 10,000-file limit keeps files already on the grid**, so new files elsewhere can never push a visible tile out.
+- **Permanently deleting** a file or folder from Thumbview now asks for a second confirmation; Move to Trash remains the first choice.
+- **Very large workspaces**: after auto-ignore, Thumbview shows at most 10,000 files and says so, and it also honors VS Code's `search.exclude` setting.
+- **Thumbview shows what your project considers source.** Files are listed with your `.gitignore` rules (every level, via git) and VS Code's `files.exclude` instead of a fixed list of folder names, so folders such as `lib/`, `build/`, `env/`, or `target/` appear unless you ignore them. `.git` and `node_modules` are always skipped. Binary files are skipped. All folders of a multi-root workspace are scanned.
+- **Restricted Mode and virtual workspaces are supported (limited)**: git is not run in untrusted workspaces, and remote/virtual files are read through VS Code's file system API.
+- **Thumbview no longer changes your settings when VS Code starts.** The Zen mode settings it needs are applied the first time you open Thumbview in a session and your own values are restored when VS Code shuts down (or on the next start after a crash). Opening and closing Thumbview no longer rewrites your settings file, and a second VS Code window no longer undoes the first window's settings.
+- **F4 keeps its VS Code meaning in Search and References.** Thumbview's F4 does not fire while the Search view has focus or a references peek is open.
+- **Hovering Thumbview no longer takes focus** from the editor or terminal; click into Thumbview to focus it.
+- **Sharp tiles on high-resolution screens**: tiles and folder previews are drawn at device pixel resolution.
+- The toolbar reads your Thumbview shortcut only from VS Code's own `keybindings.json` instead of probing other applications' folders.
+- **Reflow Layout** now also resets saved tile heights, so tiles return to their natural sizes.
+
+### Fixed
+- **Opening a file showed it in Zen mode for a moment**: the file now appears once, directly in the normal layout, instead of first in Zen mode and then again when the sidebar and tabs return.
+- **Space on a toolbar or dialog button typed into search** instead of pressing the button.
+- **Settings controls without accessible names**, a missing page title, landmark, and heading, and low contrast on the selected folder's file count (found by the new automated accessibility audit).
+- **Build error in the spanning layout payload**: layout placements now keep the full file type, so the `contentVersion` used by delta payloads type-checks.
+- **`thumbview.fullscreenOnOpen` description**: it now says Zen settings are restored when VS Code closes, which is what happens.
+- **Thumbview not opening fullscreen**: A Zen mode setting that does not exist in current VS Code versions made every fullscreen attempt fail silently. Thumbview now writes only settings VS Code knows, and a failed settings write can no longer prevent fullscreen.
+- **Slow, flashing file opens from tiles**: Clicking a tile shows the file immediately and restores the normal layout afterwards, instead of blanking Thumbview and waiting before opening the file. Reopening Thumbview afterwards is instant.
+- **Security**: File actions requested by the webview are limited to the workspace, and the webview no longer allows `eval`.
+- **Brief dark flash when reopening Thumbview**: Reopening at the same size now shows the previous frame immediately instead of waiting for the layout to settle.
+- **Squished-then-expanding first open on large workspaces**: Opening Thumbview no longer shows tiles packed into the top-left corner for several seconds before they fill the screen. The panel stays hidden until a render at a stable size is ready, and a single `ResizeObserver` now drives all canvas sizing.
+- **Folder mini-mosaic cache never hit**: The mosaic cache was stored on folder group objects that are rebuilt every render, so every render rebuilt every folder preview. It is now a module-level `mosaicCache` keyed by folder, size, search state, open files, and theme.
+- **Data updates lost after a drag**: Payloads deferred during a drag were never applied because `applyDataMessage` was not reachable from the drag cleanup code. It is now module-level.
+- **Stale open-tab set after closing a tab from a tile**: Clicking a tile's close button now updates `openFilesSet` as well as `openFiles`.
+- **Squish when reopening quickly**: Reopening Thumbview keeps it hidden until the host reports its layout has settled and a frame at that size exists. Transition messages carry ids so a delayed message from a previous close is ignored, and pressing the open key repeatedly no longer reveals the page mid-transition.
+- **Files shifting when ignoring a file inside a folder or among folder cards**: Folder views and folder card views now keep a persistent order like the root grid. Ignoring a file leaves an empty slot, every other tile stays in place, and the next added or unignored file fills the earliest gap it fits in. In spanning mode a gap keeps the ignored file's height; a shorter file that fills it keeps that height too (content at the top), and a taller file goes to the next gap that fits or to the end, so nothing re-flows.
+- **Adding files re-wrapping spanning layouts**: New files at the root no longer recompute the column height, and folder and card views now save theirs, so additions add columns instead of re-wrapping every column.
+- **Concurrent layout saves overwriting each other**: Drag reorders and background updates now write saved orders one at a time.
+- **Blank panel when returning to Thumbview right after leaving it**.
+- **Stale search highlights after toggling Match Case, Whole Word, or Regex**: The tile cache key now includes the search toggles.
+- **Unsaved edits reverting in tiles**: A rescan triggered by any file change no longer replaces unsaved buffer contents with the on-disk version.
+- **Brief top-left frame on resize**: When the panel grows after it is shown, the previous frame is stretched to the new size before paint, and the sharp render follows on the next frame.
+- **Search missed edits below the first line**: The search index is now keyed on a host-provided content version instead of line count plus first line.
+- **Blank panel when very small**: Panels under 200px now show a hint to enlarge the panel.
+- **Toolbar flash on first open**: The page is hidden in its initial CSS instead of after the script loads.
+- **Stale folder previews after switching themes**: Theme changes now clear the folder mosaic cache.
+- **Gray panel or VS Code crash after pressing F4 rapidly**: Open/close sequences now run one at a time, and presses during a transition are coalesced, so spamming F4 no longer stacks overlapping Zen mode and editor maximize toggles.
+- **Hidden panel after returning to Thumbview in some sequences**: The reveal safety timer keeps checking while Thumbview is in the background.
+- **Tiles jumping after a drag in spanning mode**: Drag previews and the saved layout now use the same frozen tile heights, so a dropped file lands where it was previewed and no other file changes column.
+- **Typing collapsing a view into folder cards**: Rows and columns added for a growing file no longer count toward the "tiles too small" check.
+- **F4 stopping working after a hung transition**: A transition that never finishes no longer blocks later presses.
+- **Files jumping to another column when a file grows or shrinks**: A file's column is now fixed once it is placed. Growing or shrinking a file only shifts the files below it within the same column; if a column overflows, the grid adds a row and proportional columns so tiles keep their shape.
+
+### Performance
+- **First open up to 3.5x faster on large workspaces**: lines are sent to the webview as plain text instead of objects, halving the data sent (144 MB to 69 MB at 10,000 files) and cutting the time to the first frame from about 2 s to 0.6 s at that size. Search indexing no longer copies every line up front.
+- Updates send only the files whose content changed; unchanged tiles and folder previews keep their cached images across updates.
+- Builds writing ignored output (for example `npm run watch` into a gitignored `out/`) no longer resend the workspace.
+- Folder and card drags no longer do quadratic lookups.
+- Cached tile and folder preview images are limited by memory (64MB and 32MB) instead of only by count, and evicted images release their memory immediately.
+- Warnings and hints changing no longer resend the whole workspace to the webview; only changes to errors do.
+- Host messages and resizes coalesce into one render per animation frame.
+- Opening Thumbview before the background scan finishes waits for that scan instead of starting a second full scan.
+- Document edits (300ms) and diagnostics (500ms) are debounced, and the host rebuilds its document cache once per pause instead of on every keystroke.
+- Updates received while Thumbview is hidden are applied shortly after it reappears instead of delaying the reveal.
+- File watcher events inside any directory the scanner excludes (such as `out/`, `node_modules/`, `.git/`) no longer trigger rescans, and saving a file sends one update instead of two.
+- The search index cache is bounded to the files in the current payload.
+- Resizing no longer discards cached tile and folder preview images, so the first frame after a resize is cheap.
+
+### Internal
+- New checks: an axe-core accessibility audit and a scale benchmark of the real webview in headless Chrome, integration tests inside VS Code, and unit tests on Windows and macOS in CI. `npm test` previously tried to run the node unit scripts inside VS Code and could not pass.
+- The layout functions used by both the extension and the webview now have one source (`src/layout_core.ts`), generated into `media/overview.js`, replacing hand-kept copies that had started to drift.
+- esbuild bundles the extension host to `dist/extension.js`, and a smoke test loads that bundle; GitHub Actions runs lint, the unit tests, and packaging on every push.
+
+### Upgrade note
+- Tile heights are now frozen per file. Layouts saved by earlier versions keep their current heights; the first **Reflow Layout** after upgrading resets every tile to its natural height, which can change every column once.
+- Saved folder orders from earlier versions may contain files removed since. Those are now kept as empty slots, so the first view of such a folder can show a larger grid. Run **Reflow Layout** in that folder to compact it.
+
 ## [0.4.8] - 2026-09-21
 
 ### Added

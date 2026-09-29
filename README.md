@@ -4,6 +4,10 @@
 
 A 2D, syntax-highlighted minimap grid of your entire workspace. See every file at once, search across all of them, and jump to any line in one click.
 
+Every file keeps its place in the grid. Adding, ignoring, or editing files never moves the others, so you learn where things are the way you learn a room.
+
+![Thumbview: searching every file at once, magnifying code with Ctrl, and a hidden file leaving its slot empty until a new file fills it](media/screenshots/thumbview.gif)
+
 ## Setup
 
 1. Install the extension and open a workspace folder.
@@ -14,12 +18,19 @@ Change settings via **File > Preferences > Settings > Thumbview** (see [Settings
 
 ## Core workflow
 
+![The grid: open files are outlined, the active file shows its visible range, and tiles show git changes and error counts](media/screenshots/overview.png)
+
 - **Open the grid.** Press `F4` to open or refocus the tab.
+- **Which files appear.** Every text file your project considers source: files not ignored by your `.gitignore` rules (all levels, read through git) or VS Code's `files.exclude` and `search.exclude`. `.git`, `node_modules`, and binary files are always skipped. Hide anything else from the Folders & Ignored menu.
 - **Jump to a line.** Click any line on a tile to open the file at that position.
 - **Visual recognition.** Tiles display syntax-highlighted minimaps. A colored strip at the top shows the file path.
 - **Magnify.** Hold `Left CTRL` and hover over a tile to preview readable code lines without opening the file.
 - **Search across all files.** Type in the top search bar to highlight matches across all tiles. Clear the box or press `×` to reset. Use `Alt+C`, `Alt+W`, or `Alt+X` to toggle match case, whole word, or regex.
 - **Close open editors.** Middle-click a tile or click its `×` icon.
+
+![Search highlights every matching file and line](media/screenshots/search.png)
+
+![Hold Left Ctrl over a tile to read its code without opening it](media/screenshots/magnifier.png)
 
 ## Reading the grid
 
@@ -29,6 +40,8 @@ Change settings via **File > Preferences > Settings > Thumbview** (see [Settings
 - **Resize stability and reflow.** Resizing the window or sidebar scales tiles without reflowing files across columns. To pack empty spaces and remove gaps after moving files, run `Thumbview: Reflow Layout` or click **Reflow Grid** in settings.
 
 ## Ignoring and unignoring files
+
+![Folders & Ignored lists every folder and the patterns hiding files](media/screenshots/folders.png)
 
 Hide build output, vendor directories, and generated files to keep the grid clear:
 
@@ -50,7 +63,7 @@ Hide build output, vendor directories, and generated files to keep the grid clea
 
 | Action | Shortcut |
 | :--- | :--- |
-| **Open / Focus Thumbview** | `F4` |
+| **Open / Focus Thumbview** | `F4` (except while the Search view has focus or a references peek is open, where F4 keeps its VS Code meaning) |
 | **Code Magnifier** | Hold `Left CTRL` + Hover |
 | **Jump to Line** | Left-click a line on a tile |
 | **Drag to Reorder** | Click & drag tile to slot |
@@ -58,8 +71,34 @@ Hide build output, vendor directories, and generated files to keep the grid clea
 | **Isolate Folder** | Left-click folder or tile header strip |
 | **Context Menu** | Right-click a tile |
 | **Navigate History** | Mouse Button 3 (Back) / 4 (Forward) |
+| **Move between tiles (keyboard)** | Arrow keys; `Home` / `End` for first / last |
+| **Open focused tile** | `Enter` or `Space` (opens the file, or drills into a folder card) |
+| **Context menu (keyboard)** | `Shift+F10` or the Menu key |
+| **Move focused tile (keyboard)** | `Alt+Arrow` |
+| **Magnify focused tile (keyboard)** | Hold `Ctrl` |
 
 Shortcuts and layout toggles are also accessible from the settings modal in the top-right corner.
+
+## Accessibility
+
+- **Keyboard.** Every tile and folder card can be reached with the arrow keys and opened with `Enter` or `Space`. The context menu, drag reordering, and the magnifier all have keyboard equivalents (see the table above). Typing anything else goes to search.
+- **Screen readers.** The focused tile (path, git status, error count), search result counts, and folder changes are announced. The toolbar, settings, and folder popovers are labelled dialogs that move and restore focus.
+- **Not color alone.** Tiles show git status and error counts as text, for example `2, M` for two errors in a modified file.
+- **Themes and motion.** Colors follow your VS Code theme, including high contrast themes. Smooth scrolling on jump follows `workbench.reduceMotion` and your operating system's reduced motion setting.
+
+## What Thumbview changes in VS Code
+
+- **Fullscreen.** Opening Thumbview enters Zen mode and restores your layout when it closes. The first time, a banner explains this and offers **Open as a tab instead**; you can change it later with **Open Fullscreen** in Settings. See `thumbview.fullscreenOnOpen` below for the Zen settings it adjusts.
+- **`F4`.** Opens Thumbview, except while the Search view has focus or a references peek is open.
+- **Storage.** Layout order, ignore patterns, and folder positions are stored in VS Code's per-workspace extension storage, not in your repository. Options you change in Thumbview's settings panel are saved to your user settings. (Upgrading from a version before 0.2.8 moves its old `thumbview.ignorePatterns` and `thumbview.autoIgnoreExclusions` entries out of `.vscode/settings.json` once.)
+- **Privacy.** Thumbview makes no network requests and collects no telemetry. In Restricted Mode it does not run git.
+- **Deletes.** Deleting from Thumbview moves files to the trash. Permanent deletion needs a second confirmation.
+
+## Limits
+
+- Up to 10,000 files are shown. Folders with more than `thumbview.autoIgnoreThreshold` files are hidden automatically first. Files already on the grid are always kept when the limit is reached.
+- Files larger than 2 MB and binary files are skipped. Very long files are sampled to 2,000 evenly spaced lines for their tile.
+- In virtual and remote file systems without git, `.gitignore` rules and git status markers are unavailable; `files.exclude` and `search.exclude` still apply.
 
 ## Settings reference
 
@@ -72,4 +111,8 @@ Shortcuts and layout toggles are also accessible from the settings modal in the 
 | `thumbview.compressionPercentage` | `5` | Compression threshold: when code shrinks to this percentage of its height in a cell, the tile expands one cell taller (0% disables, 1% to 20% recommended, max 25%). |
 | `thumbview.minCellWidth` | `60` | Minimum tile width (px) before files group into folder cards. |
 | `thumbview.minCellHeight` | `40` | Minimum tile height (px) before files group into folder cards. |
+| `thumbview.fullscreenOnOpen` | `true` | Open Thumbview fullscreen (Zen mode, other editor groups hidden). The first time you open Thumbview in a session it adjusts a few `zenMode.*` settings (no OS fullscreen, no centered layout, no tabs) and restores your values when VS Code closes. Other editor groups are hidden by maximizing Thumbview's group, not through a setting. Until then, Zen mode you enter yourself uses those adjusted settings, and `zenMode.*` changes you make during that session are replaced by your original values. Set to `false` to open Thumbview as a normal editor tab and leave Zen settings untouched. |
 
+## Feedback
+
+Questions, ideas, and bug reports are welcome in the **Q&A** tab of Thumbview's Marketplace page.

@@ -20,11 +20,27 @@ A VS Code extension that visualizes your workspace files as a stable, syntax-hig
 Prerequisites: Node.js and npm.
 
 ```bash
-npm install        # install dependencies
-npm run compile     # one-off TypeScript build -> out/
-npm run watch       # incremental build, rebuilds on save
-npm run lint        # eslint over src/
+npm install          # install dependencies
+npm run compile      # regenerate the webview's shared layout block, type-check to out/, bundle to dist/
+npm run watch        # esbuild bundle + tsc in watch mode (used by F5); also re-syncs the webview's layout_core block
+npm run lint         # eslint over src/
+npm run test:unit    # compile, then run the node-based unit tests
+npm run sync-core    # copy src/layout_core.ts into media/overview.js after editing it
+npm run check-core   # fail if media/overview.js is out of date with src/layout_core.ts
+npm run package      # build a .vsix with vsce (README images point at the public thumbview-assets repo)
+npm run publish:marketplace   # publish to the Marketplace with the same image base URL
+npm run publish-assets       # copy media/screenshots/ into ../thumbview-assets and push it
+npm run screenshots  # regenerate the README images in media/screenshots/ (needs Chrome, python3, ffmpeg)
+npm run test:a11y    # axe-core accessibility audit of the webview in headless Chrome
+npm test             # integration tests in a downloaded VS Code (src/test/integration; Linux CI uses xvfb-run)
+npm run benchmark    # webview timings at 1k/5k/10k synthetic files (see DESIGN.md "Scale benchmark")
+python3 scripts/generate-demo-workspace.py   # (re)create demo-workspace/ for manual testing
 ```
+
+### How the build fits together
+
+- **Extension host.** `scripts/build.mjs` bundles `src/extension.ts` and its imports into `dist/extension.js` with esbuild. That bundle is what `package.json` `main` loads and the only host code that ships. `tsc` still compiles `src/` to `out/` for type checking and because several unit tests load `out/*.js`.
+- **Webview.** `media/overview.js` is loaded as a plain script, not bundled. The layout functions it shares with the host (`buildStableGrid`, `cellsNeeded`, `fillLayoutHoles`, and the spanning drag reorders) live once in `src/layout_core.ts` and are generated into a marked block at the top of `overview.js` by `npm run sync-core` (also run by `npm run compile`). Never edit that block by hand; CI fails if it is stale.
 
 ### Run it inside VS Code (recommended while developing)
 
@@ -36,12 +52,17 @@ npm run lint        # eslint over src/
 ### Package and install a `.vsix` locally
 
 ```bash
-npm install -g @vscode/vsce   # one-time, if you don't have vsce
-vsce package                   # produces thumbview-<version>.vsix
+npm run package                                    # produces thumbview-<version>.vsix
 code --install-extension thumbview-<version>.vsix
 ```
 
+The package contains only `dist/extension.js`, the runtime files in `media/`, and the README, CHANGELOG, and LICENSE (see `.vscodeignore`).
+
 ### Notes
 
-- There is no test suite yet — `npm test` runs `@vscode/test-cli`, but no test files currently exist under this project.
-- `node_modules/`, `out/`, and `*.vsix` are gitignored build artifacts; `npm install` and `npm run compile` regenerate them.
+- The unit tests live in `src/test/` and run under plain Node (`npm run test:unit`). Webview tests load `media/overview.js` against mock DOM objects (`src/test/helpers/overview_harness.js`); host modules are loaded from `out/` or transpiled in memory (`src/test/helpers/load_ts.js`). `bundle_smoke.test.js` loads the shipped `dist/extension.js` itself.
+- GitHub Actions (`.github/workflows/ci.yml`) runs `check-core`, lint, the unit tests, the accessibility audit, the integration tests, the benchmark, and `vsce package` on Linux for every push, and the unit tests on Windows and macOS for pull requests and `main` (those runners cost more minutes on a private repository).
+- `media/generate_icons.py` renders the icons from SVG and needs `cairosvg`: `python3 -m venv venv && venv/bin/pip install cairosvg && venv/bin/python media/generate_icons.py`.
+- `.gitattributes` forces LF line endings (tests slice `media/overview.js` with `\n`-anchored patterns, which would break on a Windows CRLF checkout).
+- `demo-workspace/` is gitignored; `scripts/generate-demo-workspace.py` is the tracked source of its content and also feeds the headless scripts and integration tests.
+- `node_modules/`, `out/`, `dist/`, and `*.vsix` are gitignored build artifacts; `npm install` and `npm run compile` regenerate them.
