@@ -6,12 +6,13 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { listWorkspaceFiles, looksBinary } from "./file_discovery";
+import { categorizeLine, type LineCategory } from "./layout_core";
 
 export interface MiniLine {
     text: string;
     indent: number;
     length: number;
-    category: "comment" | "import" | "function" | "class" | "control-flow" | "normal";
+    category: LineCategory;
 }
 
 export interface RepoFile {
@@ -31,71 +32,6 @@ export interface RepoFile {
     errorLines?: { [lineIndex0: number]: string | boolean };
 }
 
-// Coarse per-line category guess from leading/contained keywords, not a real parser.
-// NOTE: media/overview.js does its own independent full tokenization from raw text and
-// does not appear to read this field — confirm it's actually unused before extending it.
-function categorizeLine(line: string): MiniLine["category"] {
-    const trimmed = line.trim();
-    if (!trimmed) {
-        return "normal";
-    }
-
-    if (
-        trimmed.startsWith("//") ||
-        trimmed.startsWith("#") ||
-        trimmed.startsWith("*") ||
-        trimmed.startsWith("/*") ||
-        trimmed.startsWith("'''") ||
-        trimmed.startsWith("\"\"\"")
-    ) {
-        return "comment";
-    }
-
-    if (
-        trimmed.startsWith("import ") ||
-        trimmed.startsWith("export ") ||
-        trimmed.startsWith("from ") ||
-        trimmed.startsWith("using ") ||
-        trimmed.includes("require(")
-    ) {
-        return "import";
-    }
-
-    if (
-        trimmed.startsWith("class ") ||
-        trimmed.startsWith("interface ") ||
-        trimmed.startsWith("struct ") ||
-        trimmed.startsWith("impl ") ||
-        trimmed.startsWith("type ")
-    ) {
-        return "class";
-    }
-
-    if (
-        trimmed.startsWith("function ") ||
-        trimmed.startsWith("def ") ||
-        trimmed.startsWith("fn ") ||
-        trimmed.startsWith("func ")
-    ) {
-        return "function";
-    }
-
-    if (
-        trimmed.includes("if ") ||
-        trimmed.includes("for ") ||
-        trimmed.includes("while ") ||
-        trimmed.includes("return") ||
-        trimmed.includes("switch") ||
-        trimmed.includes("else") ||
-        trimmed.includes("elif") ||
-        trimmed.includes("catch") ||
-        trimmed.includes("try")
-    ) {
-        return "control-flow";
-    }
-
-    return "normal";
-}
 
 function matchSingleRule(pathStr: string, rule: string): boolean {
     const ruleStr = rule.replace(/\\/g, "/");

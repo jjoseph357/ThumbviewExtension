@@ -8,8 +8,8 @@
 // src/layout_core.ts; tokenizeJS/tokenizeCSS/tokenizeHTML are webview-only.
 
 // ---- BEGIN GENERATED from src/layout_core.ts by `npm run sync-core`. Do not edit here. ----
-// Single source of the pure layout functions shared by the extension host and the webview:
-// grid slot packing, spanning cell counts, hole filling, and spanning drag reorders.
+// Single source of the pure functions shared by the extension host and the webview: grid slot
+// packing, spanning cell counts, hole filling, spanning drag reorders, and line classification.
 // The host imports this module; `npm run sync-core` transpiles it into the generated block of
 // media/overview.js (the webview is unbundled), and `npm run check-core` fails if that block is
 // stale. Keep it dependency-free: no imports, no vscode, no DOM.
@@ -406,6 +406,56 @@ function reorderSpanningItems(activeIds, currentOrder, allocations, sourceId, ta
         targetPlacement,
         safeSourceRow
     };
+}
+/**
+ * Coarse per-line category from leading or contained keywords, not a real parser. Colors the
+ * line bars of folder card previews; the host sends only line text, so the webview derives it.
+ */
+function categorizeLine(line) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+        return "normal";
+    }
+    if (trimmed.startsWith("//") ||
+        trimmed.startsWith("#") ||
+        trimmed.startsWith("*") ||
+        trimmed.startsWith("/*") ||
+        trimmed.startsWith("'''") ||
+        trimmed.startsWith("\"\"\"")) {
+        return "comment";
+    }
+    if (trimmed.startsWith("import ") ||
+        trimmed.startsWith("export ") ||
+        trimmed.startsWith("from ") ||
+        trimmed.startsWith("using ") ||
+        trimmed.includes("require(")) {
+        return "import";
+    }
+    if (trimmed.startsWith("class ") ||
+        trimmed.startsWith("interface ") ||
+        trimmed.startsWith("struct ") ||
+        trimmed.startsWith("impl ") ||
+        trimmed.startsWith("type ")) {
+        return "class";
+    }
+    if (trimmed.startsWith("function ") ||
+        trimmed.startsWith("def ") ||
+        trimmed.startsWith("fn ") ||
+        trimmed.startsWith("func ")) {
+        return "function";
+    }
+    if (trimmed.includes("if ") ||
+        trimmed.includes("for ") ||
+        trimmed.includes("while ") ||
+        trimmed.includes("return") ||
+        trimmed.includes("switch") ||
+        trimmed.includes("else") ||
+        trimmed.includes("elif") ||
+        trimmed.includes("catch") ||
+        trimmed.includes("try")) {
+        return "control-flow";
+    }
+    return "normal";
 }
 // ---- END GENERATED from src/layout_core.ts ----
 
@@ -1298,10 +1348,38 @@ let panelHiddenByHost = false;
 /** True while a transition hides a previously shown page, or the panel is backgrounded: renders and stretches would overwrite the frame the fast reopen path wants to show again. */
 function isFrameFrozen() {
     if (lastRevealedW <= 0) return false;
-    return (revealPending && revealBlockedByTransition) || panelHiddenByHost;
+    return (revealPending && revealBlockedByTransition) || panelHiddenByHost || switchingAway;
+}
+
+// Set when a click opens a file ("jump"/"switchTab"): Thumbview is about to be covered while VS
+// Code rebuilds its layout on the same thread, so repaints of the whole grid (from openState
+// updates or the resize) would only slow that down. Cleared once the host reports the panel
+// hidden, when it is shown again, on any input, or after SWITCH_FREEZE_MAX_MS if the open failed
+// and Thumbview stayed on screen.
+const SWITCH_FREEZE_MAX_MS = 2000;
+let switchingAway = false;
+let switchFreezeTimer = null;
+
+function endSwitchFreeze() {
+    if (switchFreezeTimer) {
+        clearTimeout(switchFreezeTimer);
+        switchFreezeTimer = null;
+    }
+    if (!switchingAway) return;
+    switchingAway = false;
+    if (!panelHiddenByHost) scheduleRender();
+}
+
+/** Posts a message that opens a file over Thumbview (extension.ts "jump" / "switchTab"), freezing drawing first. */
+function postSwitchAway(msg) {
+    switchingAway = true;
+    if (switchFreezeTimer) clearTimeout(switchFreezeTimer);
+    switchFreezeTimer = setTimeout(endSwitchFreeze, SWITCH_FREEZE_MAX_MS);
+    vscode.postMessage(msg);
 }
 
 function markPanelShown() {
+    endSwitchFreeze();
     if (!panelHiddenByHost) return;
     panelHiddenByHost = false;
     scheduleRender();
@@ -1392,6 +1470,10 @@ document.addEventListener("visibilitychange", () => {
 // User input reveals a pending page, except mid-transition: spamming the open key (F4) sends
 // keydowns to the focused webview while Zen mode is still expanding.
 window.addEventListener("pointerdown", revealOnUserInput, true);
+// Input means Thumbview is still in front (e.g. the open failed), so it must draw again. Capture
+// phase: runs before the handler that may post the next jump and set the freeze again.
+window.addEventListener("keydown", endSwitchFreeze, true);
+window.addEventListener("pointerdown", endSwitchFreeze, true);
 window.addEventListener("keydown", revealOnUserInput, true);
 window.addEventListener("pointerdown", ensureVisibleOpacity, true);
 window.addEventListener("keydown", ensureVisibleOpacity, true);
@@ -1435,6 +1517,22 @@ function groupMosaicSignature(group) {
         data.slotFlowCells && data.slotFlowCells[`folder:${p}`]
     ]) : "";
     return hashString(members) + hashString(scopeState);
+}
+
+/**
+ * Fills a line's indent, trimmed length, and category (categorizeLine, shared core) from its text
+ * on first use. The host sends only line text (withDeltaLines), so these are derived here, once
+ * per line and only for lines that are drawn. Tiles use the indent; folder card previews draw each
+ * line as a bar from all three.
+ */
+function lineShape(line) {
+    if (line.length === undefined) {
+        const text = line.text || "";
+        line.indent = text.length - text.trimStart().length;
+        line.length = text.trimEnd().length;
+        line.category = categorizeLine(text);
+    }
+    return line;
 }
 
 /** A line's lowercase text for search matching, computed on first use and kept on the line. */
@@ -1581,6 +1679,7 @@ function applyDataMessage(msg) {
             kbdLabel2.textContent = msg.openKeybinding;
         }
     }
+    syncShortcutLegend();
     if (actionsModal && actionsModal.style.display === "block") {
         updateSettingsModalState();
     }
@@ -1639,6 +1738,8 @@ window.addEventListener("message", event => {
         // Host signal (onDidChangeViewState): the panel was backgrounded. Retained webviews may be
         // hidden without document.visibilityState changing, so the fast reopen path relies on this.
         panelHiddenByHost = true;
+        // The hidden-panel freeze takes over from the click's switch freeze.
+        endSwitchFreeze();
         // The one-time banner does not come back with the retained page.
         hideFullscreenNotice();
         if (revealPending) hiddenSinceArm = true;
@@ -2758,7 +2859,7 @@ function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, use
             continue;
         }
 
-        const indent = line.indent || 0;
+        const indent = lineShape(line).indent || 0;
         const startX = originX + Math.min(indent / maxLineChars, THUMBNAIL_INDENT_MAX_RATIO) * w;
         const trimmedText = lineText.trimStart();
         const lineTextLength = trimmedText.length;
@@ -3691,7 +3792,7 @@ function renderScene() {
                                 if (pf.lines && pf.lines.length > 0 && miniFileH >= 10 && miniCellW >= 8) {
                                     const maxLines = Math.min(pf.lines.length, Math.floor((miniFileH - 4) / 2));
                                     for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
-                                        const line = pf.lines[lineIdx];
+                                        const line = lineShape(pf.lines[lineIdx]);
                                         const lineY = miniY + 3 + lineIdx * 2;
                                         const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
                                         const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
@@ -3790,7 +3891,7 @@ function renderScene() {
                                 if (pf.lines && pf.lines.length > 0 && miniCellH >= 10 && miniCellW >= 8) {
                                     const maxLines = Math.min(pf.lines.length, Math.floor((miniCellH - 4) / 2));
                                     for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
-                                        const line = pf.lines[lineIdx];
+                                        const line = lineShape(pf.lines[lineIdx]);
                                         const lineY = miniY + 3 + lineIdx * 2;
                                         const lineWidth = Math.max(2, Math.min(miniCellW - 4, (line.length || 20) * (miniCellW / 80)));
                                         const lineIndent = Math.min(4, (line.indent || 0) * 1.2);
@@ -4838,7 +4939,7 @@ function activateKeyboardTarget(t) {
         if (first) focusKeyboardTarget(first, false);
         return;
     }
-    vscode.postMessage({
+    postSwitchAway({
         command: "jump",
         uri: t.file.uri,
         line: 0,
@@ -5560,7 +5661,7 @@ canvas.addEventListener("mouseup", event => {
 
         // Check if user clicked inside the transparent gray view band -> switch directly to existing tab
         if (c._viewBand && cursorPos.py >= c._viewBand.y && cursorPos.py <= c._viewBand.y + c._viewBand.h) {
-            vscode.postMessage({
+            postSwitchAway({
                 command: "switchTab",
                 uri: file.uri
             });
@@ -5569,7 +5670,7 @@ canvas.addEventListener("mouseup", event => {
 
         // Clicked inside media card body -> switch/open tab without line jump
         if (file.isImage || file.isPdf) {
-            vscode.postMessage({
+            postSwitchAway({
                 command: "switchTab",
                 uri: file.uri
             });
@@ -5598,7 +5699,7 @@ canvas.addEventListener("mouseup", event => {
         // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
         // above so extension.ts's "jump" handler can flash the same lines this webview
         // considers matches — see its handler for the mirrored pattern-building logic.
-        vscode.postMessage({
+        postSwitchAway({
             command: "jump",
             uri: file.uri,
             line,
@@ -5720,7 +5821,7 @@ canvas.addEventListener("contextmenu", event => {
 
         document.getElementById("menu-open").onclick = () => {
             hideContextMenu();
-            vscode.postMessage({ command: "jump", uri: targetFile.uri, line: 0 });
+            postSwitchAway({ command: "jump", uri: targetFile.uri, line: 0 });
         };
         document.getElementById("menu-open-side").onclick = () => {
             hideContextMenu();
@@ -6506,6 +6607,28 @@ if (dragSwapBtn) {
 if (dragShiftBtn) {
     dragShiftBtn.onclick = () => {
         vscode.postMessage({ command: "setDragReorderMode", mode: "shift" });
+    };
+}
+
+// The in-grid legend of non-obvious keys (extension.ts showShortcutLegend), until dismissed.
+const shortcutLegend = document.getElementById("shortcut-legend");
+let shortcutLegendDismissed = false;
+
+function syncShortcutLegend() {
+    if (!shortcutLegend || !data) return;
+    const keyEl = document.getElementById("shortcut-legend-key");
+    if (keyEl && data.openKeybinding) keyEl.textContent = data.openKeybinding;
+    shortcutLegend.hidden = shortcutLegendDismissed || data.showShortcutLegend !== true;
+}
+
+const shortcutLegendClose = document.getElementById("shortcut-legend-close");
+if (shortcutLegendClose) {
+    shortcutLegendClose.onclick = () => {
+        shortcutLegendDismissed = true;
+        if (shortcutLegend) shortcutLegend.hidden = true;
+        // extension.ts "dismissShortcutLegend" (no fields): remembered across sessions.
+        vscode.postMessage({ command: "dismissShortcutLegend" });
+        canvas.focus();
     };
 }
 

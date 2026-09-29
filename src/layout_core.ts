@@ -1,5 +1,5 @@
-// Single source of the pure layout functions shared by the extension host and the webview:
-// grid slot packing, spanning cell counts, hole filling, and spanning drag reorders.
+// Single source of the pure functions shared by the extension host and the webview: grid slot
+// packing, spanning cell counts, hole filling, spanning drag reorders, and line classification.
 // The host imports this module; `npm run sync-core` transpiles it into the generated block of
 // media/overview.js (the webview is unbundled), and `npm run check-core` fails if that block is
 // stale. Keep it dependency-free: no imports, no vscode, no DOM.
@@ -485,4 +485,73 @@ export function reorderSpanningItems(
         targetPlacement,
         safeSourceRow
     };
+}
+
+export type LineCategory = "comment" | "import" | "function" | "class" | "control-flow" | "normal";
+
+/**
+ * Coarse per-line category from leading or contained keywords, not a real parser. Colors the
+ * line bars of folder card previews; the host sends only line text, so the webview derives it.
+ */
+export function categorizeLine(line: string): LineCategory {
+    const trimmed = line.trim();
+    if (!trimmed) {
+        return "normal";
+    }
+
+    if (
+        trimmed.startsWith("//") ||
+        trimmed.startsWith("#") ||
+        trimmed.startsWith("*") ||
+        trimmed.startsWith("/*") ||
+        trimmed.startsWith("'''") ||
+        trimmed.startsWith("\"\"\"")
+    ) {
+        return "comment";
+    }
+
+    if (
+        trimmed.startsWith("import ") ||
+        trimmed.startsWith("export ") ||
+        trimmed.startsWith("from ") ||
+        trimmed.startsWith("using ") ||
+        trimmed.includes("require(")
+    ) {
+        return "import";
+    }
+
+    if (
+        trimmed.startsWith("class ") ||
+        trimmed.startsWith("interface ") ||
+        trimmed.startsWith("struct ") ||
+        trimmed.startsWith("impl ") ||
+        trimmed.startsWith("type ")
+    ) {
+        return "class";
+    }
+
+    if (
+        trimmed.startsWith("function ") ||
+        trimmed.startsWith("def ") ||
+        trimmed.startsWith("fn ") ||
+        trimmed.startsWith("func ")
+    ) {
+        return "function";
+    }
+
+    if (
+        trimmed.includes("if ") ||
+        trimmed.includes("for ") ||
+        trimmed.includes("while ") ||
+        trimmed.includes("return") ||
+        trimmed.includes("switch") ||
+        trimmed.includes("else") ||
+        trimmed.includes("elif") ||
+        trimmed.includes("catch") ||
+        trimmed.includes("try")
+    ) {
+        return "control-flow";
+    }
+
+    return "normal";
 }

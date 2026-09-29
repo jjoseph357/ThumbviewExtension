@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache, invalidateScanFile, setScanPriorityProvider } from "./scanner";
 import { isAlwaysExcluded } from "./file_discovery";
 import { isSafeWebviewMessage } from "./message_guard";
+import { isThumbviewViewType, THUMBVIEW_VIEW_TYPE } from "./webview_tabs";
+import { decideF4, EditorGroupTracker, type EditorInfo, type GroupInfo, type TabInfo } from "./editor_groups";
 import { buildStableGrid, slotToIndex, findSlotIndex, MIN_GRID_COLS, MIN_GRID_ROWS } from "./layout";
 import { buildSpanningGrid, cellsNeeded, SpanningPlacement, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
@@ -23,7 +25,19 @@ import { clampTargetToGridCapacity, reorderFolderItems, reorderCardItems, reorde
 import * as fs from "fs";
 import * as path from "path";
 
+/** performance.now() marks for one file opened from Thumbview, logged by switchLeavingFullscreen. */
+interface SwitchTiming {
+    label: string;
+    receivedAt: number;
+    lockedAt: number;
+    loadedAt?: number;
+}
+
 export async function activate(context: vscode.ExtensionContext) {
+    // Diagnostics for users and bug reports (View > Output > Thumbview), e.g. where the time goes
+    // when a file is opened from Thumbview.
+    const log = vscode.window.createOutputChannel("Thumbview", { log: true });
+    context.subscriptions.push(log);
     console.log("THUMBVIEW EXTENSION ACTIVATED");
 
     // --- Helpers: read/write ignore state from workspaceState (never touches .vscode/settings.json) ---
@@ -210,6 +224,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const sendOpenState = () => {
         updateVisibleRanges();
+        if (openStateHeldForSwitch) {
+            // A file is opening over Thumbview; the reopen path sends the latest state.
+            return;
+        }
         if (activePanel) {
             const activeUri = lastActiveTextEditor?.document.uri.toString() || null;
             activePanel.webview.postMessage({
@@ -520,7 +538,27 @@ export async function activate(context: vscode.ExtensionContext) {
     const updateLayoutFromCache = (panel: vscode.WebviewPanel, forceBreakBeforeId?: string): Promise<void> =>
         withOrderLock(() => updateLayoutFromCacheLocked(panel, forceBreakBeforeId));
 
+    // Times building and delivering each data payload (View > Output > Thumbview): the host half of
+    // first-open time, which the webview benchmark cannot see. The first payload per panel is
+    // logged at info level, later ones at debug.
+    const dataPostsByPanel = new WeakMap<vscode.WebviewPanel, number>();
+    let layoutStartedAt = 0;
+    const postData = (panel: vscode.WebviewPanel, message: { files: unknown[] }) => {
+        const builtAt = performance.now();
+        const count = (dataPostsByPanel.get(panel) ?? 0) + 1;
+        dataPostsByPanel.set(panel, count);
+        panel.webview.postMessage(message).then(() => {
+            const line = `Data payload ${count} (${message.files.length} files): built in ${Math.round(builtAt - layoutStartedAt)} ms, delivered in ${Math.round(performance.now() - builtAt)} ms`;
+            if (count === 1) {
+                log.info(line);
+            } else {
+                log.debug(line);
+            }
+        }, () => { });
+    };
+
     const updateLayoutFromCacheLocked = async (panel: vscode.WebviewPanel, forceBreakBeforeId?: string) => {
+        layoutStartedAt = performance.now();
         if (!cachedScannedFiles) {
             await refreshThumbview(panel);
             return;
@@ -645,7 +683,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     slots: p.slots
                 })));
 
-                panel.webview.postMessage({
+                postData(panel, {
                     command: "data",
                     mode: "spanning_grid",
                     // naturalCells (including ignored/deleted ids) and per-scope slotFootprints let
@@ -657,6 +695,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     dragReorderMode,
                     renderMediaThumbnails,
                     fullscreenOnOpen: isFullscreenOnOpen(),
+                    // In-grid legend of the non-obvious keys, until dismissed ("dismissShortcutLegend").
+                    showShortcutLegend: !context.globalState.get<boolean>(SHORTCUT_LEGEND_DISMISSED_KEY),
                     compressionPercentage,
                     autoIgnoreThreshold,
                     minCellWidth,
@@ -710,12 +750,14 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                 }
 
-                panel.webview.postMessage({
+                postData(panel, {
                     command: "data",
                     mode: "uniform_grid",
                     dragReorderMode,
                     renderMediaThumbnails,
                     fullscreenOnOpen: isFullscreenOnOpen(),
+                    // In-grid legend of the non-obvious keys, until dismissed ("dismissShortcutLegend").
+                    showShortcutLegend: !context.globalState.get<boolean>(SHORTCUT_LEGEND_DISMISSED_KEY),
                     compressionPercentage,
                     autoIgnoreThreshold,
                     minCellWidth,
@@ -942,7 +984,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Background pre-scan and git diff fetch so opening Thumbview is instant O(1).
     // The promise is kept so a "ready" that arrives mid-scan awaits it instead of starting a second full scan.
+    const prescanStartedAt = performance.now();
     let prescanPromise: Promise<void> | undefined = scanRepository(getIgnoreState(), persistIgnoreState).then(files => {
+        log.info(`Initial workspace scan: ${files.length} files in ${Math.round(performance.now() - prescanStartedAt)} ms.`);
         if (!cachedScannedFiles) {
             cachedScannedFiles = files;
             lastRawScan = files;
@@ -978,6 +1022,8 @@ export async function activate(context: vscode.ExtensionContext) {
     // "fullscreenNotice" { keybinding } and "fullscreenSetting" { enabled }; webview -> host
     // "dismissFullscreenNotice" or "setFullscreenOnOpen" { enabled }.
     const FULLSCREEN_NOTICE_KEY = "thumbview.fullscreenNoticeShown";
+    const SHORTCUT_LEGEND_DISMISSED_KEY = "thumbview.shortcutLegendDismissed";
+    let openStateHeldForSwitch = false;
     const maybeShowFullscreenNotice = (panel: vscode.WebviewPanel) => {
         if (fullscreenActive && !context.globalState.get<boolean>(FULLSCREEN_NOTICE_KEY)) {
             context.globalState.update(FULLSCREEN_NOTICE_KEY, true);
@@ -1013,13 +1059,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const isThumbviewTab = (tab: vscode.Tab): boolean => {
         const input: any = tab.input;
-        if (input instanceof vscode.TabInputWebview) {
-            return input.viewType === "thumbview";
-        }
-        if (input && typeof input.viewType === "string" && input.viewType === "thumbview") {
-            return true;
-        }
-        return tab.label === "Thumbview";
+        return isThumbviewViewType(input?.viewType);
     };
 
     const getTabUri = (tab: vscode.Tab): vscode.Uri | undefined => {
@@ -1073,6 +1113,34 @@ export async function activate(context: vscode.ExtensionContext) {
         return false;
     };
 
+    // Split-editor bookkeeping (return point, covered editor, bounded opens) lives in
+    // editor_groups.ts over this facade, so its decisions are unit tested.
+    const tabInfo = (tab: vscode.Tab): TabInfo => ({ uri: getTabUri(tab)?.toString(), isThumbview: isThumbviewTab(tab), label: tab.label });
+    const editorGroups = new EditorGroupTracker({
+        groups: (): GroupInfo[] => vscode.window.tabGroups.all.map(group => ({
+            viewColumn: group.viewColumn,
+            isActive: group.isActive,
+            activeTab: group.activeTab ? tabInfo(group.activeTab) : undefined,
+            tabs: group.tabs.map(tabInfo)
+        })),
+        // No `preview` option: re-showing an existing preview tab must not pin it.
+        open: async (uriString, viewColumn, preserveFocus) => {
+            const uri = vscode.Uri.parse(uriString);
+            const column = viewColumn === "active" ? vscode.ViewColumn.Active : viewColumn;
+            try {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                await vscode.window.showTextDocument(doc, { viewColumn: column, preserveFocus });
+            } catch {
+                await vscode.commands.executeCommand("vscode.open", uri, { viewColumn: column, preserveFocus });
+            }
+        },
+        log: line => log.info(line)
+    });
+    const editorInfo = (editor: vscode.TextEditor | undefined): EditorInfo | undefined =>
+        editor && !editor.document.isClosed && editor.document.uri.scheme !== "vscode-webview"
+            ? { uri: editor.document.uri.toString(), viewColumn: editor.viewColumn }
+            : undefined;
+
     const getAllNonThumbviewTabs = (): { preferred: vscode.Tab | undefined; tabs: vscode.Tab[] } => {
         const tabs: vscode.Tab[] = [];
         let preferred: vscode.Tab | undefined;
@@ -1123,6 +1191,28 @@ export async function activate(context: vscode.ExtensionContext) {
     // After jump/switchTab has shown the target editor over Thumbview: exit the Zen mode and group
     // maximize Thumbview entered. The editor opened in Thumbview's own group, so unmaximizing
     // restores the user's other groups around it.
+    // panel.active lags reveal(); waits for the view-state event (bounded) so a following
+    // group command applies to the group that now holds the panel.
+    const PANEL_ACTIVE_WAIT_MS = 300;
+    const REOPEN_ACTIVE_WAIT_MS = 150;
+    const waitForPanelActive = (panel: vscode.WebviewPanel, timeoutMs: number): Promise<void> => new Promise(resolve => {
+        if (panel.active) {
+            resolve();
+            return;
+        }
+        const done = () => {
+            clearTimeout(timer);
+            subscription.dispose();
+            resolve();
+        };
+        const timer = setTimeout(done, timeoutMs);
+        const subscription = panel.onDidChangeViewState(e => {
+            if (e.webviewPanel.active) {
+                done();
+            }
+        });
+    });
+
     const leaveFullscreenAfterSwitch = async (): Promise<void> => {
         if (thumbviewEnteredZenMode) {
             thumbviewEnteredZenMode = false;
@@ -1137,8 +1227,14 @@ export async function activate(context: vscode.ExtensionContext) {
     // document first, so the Zen exit, the unmaximize, and the show are sent back to back: the
     // file appears directly in the normal layout instead of first in Zen mode and then again when
     // the layout is restored. All three settle before returning, so a failed show never releases
-    // the layout lock while the layout is still changing.
-    const switchLeavingFullscreen = async <T>(show: () => Thenable<T>): Promise<T> => {
+    // the layout lock while the layout is still changing. While it runs, openState posts are held
+    // (the webview has stopped drawing and is about to be covered; reopening sends fresh state).
+    // `timing` (performance.now() marks from the caller) is logged to the Thumbview output channel.
+    const switchLeavingFullscreen = async <T>(show: () => Thenable<T>, timing?: SwitchTiming): Promise<T> => {
+        openStateHeldForSwitch = true;
+        // The user moves on to the opened file; an older return point must not be reused.
+        editorGroups.clearReturnPoint();
+        const showStart = performance.now();
         const exiting = thumbviewEnteredZenMode ? (thumbviewEnteredZenMode = false, exitFullscreen()) : Promise.resolve();
         const unmaximizing = groupMaximizedByUs ? unmaximizeIfSplits() : Promise.resolve();
         let shown: Thenable<T>;
@@ -1148,7 +1244,16 @@ export async function activate(context: vscode.ExtensionContext) {
             shown = Promise.reject(err);
         }
         const [, , result] = await Promise.allSettled([exiting, unmaximizing, shown]);
+        if (timing) {
+            const ms = (from: number, to: number) => Math.round(to - from);
+            log.info(`Opened ${timing.label} in ${ms(timing.receivedAt, performance.now())} ms `
+                + `(waiting for layout lock ${ms(timing.receivedAt, timing.lockedAt)} ms, loading ${ms(timing.lockedAt, timing.loadedAt ?? showStart)} ms, `
+                + `showing and restoring layout ${ms(showStart, performance.now())} ms)`);
+        }
         if (result.status === "rejected") {
+            // Thumbview is still in front, so its state must flow again.
+            openStateHeldForSwitch = false;
+            sendOpenState();
             throw result.reason;
         }
         return result.value;
@@ -1197,9 +1302,12 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             // Robust Tab Switcher:
-            // 1. Try lastActiveTextEditor if valid and not closed
-            let switched = false;
-            if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
+            // 0. Return to where the user was when F4 opened Thumbview (returnTo).
+            // 1. Otherwise try lastActiveTextEditor if valid and not closed
+            const returnResult = await editorGroups.returnToEditor();
+            // A timed-out return may still land, so no fallback open is started after it.
+            let switched = returnResult !== "failed";
+            if (!switched && lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
                 try {
                     await vscode.window.showTextDocument(lastActiveTextEditor.document, {
                         preview: false,
@@ -1240,7 +1348,11 @@ export async function activate(context: vscode.ExtensionContext) {
             // If VS Code's layout engine clobbered the focus and Thumbview is still active,
             // re-trigger the switch to the desired code tab.
             if (activePanel && activePanel.active) {
-                if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
+                if (returnResult === "opened") {
+                    await editorGroups.returnToEditor();
+                } else if (returnResult === "timeout") {
+                    // Still opening; a second open would bounce focus.
+                } else if (lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
                     try {
                         await vscode.window.showTextDocument(lastActiveTextEditor.document, { preview: false });
                     } catch { }
@@ -1249,6 +1361,15 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
                 await new Promise(r => setTimeout(r, 50));
             }
+
+            // Returned to code in another group: put back the editor Thumbview covered in its own
+            // group (focus stays on the code), so both groups look as they did before F4.
+            log.info(`Close: returned to code; panel ${activePanel?.active ? "focused" : activePanel?.visible ? "visible, not focused" : "hidden"}. ${editorGroups.describe()}`);
+            if (activePanel && activePanel.visible && !activePanel.active) {
+                await editorGroups.restoreCovered();
+            }
+            // Used; the next open records a fresh one.
+            editorGroups.clearReturnPoint();
 
             // Acknowledge and Reset Opacity:
             // If Thumbview is still visible (e.g. user stayed on Thumbview or switch failed),
@@ -1278,17 +1399,37 @@ export async function activate(context: vscode.ExtensionContext) {
                 lastActiveTextEditor = vscode.window.activeTextEditor;
             }
 
-            // panel.visible updates asynchronously after reveal(), so a coalesced replay right after
+            // panel.active updates asynchronously after reveal(), so a coalesced replay right after
             // our own open could misread it as closed; trust our last intent for a moment.
+            // F4 closes only a focused Thumbview. Visible but unfocused (beside the code in a split,
+            // or while the terminal has focus) means "open / focus", so it is brought forward.
             const recentlyOpened = lastToggleIntent === "open" && Date.now() - lastToggleAt < TOGGLE_INTENT_TRUST_MS;
-            if (activePanel && (activePanel.visible || recentlyOpened)) {
+            const action = decideF4({
+                panelExists: !!activePanel,
+                panelActive: !!activePanel?.active,
+                panelVisible: !!activePanel?.visible,
+                recentlyOpened,
+                fullscreenActive,
+                fullscreenOnOpen: isFullscreenOnOpen()
+            });
+            log.info(`F4: panel ${activePanel ? (activePanel.active ? "focused" : activePanel.visible ? "visible, not focused" : "hidden") : "not created"}, `
+                + `${vscode.window.tabGroups.all.length} editor group(s), fullscreen ${fullscreenActive ? "on" : "off"} -> ${action}`);
+            if (action === "close") {
                 lastToggleIntent = "close";
                 lastToggleAt = Date.now();
                 await closeActiveThumbview();
                 return;
             }
             lastToggleIntent = "open";
+            editorGroups.recordReturnPoint(editorInfo(vscode.window.activeTextEditor), vscode.window.tabGroups.activeTabGroup.viewColumn);
             lastToggleAt = Date.now();
+
+            if (action === "focus-in-place" && activePanel) {
+                activePanel.reveal(activePanel.viewColumn, false);
+                openStateHeldForSwitch = false;
+                sendOpenState();
+                return;
+            }
 
             // Sync unsaved buffers into the memory cache (saved files are rescanned by the watcher)
             for (const doc of vscode.workspace.textDocuments) {
@@ -1305,23 +1446,31 @@ export async function activate(context: vscode.ExtensionContext) {
                     thumbviewEnteredZenMode = true;
                     await enterFullscreen();
 
+                    // Reveal before maximizing. toggleMaximizeEditorGroup acts on the active group,
+                    // and right after a split that is the new group, not the one holding the
+                    // retained panel; revealing the panel in its hidden group afterwards made VS
+                    // Code undo the maximize, leaving Thumbview beside the code. The page stays
+                    // hidden (reopen transition) until endTransition below.
+                    updateVisibleRanges(vscode.window.activeTextEditor || lastActiveTextEditor);
+                    const editorsBeforeReveal = editorGroups.snapshot();
+                    activePanel.reveal(activePanel.visible ? activePanel.viewColumn : vscode.ViewColumn.Active);
                     if (isFullscreenOnOpen() && vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
+                        await waitForPanelActive(activePanel, PANEL_ACTIVE_WAIT_MS);
                         groupMaximizedByUs = true;
                         try {
                             await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
                         } catch { }
                     }
 
-                    // Settle delay for Zen mode window expansion:
-                    // Wait for the workbench layout to expand to fullscreen before revealing
-                    await new Promise(r => setTimeout(r, 70));
+                    // A signal instead of a fixed sleep: the panel's view-state event means it is shown
+                    // in its group (and panel.viewColumn is current). Showing the page is still gated
+                    // in the webview on a size that holds (checkRevealStable), so no settle sleep is needed.
+                    await waitForPanelActive(activePanel, REOPEN_ACTIVE_WAIT_MS);
+                    editorGroups.recordCovered(editorsBeforeReveal, activePanel.viewColumn);
 
-                    updateVisibleRanges(vscode.window.activeTextEditor || lastActiveTextEditor);
-                    activePanel.reveal(vscode.ViewColumn.Active);
+                    openStateHeldForSwitch = false;
                     sendOpenState();
 
-                    // Settle delay before revealing opacity: allow webview resize & render to paint at full size
-                    await new Promise(r => setTimeout(r, 40));
                     endTransition(activePanel, reopenTransitionId);
                     flushHiddenRefresh(activePanel);
                     maybeShowFullscreenNotice(activePanel);
@@ -1330,6 +1479,12 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
                 return;
             }
+
+            // A layout op like reopen, so onDidChangeViewState ignores the events our own Zen,
+            // maximize, and panel creation cause (with split editors it used to read them as the
+            // user dragging Thumbview into a split and closed the brand-new panel). Released at the
+            // end of this toggle.
+            layoutOpsInFlight++;
 
             // Enter fullscreen BEFORE creating the panel so Thumbview renders
             // directly at full size instead of snapping through layouts
@@ -1344,9 +1499,13 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             let panel: vscode.WebviewPanel;
+            const editorsBeforeCreate = editorGroups.snapshot();
+            // createWebviewPanel(ViewColumn.Active) lands in the active group; panel.viewColumn is
+            // not resolved until the first view-state event, so record by the group's column.
+            const createColumn = vscode.window.tabGroups.activeTabGroup.viewColumn;
             try {
                 panel = vscode.window.createWebviewPanel(
-                    "thumbview",
+                    THUMBVIEW_VIEW_TYPE,
                     "Thumbview",
                     vscode.ViewColumn.Active,
                     {
@@ -1360,11 +1519,16 @@ export async function activate(context: vscode.ExtensionContext) {
                 );
 
                 activePanel = panel;
+                openStateHeldForSwitch = false;
+                editorGroups.recordCovered(editorsBeforeCreate, createColumn);
 
                 const hasPdfs = (cachedScannedFiles || []).some(f => f.isPdf);
                 panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel(), hasPdfs);
             } catch (err) {
-                console.error("Failed to open Thumbview panel:", err);
+                log.error(`Failed to open the Thumbview panel: ${err instanceof Error ? err.message : String(err)}`);
+                // Zen and the maximize were entered for a panel that does not exist: undo them.
+                await leaveFullscreenAfterSwitch();
+                releaseLayoutOp();
                 return;
             }
 
@@ -1387,7 +1551,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "ready") {
                     postedContentVersions.clear();
                     if (!cachedScannedFiles && prescanPromise) {
+                        const scanWaitStart = performance.now();
                         await prescanPromise;
+                        log.info(`Webview ready; waited ${Math.round(performance.now() - scanWaitStart)} ms for the initial workspace scan (${cachedScannedFiles?.length ?? 0} files).`);
                     }
                     if (cachedScannedFiles && cachedScannedFiles.length > 0) {
                         updateLayoutFromCache(panel);
@@ -1396,6 +1562,11 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                     endTransition(panel);
                     maybeShowFullscreenNotice(panel);
+                }
+
+                if (msg.command === "dismissShortcutLegend") {
+                    await context.globalState.update(SHORTCUT_LEGEND_DISMISSED_KEY, true);
+                    return;
                 }
 
                 if (msg.command === "dismissFullscreenNotice") {
@@ -1473,7 +1644,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (msg.command === "switchTab") {
+                    const receivedAt = performance.now();
                     await withLayoutLock(async () => {
+                        const lockedAt = performance.now();
                         try {
                             const uri = vscode.Uri.parse(msg.uri);
                             layoutOpsInFlight++;
@@ -1492,19 +1665,22 @@ export async function activate(context: vscode.ExtensionContext) {
                                 const textDoc = doc;
                                 await switchLeavingFullscreen(() => textDoc
                                     ? vscode.window.showTextDocument(textDoc, { preview: false })
-                                    : vscode.commands.executeCommand("vscode.open", uri, { preview: false }));
+                                    : vscode.commands.executeCommand("vscode.open", uri, { preview: false }),
+                                { label: uri.path.split("/").pop() || msg.uri, receivedAt, lockedAt, loadedAt: performance.now() });
                             } finally {
                                 releaseLayoutOp();
                             }
                         } catch (err: any) {
-                            console.error("THUMBVIEW SWITCH TAB ERROR:", err);
+                            log.error(`Opening ${msg.uri} from Thumbview failed: ${err?.message ?? String(err)}`);
                             vscode.window.showErrorMessage(`Thumbview could not open ${vscode.Uri.parse(msg.uri).path.split("/").pop()}: ${err?.message ?? String(err)}`);
                         }
                     });
                 }
 
                 if (msg.command === "jump") {
+                    const receivedAt = performance.now();
                     await withLayoutLock(async () => {
+                        const lockedAt = performance.now();
                         try {
                             const uri = vscode.Uri.parse(msg.uri);
                             layoutOpsInFlight++;
@@ -1518,7 +1694,8 @@ export async function activate(context: vscode.ExtensionContext) {
                                     doc = await vscode.workspace.openTextDocument(uri);
                                 } catch {
                                     // Binary/media file fallback
-                                    await switchLeavingFullscreen(() => vscode.commands.executeCommand("vscode.open", uri, { preview: false }));
+                                    await switchLeavingFullscreen(() => vscode.commands.executeCommand("vscode.open", uri, { preview: false }),
+                                        { label: uri.path.split("/").pop() || msg.uri, receivedAt, lockedAt });
                                     return;
                                 }
 
@@ -1531,7 +1708,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             const editor = await switchLeavingFullscreen(() => vscode.window.showTextDocument(doc, {
                                 preview: false,
                                 selection: new vscode.Range(pos, pos)
-                            }));
+                            }), { label: uri.path.split("/").pop() || msg.uri, receivedAt, lockedAt, loadedAt: performance.now() });
 
                             editor.revealRange(
                                 new vscode.Range(pos, pos),
@@ -1615,6 +1792,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             releaseLayoutOp();
                         }
                     } catch (err: any) {
+                        log.error(`Opening ${msg.uri} from Thumbview failed: ${err?.message ?? String(err)}`);
                         vscode.window.showErrorMessage(
                             `Thumbview jump failed: ${err?.message ?? String(err)}`
                         );
@@ -2810,6 +2988,10 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             panel.onDidChangeViewState(async e => {
+                if (e.webviewPanel.visible) {
+                    // Shown again by any route (tab click, Ctrl+Tab, F4): editor state must flow.
+                    openStateHeldForSwitch = false;
+                }
                 if (!e.webviewPanel.visible) {
                     // Sent even mid-transition: the webview's fast reopen path needs to know the
                     // panel really was backgrounded (protocol: "panelHidden", no fields).
@@ -2819,8 +3001,13 @@ export async function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 if (e.webviewPanel.visible && e.webviewPanel.active) {
-                    if (fullscreenActive && vscode.window.tabGroups.all.length > 1) {
+                    // Came back without F4 (tab click, Ctrl+Tab): the place to return to is the
+                    // editor the user just left. No layout op is running here, so
+                    // lastActiveTextEditor was not disturbed by Thumbview's own layout steps.
+                    editorGroups.recordReturnPoint(editorInfo(lastActiveTextEditor), panel.viewColumn);
+                    if (fullscreenActive && vscode.window.tabGroups.all.length > 1 && !groupMaximizedByUs) {
                         // User dragged the tab into a new split, breaking zen mode layout. Close gracefully.
+                        // (Groups hidden by our own maximize are expected, not a user split.)
                         await closeActiveThumbview();
                         return;
                     }
@@ -2855,6 +3042,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     await exitFullscreen();
                 }
             }));
+
+            releaseLayoutOp();
     }, withLayoutLock);
 
     const disposable = vscode.commands.registerCommand("thumbview.open", () => toggleThumbview());
@@ -4409,6 +4598,51 @@ export function getHtml(
         .fullscreen-notice[hidden] {
             display: none;
         }
+        .shortcut-legend {
+            position: absolute;
+            left: 16px;
+            bottom: 12px;
+            z-index: 55;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px 14px;
+            max-width: calc(100% - 32px);
+            box-sizing: border-box;
+            padding: 5px 6px 5px 10px;
+            border-radius: 4px;
+            background: var(--vscode-editorWidget-background, #252526);
+            color: var(--vscode-descriptionForeground, #9d9d9d);
+            border: 1px solid var(--vscode-widget-border, #454545);
+            font-size: 12px;
+            opacity: 0.92;
+        }
+        .shortcut-legend[hidden] {
+            display: none;
+        }
+        .shortcut-legend kbd {
+            font-family: inherit;
+            padding: 0 4px;
+            border-radius: 3px;
+            color: var(--vscode-keybindingLabel-foreground, #cccccc);
+            background: var(--vscode-keybindingLabel-background, rgba(128, 128, 128, 0.17));
+            border: 1px solid var(--vscode-keybindingLabel-border, rgba(51, 51, 51, 0.6));
+        }
+        .shortcut-legend-close {
+            border: none;
+            background: transparent;
+            color: inherit;
+            font-size: 14px;
+            line-height: 1;
+            padding: 0 4px;
+            cursor: pointer;
+        }
+        .shortcut-legend-close:hover {
+            color: var(--vscode-foreground, #cccccc);
+        }
+        .shortcut-legend-close:focus-visible {
+            outline: 1px solid var(--vscode-focusBorder, #007fd4);
+        }
         .fullscreen-notice kbd {
             font-family: inherit;
             padding: 1px 5px;
@@ -4746,6 +4980,13 @@ export function getHtml(
                     <span>Settings</span>
                 </button>
             </div>
+        </div>
+        <div id="shortcut-legend" class="shortcut-legend" role="note" aria-label="Thumbview shortcuts" hidden>
+            <span><kbd>Type</kbd> search</span>
+            <span><kbd>Left Ctrl</kbd> + hover: magnify</span>
+            <span>Click a line: open there</span>
+            <span><kbd id="shortcut-legend-key">F4</kbd> / <kbd>Esc</kbd> back to code</span>
+            <button id="shortcut-legend-close" class="shortcut-legend-close" aria-label="Hide shortcuts" title="Hide shortcuts">&times;</button>
         </div>
         <div id="fullscreen-notice" class="fullscreen-notice" role="region" aria-labelledby="fullscreen-notice-text" hidden>
             <span id="fullscreen-notice-text">Thumbview opens fullscreen so code stays readable. Press <kbd id="fullscreen-notice-key">F4</kbd> or open a file to go back.</span>
