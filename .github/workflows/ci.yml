@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Lint, unit, accessibility, integration, package (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # The webview's copy of src/layout_core.ts must be regenerated and committed with any change to it.
+      - run: npm run check-core
+      - run: npm run lint
+      - run: npm run test:unit
+      # axe-core against the real webview page in the runner's preinstalled Chrome.
+      - run: npm run test:a11y
+      # Downloads VS Code and runs src/test/integration inside it (needs a display). test:unit
+      # already compiled, so skip the pretest compile and lint.
+      - run: xvfb-run -a npm test --ignore-scripts
+      # 1,000 files only, failing on a regression past generous budgets (runner speeds vary).
+      - run: npm run benchmark -- --sizes=1000 --budget
+      - run: npm run package -- --out thumbview.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thumbview-vsix
+          path: thumbview.vsix
+
+  # Windows and macOS minutes cost 2x and 10x on private repositories, so these run only for pull
+  # requests and main.
+  cross-platform:
+    name: Unit tests (${{ matrix.os }})
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
