@@ -30,6 +30,7 @@ npm run check-core   # fail if media/overview.js is out of date with src/layout_
 npm run package      # build a .vsix with vsce (README images point at the public thumbview-assets repo)
 npm run publish:marketplace   # publish to the Marketplace with the same image base URL
 npm run publish-assets       # copy media/screenshots/ into ../thumbview-assets and push it
+# Bug reports: public issues-only repo github.com/jjoseph357/thumbview-issues (package.json "bugs")
 npm run screenshots  # regenerate the README images in media/screenshots/ (needs Chrome, python3, ffmpeg)
 npm run test:a11y    # axe-core accessibility audit of the webview in headless Chrome
 npm test             # integration tests in a downloaded VS Code (src/test/integration; Linux CI uses xvfb-run)
@@ -61,6 +62,7 @@ The package contains only `dist/extension.js`, the runtime files in `media/`, an
 ### Notes
 
 - The unit tests live in `src/test/` and run under plain Node (`npm run test:unit`). Webview tests load `media/overview.js` against mock DOM objects (`src/test/helpers/overview_harness.js`); host modules are loaded from `out/` or transpiled in memory (`src/test/helpers/load_ts.js`). `bundle_smoke.test.js` loads the shipped `dist/extension.js` itself.
+- The integration step sets `NODE_OPTIONS=--network-family-autoselection-attempt-timeout=5000`, caches `.vscode-test/`, and retries once, because the VS Code download timed out on runners with slow IPv6.
 - GitHub Actions (`.github/workflows/ci.yml`) runs `check-core`, lint, the unit tests, the accessibility audit, the integration tests, the benchmark, and `vsce package` on Linux for every push, and the unit tests on Windows and macOS for pull requests and `main` (those runners cost more minutes on a private repository).
 - `media/generate_icons.py` renders the icons from SVG and needs `cairosvg`: `python3 -m venv venv && venv/bin/pip install cairosvg && venv/bin/python media/generate_icons.py`.
 - `.gitattributes` forces LF line endings (tests slice `media/overview.js` with `\n`-anchored patterns, which would break on a Windows CRLF checkout).

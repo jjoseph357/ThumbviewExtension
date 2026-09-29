@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - 2026-09-29
 
 ### Added
+- **Getting started walkthrough** (Help > Get Started) and a small in-grid legend of the key shortcuts, shown until you dismiss it.
+- **Timing and diagnostics** in View > Output > Thumbview: initial scan, first data, each file open, and F4 decisions.
 - **Choose fullscreen or tab on first use**: the first fullscreen open shows a short banner explaining why Thumbview goes fullscreen, with **Open as a tab instead**. Settings now has an **Open Fullscreen** toggle.
 - **Keyboard and screen reader support**: move between tiles with the arrow keys (Home/End for first/last), open with Enter, open the context menu with Shift+F10, move a tile with Alt+Arrow, and hold Ctrl to magnify the focused tile. The focused tile, search result counts, and folder changes are announced to screen readers. Toolbar controls and dialogs are labelled, dialogs move focus in and back out, and focus is always visible.
 - **Status badges**: tiles show error counts and git status as text (for example `2, M`), not only as color.
@@ -35,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reflow Layout** now also resets saved tile heights, so tiles return to their natural sizes.
 
 ### Fixed
+- **Thumbview stopped tracking the active file after opening a file from it** and returning by clicking its tab.
+- **F4 with Thumbview visible in another split** now focuses it where it is instead of moving it over your code.
+- **First F4 showed nothing when split editors were open**: Thumbview mistook its own fullscreen layout for being dragged into a split and closed itself; only the second F4 worked.
+- **F4 in one split closed Thumbview showing in another** instead of bringing it forward.
+- **Thumbview left showing beside the code after closing with split editors**: closing now puts back the editor Thumbview covered in its own group.
+- **Thumbview opening beside the code after splitting the editor**: the first reopen after a split now opens fullscreen like every other time.
 - **Opening a file showed it in Zen mode for a moment**: the file now appears once, directly in the normal layout, instead of first in Zen mode and then again when the sidebar and tabs return.
 - **Space on a toolbar or dialog button typed into search** instead of pressing the button.
 - **Settings controls without accessible names**, a missing page title, landmark, and heading, and low contrast on the selected folder's file count (found by the new automated accessibility audit).
@@ -68,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Files jumping to another column when a file grows or shrinks**: A file's column is now fixed once it is placed. Growing or shrinking a file only shifts the files below it within the same column; if a column overflows, the grid adds a row and proportional columns so tiles keep their shape.
 
 ### Performance
+- **Faster file opens from Thumbview**: Thumbview stops redrawing the moment you click a file, so it no longer competes with VS Code restoring its layout. Each open's timing is logged to **View > Output > Thumbview**.
 - **First open up to 3.5x faster on large workspaces**: lines are sent to the webview as plain text instead of objects, halving the data sent (144 MB to 69 MB at 10,000 files) and cutting the time to the first frame from about 2 s to 0.6 s at that size. Search indexing no longer copies every line up front.
 - Updates send only the files whose content changed; unchanged tiles and folder previews keep their cached images across updates.
 - Builds writing ignored output (for example `npm run watch` into a gitignored `out/`) no longer resend the workspace.

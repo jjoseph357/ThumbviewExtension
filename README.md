@@ -13,6 +13,7 @@ Every file keeps its place in the grid. Adding, ignoring, or editing files never
 1. Install the extension and open a workspace folder.
 2. Press `F4`, or run `Thumbview: Open` from the Command Palette, to open the grid. Thumbview scans your workspace automatically with zero configuration.
 3. Optional: open the **Thumbview** container in the Activity Bar to access navigation and settings panels.
+4. New to Thumbview? **Help > Get Started > Get started with Thumbview** walks through the essentials in two minutes.
 
 Change settings via **File > Preferences > Settings > Thumbview** (see [Settings reference](#settings-reference)).
 
@@ -63,7 +64,7 @@ Hide build output, vendor directories, and generated files to keep the grid clea
 
 | Action | Shortcut |
 | :--- | :--- |
-| **Open / Focus Thumbview** | `F4` (except while the Search view has focus or a references peek is open, where F4 keeps its VS Code meaning) |
+| **Open / Focus Thumbview** (focuses it where it is if already visible; press again to close) | `F4` (except while the Search view has focus or a references peek is open, where F4 keeps its VS Code meaning) |
 | **Code Magnifier** | Hold `Left CTRL` + Hover |
 | **Jump to Line** | Left-click a line on a tile |
 | **Drag to Reorder** | Click & drag tile to slot |
@@ -115,4 +116,6 @@ Shortcuts and layout toggles are also accessible from the settings modal in the 
 
 ## Feedback
 
-Questions, ideas, and bug reports are welcome in the **Q&A** tab of Thumbview's Marketplace page.
+Report bugs and request features at [github.com/jjoseph357/thumbview-issues](https://github.com/jjoseph357/thumbview-issues/issues). Questions are welcome in the **Q&A** tab of Thumbview's Marketplace page.
+
+If opening files feels slow, **View > Output > Thumbview** shows how long each open took and where the time went; including it in a report helps.
