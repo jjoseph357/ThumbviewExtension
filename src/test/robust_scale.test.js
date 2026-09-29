@@ -42,7 +42,7 @@ assert.strictEqual(isAlwaysExcluded("out/extension.js"), false, "out/ is decided
 console.log("✓ Test 2 passed");
 
 console.log("\n--- Test 3: delta payloads reuse lines the webview already has ---");
-const h = loadOverview(["lowerLineText"]);
+const h = loadOverview(["lowerLineText", "lineShape"]);
 const { onMessage, flushFrames, postedMessages } = h;
 const { getData } = h.exports;
 h.resizeTo(1600, 900);
@@ -82,6 +82,49 @@ assert.strictEqual(h.exports.lowerLineText(s1.lines[0]), "const alpha1 = 1;");
 assert.strictEqual(s1.lines[0]._lowerText, "const alpha1 = 1;", "and are kept once computed");
 console.log("✓ Test 3b passed");
 
+console.log("\n--- Test 3c: folder previews and tiles keep code shape from text-only lines ---");
+const { lineShape } = h.exports;
+const shaped = lineShape({ text: "        return compute(x);   " });
+assert.strictEqual(shaped.indent, 8, "indent is derived from the text");
+assert.strictEqual(shaped.length, 26, "length excludes trailing whitespace");
+assert.strictEqual(shaped.category, "control-flow", "category uses the shared categorizeLine");
+assert.strictEqual(lineShape({ text: "// note" }).category, "comment");
+assert.strictEqual(lineShape({ text: "import x from 'y';" }).category, "import");
+// Enough files that the root collapses into folder cards, whose previews draw one bar per line.
+const shapedSource = i => [
+    `import { dep${i} } from "./dep";`,
+    "",
+    `export function run${i}(input) {`,
+    "    if (input) {",
+    `        return input.value${i} + ${i};`,
+    "    }",
+    "    // fallback",
+    "    return null;",
+    "}"
+];
+const cardFiles = [];
+const cardCols = 40;
+for (let i = 0; i < 1200; i++) {
+    cardFiles.push({
+        id: `p${i % 3}/f${i}.ts`, path: `pkg${i % 3}/f${i}.ts`, uri: `file:///ws/pkg${i % 3}/f${i}.ts`,
+        lineCount: 9, contentVersion: 1, lines: shapedSource(i), slot: [i % cardCols, Math.floor(i / cardCols)]
+    });
+}
+const bars = [];
+const realFillRect = h.mockCtx.fillRect;
+h.mockCtx.fillRect = (x, y, w, hgt) => { if (hgt === 1) bars.push({ x, w, style: h.mockCtx.fillStyle }); };
+onMessage({ data: { command: "data", mode: "uniform_grid", files: cardFiles, layout: { cols: cardCols, rows: 30 } } });
+flushFrames();
+h.mockCtx.fillRect = realFillRect;
+assert(bars.length > 50, `folder card previews drew line bars (${bars.length})`);
+const widths = new Set(bars.map(b => Math.round(b.w)));
+const starts = new Set(bars.map(b => Math.round(b.x * 10) % 1000));
+const styles = new Set(bars.map(b => b.style));
+assert(widths.size > 3, `bar widths follow line lengths, not one uniform width (${[...widths].join(",")})`);
+assert(styles.size > 2, `bar colors follow line categories (${[...styles].join(" | ")})`);
+assert(starts.size > 1, "bars are indented");
+console.log("✓ Test 3c passed");
+
 console.log("\n--- Test 4: a missing copy is re-requested from the host ---");
 const stale = full.map(f => ({ ...f, contentVersion: 5, lines: [], linesOmitted: true }));
 onMessage({ data: payload(stale) });
@@ -106,6 +149,17 @@ assert.strictEqual(isSafeWebviewMessage({ command: "deleteFile", uri: "file:///w
 assert.strictEqual(isSafeWebviewMessage({ command: "deleteFile", uri: "file:///ws/%2e%2e/%2E%2E/etc/passwd" }, inside), false, "encoded .. must be rejected");
 assert.strictEqual(isSafeWebviewMessage({ command: "deleteFile", uri: "file:///ws/src/..hidden.ts" }, inside), true, "names that merely start with .. are fine");
 console.log("✓ Test 5 passed");
+
+console.log("\n--- Test 6: Thumbview's own tab is recognized as VS Code reports it ---");
+const { isThumbviewViewType } = loadTs("../webview_tabs.ts");
+assert.strictEqual(isThumbviewViewType("mainThreadWebview-thumbview"), true, "the tab API prefixes extension webview viewTypes");
+assert.strictEqual(isThumbviewViewType("thumbview"), true);
+assert.strictEqual(isThumbviewViewType("mainThreadWebview-markdown.preview"), false);
+assert.strictEqual(isThumbviewViewType("mainThreadWebview-notthumbview"), false, "only an exact viewType after the prefix");
+assert.strictEqual(isThumbviewViewType("mainThreadWebview-other.thumbview"), false, "another extension's webview is not Thumbview");
+assert.strictEqual(isThumbviewViewType("x-thumbview"), false);
+assert.strictEqual(isThumbviewViewType(undefined), false, "text editor tabs have no viewType");
+console.log("✓ Test 6 passed");
 
 console.log("\nAll robustness & scale tests passed.");
 process.exit(0);

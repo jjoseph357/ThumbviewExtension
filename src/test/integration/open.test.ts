@@ -72,4 +72,19 @@ suite("Thumbview in VS Code", () => {
         await waitFor("the Thumbview tab to become active again", () => thumbviewTabs().some(tab => tab.isActive));
         assert.strictEqual(thumbviewTabs().length, 1, "no second Thumbview panel is created");
     });
+
+    test("with split editors, closing leaves no group showing Thumbview", async () => {
+        await pressF4();
+        await waitFor("Thumbview to close", () => !thumbviewTabs().some(tab => tab.isActive));
+        // The split becomes the active group; Thumbview's retained panel stays in the first group.
+        await vscode.commands.executeCommand("workbench.action.splitEditorRight");
+        await waitFor("two editor groups", () => vscode.window.tabGroups.all.length === 2);
+
+        await pressF4();
+        await waitFor("Thumbview to open", () => thumbviewTabs().some(tab => tab.group.isActive && tab.isActive));
+        await pressF4();
+        // Tab.isActive means "shown in its group": every group must show code again.
+        await waitFor("every group to show code again", () => !thumbviewTabs().some(tab => tab.isActive));
+        await vscode.commands.executeCommand("workbench.action.joinAllGroups");
+    });
 });

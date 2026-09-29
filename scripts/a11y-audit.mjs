@@ -1,6 +1,6 @@
 // Runs axe-core (WCAG 2.1 A/AA rules) against the real webview page in headless Chrome, in each
 // state a user can reach: the grid, an active search, the settings dialog, the folders dialog,
-// and the fullscreen banner. Exits non-zero on any violation. axe cannot see inside the canvas;
+// the shortcut legend, and the fullscreen banner. Exits non-zero on any violation. axe cannot see inside the canvas;
 // the grid's keyboard and screen reader behavior is covered by src/test/accessibility.test.js.
 //   npm run test:a11y              (needs Chrome or Chromium, python3)
 import { readFileSync } from "node:fs";
@@ -27,6 +27,10 @@ const STATES = [
     ["folders dialog", async page => {
         await page.click("#folders-btn");
         await settle(300);
+    }],
+    ["shortcut legend", async page => {
+        await send(page, { ...initial.message, showShortcutLegend: true });
+        await settle(200);
     }],
     ["fullscreen banner", async page => {
         await send(page, { command: "fullscreenNotice", keybinding: "F4" });

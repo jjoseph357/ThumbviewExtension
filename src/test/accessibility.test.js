@@ -117,6 +117,20 @@ global.document.activeElement = undefined;
 assert.strictEqual(searchBox.value, before, "Space on a button must not type into search");
 console.log("✓ Test 4c passed");
 
+console.log("\n--- Test 4d: the shortcut legend shows until dismissed ---");
+const legend = global.document.getElementById("shortcut-legend");
+assert.strictEqual(legend.hidden, true, "hidden unless the host asks for it");
+onMessage({ data: { command: "data", mode: "uniform_grid", files, layout: { cols: 3, rows: 2 }, showShortcutLegend: true, openKeybinding: "F6" } });
+assert.strictEqual(legend.hidden, false, "shown on first use");
+assert.strictEqual(global.document.getElementById("shortcut-legend-key").textContent, "F6", "names the user's own keybinding");
+postedMessages.length = 0;
+global.document.getElementById("shortcut-legend-close").onclick();
+assert.strictEqual(legend.hidden, true);
+assert(postedMessages.some(m => m.command === "dismissShortcutLegend"), "dismissal is remembered by the host");
+onMessage({ data: { command: "data", mode: "uniform_grid", files, layout: { cols: 3, rows: 2 }, showShortcutLegend: true } });
+assert.strictEqual(legend.hidden, true, "a payload sent before the host saved the dismissal does not bring it back");
+console.log("✓ Test 4d passed");
+
 console.log("\n--- Test 5: search results are announced after typing pauses ---");
 key("f");
 key("3");

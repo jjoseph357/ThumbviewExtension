@@ -3,7 +3,7 @@
 const assert = require("assert");
 const { loadOverview } = require("./helpers/overview_harness");
 
-const h = loadOverview(["fileTokenCache"]);
+const h = loadOverview(["fileTokenCache", "postSwitchAway", "isFrameFrozen"]);
 const { rafQueue, flushFrames, counts, mockCtx, resizeTo, docListeners, onMessage } = h;
 const { render, applyDataMessage, getData, fileTokenCache } = h.exports;
 const fireWindow = (event) => h.fireWindow(event, { key: "F4" });
@@ -216,5 +216,31 @@ resizeTo(1600, 900);
 flushFrames();
 console.log("✓ Test 13 passed");
 
-console.log("\nAll instant-open tests passed.");
-process.exit(0);
+console.log("\n--- Test 14: Opening a file stops drawing until Thumbview is hidden or back in use ---");
+const { postSwitchAway, isFrameFrozen } = h.exports;
+h.postedMessages.length = 0;
+assert.strictEqual(isFrameFrozen(), false);
+postSwitchAway({ command: "jump", uri: "file:///ws/a.ts", line: 0 });
+assert(h.postedMessages.some(m => m.command === "jump"), "the jump is still posted");
+assert.strictEqual(isFrameFrozen(), true, "no full-grid repaints while VS Code rebuilds its layout");
+fireWindow("keydown");
+assert.strictEqual(isFrameFrozen(), false, "input means Thumbview is still in front, so it draws again");
+postSwitchAway({ command: "jump", uri: "file:///ws/a.ts", line: 0 });
+onMessage({ data: { command: "panelHidden" } });
+assert.strictEqual(isFrameFrozen(), true, "the hidden-panel freeze takes over");
+onMessage({ data: { command: "hideForTransition", transitionId: 30, fromHidden: true } });
+onMessage({ data: { command: "showAfterTransition", transitionId: 30 } });
+flushFrames();
+assert.strictEqual(isFrameFrozen(), false, "reopening draws again");
+postSwitchAway({ command: "jump", uri: "file:///ws/missing.ts", line: 0 });
+setTimeout(() => {
+    try {
+        assert.strictEqual(isFrameFrozen(), false, "a failed open (Thumbview never hidden) unfreezes on its own");
+        console.log("✓ Test 14 passed");
+        console.log("\nAll instant-open tests passed.");
+        process.exit(0);
+    } catch (err) {
+        console.error(err);
+        process.exit(1);
+    }
+}, 2100);
