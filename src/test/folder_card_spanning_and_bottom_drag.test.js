@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { runWebviewCore } = require("./helpers/webview_core");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -19,21 +20,13 @@ const sandbox = {
 vm.createContext(sandbox);
 
 // Extract helper functions from overview.js
-const matchCellsNeeded = overviewJs.match(/function cellsNeeded\([\s\S]*?\n\}/);
-assert(matchCellsNeeded, "cellsNeeded must be found in overview.js");
-vm.runInContext(matchCellsNeeded[0], sandbox);
+runWebviewCore(overviewJs, sandbox);
 
 const matchGrid = overviewJs.match(/function buildSpanningGridLocal[\s\S]*?return \{[\s\S]*?\};\n\}/);
 assert(matchGrid, "buildSpanningGridLocal must be found in media/overview.js");
 vm.runInContext(matchGrid[0], sandbox);
 
-const matchClamp = overviewJs.match(/function clampTargetToGridCapacityLocal[\s\S]*?\n\}/);
-assert(matchClamp, "clampTargetToGridCapacityLocal must be found in media/overview.js");
-vm.runInContext(matchClamp[0], sandbox);
 
-const matchReorder = overviewJs.match(/function reorderSpanningItemsLocal[\s\S]*?return \{[\s\S]*?\};\n\}/);
-assert(matchReorder, "reorderSpanningItemsLocal must be found in media/overview.js");
-vm.runInContext(matchReorder[0], sandbox);
 
 // ---------------------------------------------------------------------------------
 // Test 1: Dragging files to bottom empty row in src/ does NOT expand the grid
@@ -57,7 +50,7 @@ assert.strictEqual(initialLayout.rows, 3, "Initial layout must have 3 rows (2 ba
 assert.strictEqual(initialLayout.cols, 3, "Initial layout must have 3 cols (2 base + 1 extra)");
 
 // User drags src/a.ts to row 2 (col 0, row 2, bottom empty row)
-const drag1 = sandbox.reorderSpanningItemsLocal(
+const drag1 = sandbox.reorderSpanningItems(
     srcFileIds,
     srcFileIds,
     srcAllocations,
@@ -84,7 +77,7 @@ const placementA = layoutAfterDrag1.placements.find(p => p.file.id === "src/a.ts
 assert.deepStrictEqual([placementA.col, placementA.row], [0, 2], "src/a.ts must be at row 2!");
 
 // User now drags src/c.ts to row 2 in column 1 [1, 2]
-const drag2 = sandbox.reorderSpanningItemsLocal(
+const drag2 = sandbox.reorderSpanningItems(
     srcFileIds,
     drag1.newOrder,
     srcAllocations,
@@ -158,7 +151,7 @@ for (const it of spanningItems) {
 }
 
 // Drag readme.md to empty slot at [col 2, row 0]
-const cardDragRes = sandbox.reorderSpanningItemsLocal(
+const cardDragRes = sandbox.reorderSpanningItems(
     cardIds,
     cardIds,
     cardAllocs,

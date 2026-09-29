@@ -15,6 +15,8 @@ const mockFiles = [
 Module.prototype.require = function(request) {
     if (request === "vscode") {
         return {
+            // file_discovery.ts falls back to findFiles(new RelativePattern(folder, "**/*"), …) when git is unavailable.
+            RelativePattern: class { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
             workspace: {
                 workspaceFolders: [{ uri: { fsPath: "/workspace" } }],
                 getConfiguration: () => ({ get: (k) => k === "autoIgnoreThreshold" ? 30 : undefined }),
@@ -209,6 +211,9 @@ async function runTests() {
         getComputedStyleCount++;
         return { getPropertyValue: () => "#1e1e24" };
     };
+
+    global.requestAnimationFrame = (fn) => fn();
+    global.cancelAnimationFrame = () => {};
 
     const overviewCode = fs.readFileSync(path.join(__dirname, "../../media/overview.js"), "utf8");
     let overviewEnv = {};

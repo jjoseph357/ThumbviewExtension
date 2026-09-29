@@ -132,6 +132,8 @@ let mockFindFiles = null;
 Module.prototype.require = function(request) {
     if (request === "vscode") {
         return {
+            // file_discovery.ts falls back to findFiles(new RelativePattern(folder, "**/*"), …) when git is unavailable.
+            RelativePattern: class { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
             workspace: {
                 findFiles: async (inc, exc) => mockFindFiles ? mockFindFiles(inc, exc) : [],
                 workspaceFolders: [{ uri: { fsPath: "/workspace" } }],

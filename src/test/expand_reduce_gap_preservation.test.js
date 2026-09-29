@@ -218,7 +218,7 @@ console.log("\n--- Test 3: Webview retains data.fileOrder across host 'data' mes
         triggerExpandSpace, triggerReduceSpace,
         handleMessage: (msg) => window._listeners["message"]({ data: msg }),
         getUserReorderedFileSlots: () => userReorderedFileSlots,
-        reorderSpanningItemsLocal
+        reorderSpanningItemsLocal: reorderSpanningItems
     };
     `;
     const mod = {};

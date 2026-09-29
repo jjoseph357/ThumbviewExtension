@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { runWebviewCore } = require("./helpers/webview_core");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -80,18 +81,13 @@ console.log("✓ Test 1 passed: src/ has extra row and column while root remains
 
 // Test 2: Dragging a file into src/'s expanded bottom row (row 2)
 console.log("\n=== Test 2: Dragging file into src/'s expanded bottom row ===");
-const matchReorder = overviewJs.match(/function reorderSpanningItemsLocal[\s\S]*?return \{[\s\S]*?\};\n\}/);
-assert(matchReorder, "reorderSpanningItemsLocal must be found in media/overview.js");
-vm.runInContext(matchReorder[0], sandbox);
+runWebviewCore(overviewJs, sandbox);
 
-const matchClamp = overviewJs.match(/function clampTargetToGridCapacityLocal[\s\S]*?\n\}/);
-assert(matchClamp, "clampTargetToGridCapacityLocal must be found in media/overview.js");
-vm.runInContext(matchClamp[0], sandbox);
 
 const currentOrder = ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"];
 const allocations = { "src/a.ts": 1, "src/b.ts": 1, "src/c.ts": 1, "src/d.ts": 1 };
 
-const res = sandbox.reorderSpanningItemsLocal(
+const res = sandbox.reorderSpanningItems(
     currentOrder,
     currentOrder,
     allocations,

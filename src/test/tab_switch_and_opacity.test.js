@@ -109,7 +109,7 @@ console.log("\n--- Test 3: Verify overview.js contains self-healing opacity hand
     const overviewContent = fs.readFileSync(overviewPath, "utf-8");
 
     assert.ok(overviewContent.includes("ensureVisibleOpacity"), "overview.js must contain ensureVisibleOpacity()");
-    assert.ok(overviewContent.includes("hideTransitionTimeout"), "overview.js must contain hideTransitionTimeout watchdog");
+    assert.ok(overviewContent.includes("revealSafetyTimer"), "overview.js must contain the revealSafetyTimer watchdog (behavior covered in instant_open.test.js)");
     assert.ok(overviewContent.includes('window.addEventListener("focus", ensureVisibleOpacity);'), "overview.js must restore opacity on window focus");
     assert.ok(overviewContent.includes('document.addEventListener("visibilitychange"'), "overview.js must restore opacity on visibilitychange");
     assert.ok(overviewContent.includes('window.addEventListener("pointerdown"'), "overview.js must restore opacity on pointerdown");

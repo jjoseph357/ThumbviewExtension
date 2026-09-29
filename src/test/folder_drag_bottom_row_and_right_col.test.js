@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { runWebviewCore } = require("./helpers/webview_core");
 const fs = require("fs");
 const vm = require("vm");
 const { reorderSpanningItems } = require("../../out/reorder_helpers");
@@ -73,13 +74,8 @@ const matchGrid = overviewJs.match(/function buildSpanningGridLocal[\s\S]*?retur
 assert(matchGrid, "buildSpanningGridLocal must be found in media/overview.js");
 vm.runInContext(matchGrid[0], sandbox);
 
-const matchClamp = overviewJs.match(/function clampTargetToGridCapacityLocal[\s\S]*?\n\}/);
-assert(matchClamp, "clampTargetToGridCapacityLocal must be found in media/overview.js");
-vm.runInContext(matchClamp[0], sandbox);
+runWebviewCore(overviewJs, sandbox);
 
-const matchReorder = overviewJs.match(/function reorderSpanningItemsLocal[\s\S]*?return \{[\s\S]*?\};\n\}/);
-assert(matchReorder, "reorderSpanningItemsLocal must be found in media/overview.js");
-vm.runInContext(matchReorder[0], sandbox);
 
 const testFiles = [{ id: "f1" }, { id: "f2" }, { id: "f3" }, { id: "f4" }];
 // Suppose extraCols = 1 from a previous Expand Grid
@@ -96,8 +92,8 @@ assert.strictEqual(
     `Grid cols MUST NOT expand when dragging to far right column! Expected ${initialLayout.cols}, got ${afterLayout.cols}`
 );
 
-// Verify reorderSpanningItemsLocal inside overview.js also places tile in bottom row
-const localBottomRes = sandbox.reorderSpanningItemsLocal(
+// Verify reorderSpanningItems inside overview.js also places tile in bottom row
+const localBottomRes = sandbox.reorderSpanningItems(
     files,
     ["f1", "f2", "f3", "f4"],
     allocations,
@@ -106,11 +102,11 @@ const localBottomRes = sandbox.reorderSpanningItemsLocal(
     4, 3, // maxAllowedCols 4, maxAllowedRows 3
     2     // wrapRows 2
 );
-console.log("overview.js reorderSpanningItemsLocal bottom move result:", localBottomRes.newOrder);
+console.log("overview.js reorderSpanningItems bottom move result:", localBottomRes.newOrder);
 assert.deepStrictEqual(
     [...localBottomRes.newOrder],
     ["", "f2", "f1", "f3", "f4"],
-    "overview.js reorderSpanningItemsLocal MUST place f1 at row 2 and keep f2 at row 1!"
+    "overview.js reorderSpanningItems MUST place f1 at row 2 and keep f2 at row 1!"
 );
 
 console.log("✓ Test 2 passed: grid width/columns do not expand on far right drag, and overview.js bottom drag succeeds");

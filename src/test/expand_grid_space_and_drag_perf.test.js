@@ -138,8 +138,8 @@ let code = fs.readFileSync(overviewPath, "utf8");
 code += `
 module.exports = {
     buildSpanningGridLocal,
-    reorderSpanningItemsLocal,
-    clampTargetToGridCapacityLocal
+    reorderSpanningItemsLocal: reorderSpanningItems,
+    clampTargetToGridCapacityLocal: clampTargetToGridCapacity
 };
 `;
 

@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { runWebviewCore } = require("./helpers/webview_core");
 const fs = require("fs");
 const vm = require("vm");
 const { reorderSpanningItems } = require("../../out/reorder_helpers");
@@ -87,9 +88,9 @@ assert.deepStrictEqual(
 console.log("✓ Test 1 passed: reorder_helpers preserves relative tile orientation [1; 0; 1; 1; 0]!");
 
 // -------------------------------------------------------------
-// Test 2: Overview.js reorderSpanningItemsLocal behaves identically
+// Test 2: Overview.js reorderSpanningItems behaves identically
 // -------------------------------------------------------------
-console.log("\n=== Test 2: Overview.js reorderSpanningItemsLocal preserves [1; 0; 1; 1; 0] ===");
+console.log("\n=== Test 2: Overview.js reorderSpanningItems preserves [1; 0; 1; 1; 0] ===");
 
 const overviewJs = fs.readFileSync("media/overview.js", "utf8");
 const sandbox = {
@@ -102,15 +103,10 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 
-const matchClamp = overviewJs.match(/function clampTargetToGridCapacityLocal[\s\S]*?\n\}/);
-assert(matchClamp, "clampTargetToGridCapacityLocal must be found in media/overview.js");
-vm.runInContext(matchClamp[0], sandbox);
+runWebviewCore(overviewJs, sandbox);
 
-const matchReorder = overviewJs.match(/function reorderSpanningItemsLocal[\s\S]*?return \{[\s\S]*?\};\n\}/);
-assert(matchReorder, "reorderSpanningItemsLocal must be found in media/overview.js");
-vm.runInContext(matchReorder[0], sandbox);
 
-const localRes = sandbox.reorderSpanningItemsLocal(
+const localRes = sandbox.reorderSpanningItems(
     activeIds,
     initialOrder,
     allocations,
@@ -138,6 +134,6 @@ assert.deepStrictEqual(
     "Overview.js swapped tiles in Col 0 MUST maintain their exact orientation [1; 0; 1; 1; 0]!"
 );
 
-console.log("✓ Test 2 passed: media/overview.js reorderSpanningItemsLocal preserves [1; 0; 1; 1; 0]!");
+console.log("✓ Test 2 passed: media/overview.js reorderSpanningItems preserves [1; 0; 1; 1; 0]!");
 
 console.log("\n=== ALL MULTI-TILE SPANNING SWAP TESTS PASSED ===");

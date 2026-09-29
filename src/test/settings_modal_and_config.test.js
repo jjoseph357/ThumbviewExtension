@@ -171,7 +171,7 @@ assert(extGetCompSlice.includes("raw >= 1 ? raw / 100 : raw"), "extension.ts mus
 
 const overviewGetCompSlice = overviewSource.substring(
     overviewSource.indexOf("function getCompressionPct()"),
-    overviewSource.indexOf("function cellsNeeded")
+    overviewSource.indexOf("function scopeFootprints")
 );
 assert(overviewGetCompSlice.includes("data.compressionPercentage >= 1 ? data.compressionPercentage / 100 : data.compressionPercentage"), "overview.js must use >= 1 so 1 parses as 0.01 (1%)");
 
@@ -190,7 +190,7 @@ assert(accentBarSlice.includes("background: var(--vscode-button-background, #0e6
 assert(!accentBarSlice.includes("linear-gradient"), "accent bar must not use gradient");
 
 assert(extSource.includes('if (msg.command === "exitThumbview")'), "extension.ts must handle exitThumbview command");
-assert(extSource.includes("const closeActiveThumbview = async"), "extension.ts must define closeActiveThumbview helper");
+assert(/const closeActiveThumbview = /.test(extSource), "extension.ts must define closeActiveThumbview helper");
 
 const escSlice = overviewSource.substring(
     overviewSource.indexOf('if (event.key === "Escape" || event.code === "Escape")'),

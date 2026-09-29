@@ -29,8 +29,8 @@ console.log("\n--- Test 1: Verify overview.js constants and thresholds ---");
         "shouldOpenFolder should be !!focusedFolder"
     );
     assert(
-        overviewCode.includes("Math.max(canvas.clientWidth, window.innerWidth)"),
-        "rectW should use Math.max with window.innerWidth"
+        overviewCode.includes("const rectW = getViewportW();"),
+        "render() should read the canvas size from the single ResizeObserver-fed viewport source"
     );
     console.log("✓ Test 1 passed: All constants and thresholds verified in overview.js");
 }

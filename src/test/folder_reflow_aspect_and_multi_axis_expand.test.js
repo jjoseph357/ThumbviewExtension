@@ -276,7 +276,12 @@ reflowBtn.onclick();
 const dataAfterReflow = getData();
 assert.strictEqual(dataAfterReflow.folderExtraCols["src/"], undefined, "folderExtraCols['src/'] must be cleared");
 assert.strictEqual(dataAfterReflow.folderExtraRows["src/"], undefined, "folderExtraRows['src/'] must be cleared");
-assert.strictEqual(dataAfterReflow.folderWrapRows["src/"], undefined, "folderWrapRows['src/'] must be cleared");
+// Reflow clears the saved column height; the next render re-freezes it at the fresh natural
+// value (reconcileFolderFileOrder) so later additions cannot re-wrap the new baseline.
+assert(
+    dataAfterReflow.folderWrapRows["src/"] === undefined || dataAfterReflow.folderWrapRows["src/"] === 3,
+    "folderWrapRows['src/'] must be reset to the natural base rows"
+);
 
 const gridAfterReflow = getActiveRenderGrid();
 console.log(`Grid after folder reflow: ${gridAfterReflow.cols} cols x ${gridAfterReflow.rows} rows`);
