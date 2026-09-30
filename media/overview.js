@@ -2703,6 +2703,8 @@ function drawThumbnail(file, x, y, w, h) {
                 } else if (window.PDF_JS_URI && !window._pdfJsLoading) {
                     window._pdfJsLoading = true;
                     const script = document.createElement("script");
+                    // The CSP allows only nonce'd scripts (no script-src host), so this one needs it too.
+                    if (window.PDF_JS_NONCE) script.nonce = window.PDF_JS_NONCE;
                     script.src = window.PDF_JS_URI;
                     script.onload = () => {
                         window._pdfJsLoading = false;
@@ -4657,7 +4659,7 @@ function updateHoverTooltip() {
 
     const isOpen = openFilesSet.has(hoveredFile.uri);
     const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
-    let tooltipHtml = `<div class="tooltip-filename">${hoveredFile.path} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
+    let tooltipHtml = `<div class="tooltip-filename">${escapeHtml(hoveredFile.path)} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
 
     for (let i = start; i <= end; i++) {
         let line = null;

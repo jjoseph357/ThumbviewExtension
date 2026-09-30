@@ -25,7 +25,7 @@ media/icon-store.svg
 **/.vscode-test.*
 *.vsix
 # Stray notes (e.g. temp.txt) must never ship.
-*.txt
+**/*.txt
 *.md
 !README.md
 !CHANGELOG.md
