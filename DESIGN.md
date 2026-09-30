@@ -26,6 +26,16 @@ The host ships as one esbuild bundle (`dist/extension.js`, `package.json` `main`
 
 `npm run screenshots` (`scripts/capture-screenshots.mjs`) regenerates every README image and the GIF. It builds a fresh copy of `demo-workspace/` from `generate.py` (so local edits to the demo never leak into the images), builds the same `data` payload the host would (scanner order, `buildSpanningGrid`, `fillLayoutHoles` for the "ignore leaves a gap" sequence), renders the real page from the bundle's exported `getHtml` plus `media/overview.js` in headless Chrome with VS Code's Dark Modern theme variables, and scripts search typing, the Ctrl magnifier, and the folders popover with real input events. Hand-recorded screenshots went stale as the UI changed (the old ones still showed the removed sidebar actions panel); a script makes refreshing them a one-command step. The trade-off is that the images show only the webview, not VS Code's surrounding chrome, which matches what users see in fullscreen mode. The images live in `media/screenshots/` and are excluded from the package; the Marketplace loads them from GitHub through the README's relative links, so they must be pushed.
 
+## Security review (0.5.0)
+
+A review of every webview-to-host message and of the page itself found and fixed:
+- `script-src` allowed the webview's resource roots, which include every workspace folder, so injected markup could have loaded a workspace file as a script. It is now the page nonce only; the lazily loaded pdf.js script is given the nonce.
+- The magnifier's title inserted the file path into HTML unescaped (a file name can contain markup), and the host inserted the user's key binding label unescaped.
+- New File, New Folder, and Rename accepted typed names with `..` or absolute paths, reaching outside the workspace.
+- The layout and drag mode setters wrote any value the webview sent into user settings.
+
+Webview-sent paths and URIs were already validated by `message_guard.ts`, and the other setters clamp their numbers. Inline styles remain allowed (`style-src 'unsafe-inline'`), because the canvas UI builds styled tooltips; with images limited to the webview and data/blob sources, injected CSS cannot reach the network.
+
 ## Automated accessibility audit
 
 `npm run test:a11y` runs axe-core (WCAG 2.1 A/AA plus best practices) against the real page in headless Chrome, in every state a user can reach: the grid, an active search, the Settings dialog, the Folders & Ignored dialog, and the fullscreen banner. The first run found unlabelled settings controls, a missing page title, main landmark, and top-level heading, and dimmed file counts failing contrast on the selected folder row; all are fixed and CI keeps it at zero. axe cannot see into the canvas, so the grid itself is covered by `accessibility.test.js` (keyboard navigation, announcements, text status badges). A manual screen reader pass is still needed for what automated rules cannot judge.
@@ -116,6 +126,10 @@ Reopening reveals the retained panel before maximizing its group. `toggleMaximiz
 
 Two more split-editor defects came from the same handler and toggle. The first open was not marked as a layout operation (reopen was), so the view-state event for the brand-new panel reached the rule that closes Thumbview when "the user dragged it into a split" (fullscreen plus more than one group); with splits open the maximized groups still count, so the panel closed itself and only the second F4 worked. The create path now counts as a layout op and that rule ignores groups Thumbview maximized. Separately, F4 decided open versus close by `panel.visible`, so pressing it in the right group while Thumbview showed in the left one closed Thumbview instead of bringing it forward; it now closes only a focused panel.
 
+## Split sizes are never evened
+
+Since v0.3.1 unmaximizing also ran `workbench.action.evenEditorWidths` whenever there was more than one group, even in tab mode where Thumbview maximized nothing. A 70/30 split came back as 50/50 after every close and every file opened from a tile. Unmaximizing already restores the user's own proportions, so the call was removed.
+
 ## Closing next to a split
 
 Closing returns to `returnTo`, the file and group the user was in when F4 opened Thumbview. It used to return to `lastActiveTextEditor`, but a trace from a real split session showed that value changing during Thumbview's own layout steps (entering and leaving Zen, maximizing and unmaximizing briefly activate another group's editor), so closing landed in the other group and left Thumbview showing; a `TextEditor` hidden behind Thumbview also loses its `viewColumn`. The same trace then showed the covered-editor restore never running: `isThumbviewTab` compared the tab's `viewType` with `"thumbview"`, but the tab API reports extension webviews as `"mainThreadWebview-thumbview"`, so no group ever appeared to contain Thumbview (and close-path fallbacks could even choose Thumbview itself as the code to return to). The check now lives in `webview_tabs.ts` with a unit test. Opening editors during close is bounded (`openInGroup`, 1.5 s) so a workbench open that never settles cannot hold the layout lock, and each step is logged to the Thumbview output channel.
@@ -124,7 +138,7 @@ Before this, closing returned to the most recent code, which after a split can b
 
 ## Testing split-editor behavior
 
-The split-editor rules (where closing returns to, which editor Thumbview covered, F4's open/focus/close decision) caused a run of regressions while they lived as closures inside `activate()` with only source-text checks. They now live in `editor_groups.ts` over an injected `Workbench` facade (groups, open, log), and `editor_groups.test.js` replays real traces against simulated groups: the user in one group with Thumbview's panel in another, a return point whose group was closed, an open that never settles, Thumbview alone in its group. A new split bug should be reproduced there first.
+The split-editor rules (where closing returns to, which editor Thumbview covered, F4's open/focus/close decision) caused a run of regressions while they lived as closures inside `activate()` with only source-text checks. They now live in `editor_groups.ts` over an injected `Workbench` facade (groups, open, log), and `editor_groups.test.js` replays real traces against simulated groups: the user in one group with Thumbview's panel in another, a return point whose group was closed, an open that never settles, Thumbview alone in its group. A new split bug should be reproduced there first. The visibility rules around it (when editor-state updates are held during a file open, when the return point is recorded on a tab-click return or dropped when the user leaves on their own) live in `panel_session.ts` with `panel_session.test.js`; together they cover every bug the split-editor traces found. The page template moved to `webview_html.ts`, cutting `extension.ts` from about 5,000 to 3,600 lines.
 
 ## Onboarding
 

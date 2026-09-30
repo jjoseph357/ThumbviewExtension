@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - 2026-09-29
 
 ### Added
-- **Getting started walkthrough** (Help > Get Started) and a small in-grid legend of the key shortcuts, shown until you dismiss it.
+- **Getting started walkthrough** (Help > Get Started) with screenshots, and a small in-grid legend of the key shortcuts that clicks pass through, shown until you dismiss it.
 - **Timing and diagnostics** in View > Output > Thumbview: initial scan, first data, each file open, and F4 decisions.
 - **Choose fullscreen or tab on first use**: the first fullscreen open shows a short banner explaining why Thumbview goes fullscreen, with **Open as a tab instead**. Settings now has an **Open Fullscreen** toggle.
 - **Keyboard and screen reader support**: move between tiles with the arrow keys (Home/End for first/last), open with Enter, open the context menu with Shift+F10, move a tile with Alt+Arrow, and hold Ctrl to magnify the focused tile. The focused tile, search result counts, and folder changes are announced to screen readers. Toolbar controls and dialogs are labelled, dialogs move focus in and back out, and focus is always visible.
@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reflow Layout** now also resets saved tile heights, so tiles return to their natural sizes.
 
 ### Fixed
+- **Closing Thumbview reset split editor sizes to 50/50**: your own proportions are kept.
+- **Returning from Thumbview pinned preview tabs**.
+- **Security hardening**: the page runs only its own nonce'd scripts, file names and key labels are escaped in HTML, typed file and folder names cannot leave the workspace, and settings sent from the page are validated.
 - **Thumbview stopped tracking the active file after opening a file from it** and returning by clicking its tab.
 - **F4 with Thumbview visible in another split** now focuses it where it is instead of moving it over your code.
 - **First F4 showed nothing when split editors were open**: Thumbview mistook its own fullscreen layout for being dragged into a split and closed itself; only the second F4 worked.
@@ -76,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Files jumping to another column when a file grows or shrinks**: A file's column is now fixed once it is placed. Growing or shrinking a file only shifts the files below it within the same column; if a column overflows, the grid adds a row and proportional columns so tiles keep their shape.
 
 ### Performance
+- **Faster close**: closing Thumbview waits for VS Code's own signals instead of fixed delays.
 - **Faster file opens from Thumbview**: Thumbview stops redrawing the moment you click a file, so it no longer competes with VS Code restoring its layout. Each open's timing is logged to **View > Output > Thumbview**.
 - **First open up to 3.5x faster on large workspaces**: lines are sent to the webview as plain text instead of objects, halving the data sent (144 MB to 69 MB at 10,000 files) and cutting the time to the first frame from about 2 s to 0.6 s at that size. Search indexing no longer copies every line up front.
 - Updates send only the files whose content changed; unchanged tiles and folder previews keep their cached images across updates.
