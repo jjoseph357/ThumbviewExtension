@@ -2,6 +2,7 @@
 // arrows, Home/End, Enter, Shift+F10, Alt+Arrow tile moves), screen-reader announcements, text
 // status badges, and accessible names in the webview markup.
 const assert = require("assert");
+const { readHostSource } = require("./helpers/host_source");
 const fs = require("fs");
 const path = require("path");
 const { loadOverview } = require("./helpers/overview_harness");
@@ -141,7 +142,7 @@ setTimeout(() => {
         console.log("✓ Test 5 passed");
 
         console.log("\n--- Test 6: every toolbar control has an accessible name; dialogs are labelled ---");
-        const ext = fs.readFileSync(path.join(__dirname, "../extension.ts"), "utf8");
+        const ext = readHostSource();
         const html = ext.substring(ext.indexOf("<body"), ext.indexOf("</body>"));
         const buttons = html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g) || [];
         assert(buttons.length > 5);

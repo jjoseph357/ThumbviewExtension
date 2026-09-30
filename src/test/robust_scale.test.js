@@ -161,5 +161,18 @@ assert.strictEqual(isThumbviewViewType("x-thumbview"), false);
 assert.strictEqual(isThumbviewViewType(undefined), false, "text editor tabs have no viewType");
 console.log("✓ Test 6 passed");
 
+console.log("\n--- Test 7: webview page hardening ---");
+const { readHostSource } = require("./helpers/host_source");
+const hostSource = readHostSource();
+const csp = (hostSource.match(/content="(default-src[^"]*)"/) || [])[1] || "";
+const scriptSrc = (csp.match(/script-src([^;]*)/) || [])[1] || "";
+assert(/'nonce-\$\{nonce\}'/.test(scriptSrc), "scripts need the page nonce");
+assert(!scriptSrc.includes("cspSource") && !scriptSrc.includes("unsafe"), `script-src allows nothing but the nonce (${scriptSrc.trim()})`);
+assert(!/\$\{openKeybindingLabel\}/.test(hostSource), "the key label from keybindings.json is escaped");
+const webviewSource = require("fs").readFileSync(require("path").join(__dirname, "../../media/overview.js"), "utf8");
+assert(webviewSource.includes("${escapeHtml(hoveredFile.path)}"), "file names in the magnifier are escaped (a file name can contain markup)");
+assert(webviewSource.includes("script.nonce = window.PDF_JS_NONCE"), "the on-demand pdf.js script carries the nonce");
+console.log("✓ Test 7 passed");
+
 console.log("\nAll robustness & scale tests passed.");
 process.exit(0);

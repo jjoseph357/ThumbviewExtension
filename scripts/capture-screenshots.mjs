@@ -1,5 +1,6 @@
 // Renders the real webview (getHtml + media/overview.js) in headless Chrome against a freshly
-// generated demo workspace and writes the README screenshots and GIF to media/screenshots/.
+// generated demo workspace and writes the README screenshots and GIF to media/screenshots/, plus
+// smaller copies for the Getting Started walkthrough in media/walkthrough/.
 // Nothing here runs VS Code: the host side is replaced by a payload built the same way the
 // host builds it (sorted files, buildSpanningGrid, fillLayoutHoles), sent with postMessage.
 //   npm run screenshots            (needs Chrome or Chromium, python3, and ffmpeg)
@@ -123,5 +124,14 @@ async function typeInSearch(page, text, onChar) {
 }
 
 await browser.close();
+
+// Smaller JPEG copies for the Getting Started walkthrough, which ships inside the extension, so
+// they are kept small (the README images are loaded from the public assets repository instead).
+const walkthroughDir = join(root, "media", "walkthrough");
+for (const [still, step] of [["overview", "open"], ["search", "search"], ["magnifier", "magnify"], ["folders", "tidy"]]) {
+    execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-i", join(outDir, `${still}.png`),
+        "-vf", "scale=960:-1:flags=lanczos", "-q:v", "3", join(walkthroughDir, `${step}.jpg`)]);
+}
+
 cleanup();
 console.log(`Wrote ${readdirSync(outDir).join(", ")} to media/screenshots/`);

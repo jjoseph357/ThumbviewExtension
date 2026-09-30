@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { readHostSource } = require("./helpers/host_source");
 const fs = require("fs");
 const path = require("path");
 
@@ -253,7 +254,7 @@ console.log("\n--- Test 6: gitChanges stride range check identifies changes past
 console.log("\n--- Test 7: Verify PDF_JS_URI exposure and dynamic loading handler ---");
 {
     const extPath = path.join(__dirname, "../extension.ts");
-    const extCode = fs.readFileSync(extPath, "utf-8");
+    const extCode = readHostSource();
     assert(extCode.includes("window.PDF_JS_URI ="), "extension.ts must expose window.PDF_JS_URI");
 
     assert(overviewCode.includes("window.PDF_JS_URI && !window._pdfJsLoading"), "overview.js must handle dynamic PDF script loading");
@@ -266,7 +267,7 @@ console.log("\n--- Test 7: Verify PDF_JS_URI exposure and dynamic loading handle
 console.log("\n--- Test 8: Hover tooltip leading indentation preservation and tab handling ---");
 {
     const extPath = path.join(__dirname, "../extension.ts");
-    const extCode = fs.readFileSync(extPath, "utf-8");
+    const extCode = readHostSource();
 
     // Verify extension.ts styles #hover-tooltip with tab-size
     assert(extCode.includes("tab-size: 4;"), "extension.ts must configure tab-size: 4 for #hover-tooltip");

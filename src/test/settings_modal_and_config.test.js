@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { readHostSource } = require("./helpers/host_source");
 const fs = require("fs");
 const path = require("path");
 const { buildSpanningGrid, cellsNeeded } = require("../../out/spanning_layout");
@@ -106,7 +107,7 @@ console.log(`✓ Test 4 passed: package.json contributes all required configurat
 // -------------------------------------------------------------
 console.log("\n=== Test 5: Verify settings modal HTML structure ===");
 const extTsPath = path.resolve(__dirname, "../../src/extension.ts");
-const extSource = fs.readFileSync(extTsPath, "utf8");
+const extSource = readHostSource();
 
 // Must NOT contain Grid Space in settings modal
 const settingsModalSlice = extSource.substring(

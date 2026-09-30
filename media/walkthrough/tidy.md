@@ -1,5 +1,7 @@
 # Hide what you do not need
 
+![Folders & Ignored lists folders and the patterns hiding files](tidy.jpg)
+
 Files your `.gitignore`, `files.exclude`, or `search.exclude` hide never appear. For anything else:
 
 - Right-click a tile and choose **Ignore in Thumbview**.

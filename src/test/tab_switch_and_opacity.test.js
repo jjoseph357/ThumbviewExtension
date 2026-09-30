@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { readHostSource } = require("./helpers/host_source");
 const fs = require("fs");
 const path = require("path");
 
@@ -121,14 +122,15 @@ console.log("\n--- Test 3: Verify overview.js contains self-healing opacity hand
 console.log("\n--- Test 4: Verify extension.ts contains settle delay & robust close logic ---");
 {
     const extensionPath = path.resolve(__dirname, "../../src/extension.ts");
-    const extensionContent = fs.readFileSync(extensionPath, "utf-8");
+    const extensionContent = readHostSource();
 
     assert.ok(extensionContent.includes("getAllNonThumbviewTabs"), "extension.ts must define getAllNonThumbviewTabs");
     assert.ok(extensionContent.includes("switchToTab"), "extension.ts must define switchToTab");
-    assert.ok(extensionContent.includes("setTimeout(r, 70)"), "extension.ts must have settle delay for Zen mode exit");
+    assert.ok(extensionContent.includes("waitForPanelState(activePanel, p => !p.active, CLOSE_SETTLE_MAX_MS)"), "closing waits for the panel's view-state event, bounded, instead of a fixed sleep");
+    assert.ok(!/setTimeout\(r, \d+\)/.test(extensionContent), "no fixed settle sleeps remain in the open/close paths");
     assert.ok(extensionContent.includes("otherTabs.length === 0"), "extension.ts must handle fallback close when 0 other tabs exist");
     assert.ok(extensionContent.includes("activePanel.dispose()"), "extension.ts must dispose panel on 0 other tabs");
-    console.log("✓ Test 4 passed: extension.ts contains robust tab selection, settle delay, and fallback close");
+    console.log("✓ Test 4 passed: extension.ts contains robust tab selection, an event-based settle, and fallback close");
 }
 
 // Test 5: Overview.js resize guard & reference-invariant folder collapse
@@ -147,7 +149,7 @@ console.log("\n--- Test 5: Verify overview.js guards resize while hidden & refer
 console.log("\n--- Test 6: Verify extension.ts sends unified sendOpenState on reopening ---");
 {
     const extensionPath = path.resolve(__dirname, "../../src/extension.ts");
-    const extensionContent = fs.readFileSync(extensionPath, "utf-8");
+    const extensionContent = readHostSource();
 
     assert.ok(extensionContent.includes("updateVisibleRanges(vscode.window.activeTextEditor || lastActiveTextEditor);"), "extension.ts must update ranges before revealing");
     assert.ok(extensionContent.includes("sendOpenState();"), "extension.ts must send atomic open state");
