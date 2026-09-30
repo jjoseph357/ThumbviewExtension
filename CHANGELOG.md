@@ -37,7 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reflow Layout** now also resets saved tile heights, so tiles return to their natural sizes.
 
 ### Fixed
-- **Closing Thumbview reset split editor sizes to 50/50**: your own proportions are kept.
 - **Returning from Thumbview pinned preview tabs**.
 - **Security hardening**: the page runs only its own nonce'd scripts, file names and key labels are escaped in HTML, typed file and folder names cannot leave the workspace, and settings sent from the page are validated.
 - **Thumbview stopped tracking the active file after opening a file from it** and returning by clicking its tab.

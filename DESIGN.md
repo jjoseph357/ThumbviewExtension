@@ -126,9 +126,9 @@ Reopening reveals the retained panel before maximizing its group. `toggleMaximiz
 
 Two more split-editor defects came from the same handler and toggle. The first open was not marked as a layout operation (reopen was), so the view-state event for the brand-new panel reached the rule that closes Thumbview when "the user dragged it into a split" (fullscreen plus more than one group); with splits open the maximized groups still count, so the panel closed itself and only the second F4 worked. The create path now counts as a layout op and that rule ignores groups Thumbview maximized. Separately, F4 decided open versus close by `panel.visible`, so pressing it in the right group while Thumbview showed in the left one closed Thumbview instead of bringing it forward; it now closes only a focused panel.
 
-## Split sizes are never evened
+## Split editors are left at equal widths
 
-Since v0.3.1 unmaximizing also ran `workbench.action.evenEditorWidths` whenever there was more than one group, even in tab mode where Thumbview maximized nothing. A 70/30 split came back as 50/50 after every close and every file opened from a tile. Unmaximizing already restores the user's own proportions, so the call was removed.
+Closing Thumbview (and opening a file from it) evens the widths of split editor groups (`workbench.action.evenEditorWidths`). A reviewer flagged this as intrusive, so 0.5.0 briefly removed it to keep the user's own proportions. Testing showed that cannot work: VS Code's maximize and unmaximize do not restore group sizes reliably, so with a small right group and a large left one, a close left the right group far smaller than before, and opening from the other group then made the left group unreadably narrow. Equal widths are predictable and always readable, so they are the owner's deliberate choice.
 
 ## Closing next to a split
 

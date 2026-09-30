@@ -1056,8 +1056,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
             } catch { }
         }
-        // Never even out editor widths: unmaximizing restores the user's own split proportions,
-        // and forcing 50/50 (as older versions did) broke the promise to put the layout back.
+        // Split editors are left at equal widths (the owner's decision). VS Code's maximize and
+        // unmaximize do not restore sizes reliably: keeping the user's proportions left one group
+        // tiny and the other huge after a close, sometimes unreadable.
+        if (vscode.window.tabGroups.all.length > 1) {
+            try {
+                await vscode.commands.executeCommand("workbench.action.evenEditorWidths");
+            } catch { }
+        }
     };
 
     const isThumbviewTab = (tab: vscode.Tab): boolean => {
