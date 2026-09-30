@@ -1,10 +1,12 @@
 import * as vscode from "vscode";
 import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache, invalidateScanFile, setScanPriorityProvider } from "./scanner";
 import { isAlwaysExcluded } from "./file_discovery";
-import { isSafeRelativePath, isSafeWebviewMessage } from "./message_guard";
+import { isSafeWebviewMessage } from "./message_guard";
+import { askDeleteMode, createFileActions } from "./file_actions";
+import { createSettingsActions, FULLSCREEN_NOTICE_KEY, SHORTCUT_LEGEND_DISMISSED_KEY } from "./settings_actions";
 import { isThumbviewViewType, THUMBVIEW_VIEW_TYPE } from "./webview_tabs";
 import { PanelSession } from "./panel_session";
-import { decideF4, EditorGroupTracker, type EditorInfo, type GroupInfo, type TabInfo } from "./editor_groups";
+import { decideF4, EditorGroupTracker, type EditorInfo, type GroupInfo, type OpenResult, type TabInfo } from "./editor_groups";
 import { buildStableGrid, slotToIndex, findSlotIndex, MIN_GRID_COLS, MIN_GRID_ROWS } from "./layout";
 import { buildSpanningGrid, cellsNeeded, SpanningPlacement, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT } from "./spanning_layout";
 import { PersistentFileOrder } from "./state";
@@ -158,7 +160,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
-    let lastCopiedItem: { uri: vscode.Uri; isFolder: boolean; isCut: boolean } | null = null;
 
     // Reads the user setting fresh each call (rather than caching) so a config change
     // picked up by the onDidChangeConfiguration listener below is always honored.
@@ -1026,8 +1027,6 @@ export async function activate(context: vscode.ExtensionContext) {
     // sent, so closing Thumbview without answering never brings it back. Protocol: host -> webview
     // "fullscreenNotice" { keybinding } and "fullscreenSetting" { enabled }; webview -> host
     // "dismissFullscreenNotice" or "setFullscreenOnOpen" { enabled }.
-    const FULLSCREEN_NOTICE_KEY = "thumbview.fullscreenNoticeShown";
-    const SHORTCUT_LEGEND_DISMISSED_KEY = "thumbview.shortcutLegendDismissed";
     // When openState is held and when the return point is recorded or dropped (panel_session.ts).
     const session = new PanelSession();
     const maybeShowFullscreenNotice = (panel: vscode.WebviewPanel) => {
@@ -1050,15 +1049,18 @@ export async function activate(context: vscode.ExtensionContext) {
     };
 
     const unmaximizeIfSplits = async (): Promise<void> => {
-        if (groupMaximizedByUs) {
-            groupMaximizedByUs = false;
-            try {
-                await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
-            } catch { }
+        if (!groupMaximizedByUs) {
+            // Thumbview changed nothing (tab mode, or no splits when it opened): split widths are
+            // the user's and are never touched.
+            return;
         }
-        // Split editors are left at equal widths (the owner's decision). VS Code's maximize and
-        // unmaximize do not restore sizes reliably: keeping the user's proportions left one group
-        // tiny and the other huge after a close, sometimes unreadable.
+        groupMaximizedByUs = false;
+        try {
+            await vscode.commands.executeCommand("workbench.action.toggleMaximizeEditorGroup");
+        } catch { }
+        // After undoing our own maximize, split editors are left at equal widths (the owner's
+        // decision): VS Code's unmaximize does not restore sizes reliably, and keeping the
+        // user's proportions left one group tiny and the other huge, sometimes unreadable.
         if (vscode.window.tabGroups.all.length > 1) {
             try {
                 await vscode.commands.executeCommand("workbench.action.evenEditorWidths");
@@ -1182,16 +1184,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Defense in depth for message_guard: for file URIs compare the resolved real path against each
     // workspace folder, since getWorkspaceFolder compares unnormalized paths.
-    // A name typed into New File / New Folder / Rename, resolved inside the workspace folder.
-    // Absolute paths and ".." segments are refused (message_guard's rule for webview paths).
-    const typedPathInside = (folder: vscode.Uri, typed: string): vscode.Uri | undefined => {
-        if (!isSafeRelativePath(typed.trim())) {
-            vscode.window.showErrorMessage(`"${typed}" is outside the workspace. Use a name or a path inside it.`);
-            return undefined;
-        }
-        return vscode.Uri.joinPath(folder, typed.trim());
-    };
-
     const isUriInsideWorkspace = (uriString: string): boolean => {
         const uri = vscode.Uri.parse(uriString);
         if (uri.scheme !== "file") {
@@ -1313,19 +1305,18 @@ export async function activate(context: vscode.ExtensionContext) {
         const closeTransitionId = beginTransition(activePanel);
         try {
 
-            // No settle sleeps: both commands resolve once the workbench has applied them.
-            if (thumbviewEnteredZenMode) {
-                thumbviewEnteredZenMode = false;
-                await exitFullscreen();
-            }
-            if (groupMaximizedByUs) {
-                await unmaximizeIfSplits();
-            }
-
-            // Robust Tab Switcher:
-            // 0. Return to where the user was when F4 opened Thumbview (returnTo).
+            // One visual step, as for jump (switchLeavingFullscreen): the Zen exit, the unmaximize,
+            // and the return to the user's file are sent back to back, so the file appears directly
+            // in the restored layout instead of after a frame of the empty layout. Dispatch order is
+            // exit, unmaximize, then show (openInGroup loads the document first), so the maximize is
+            // undone before a file opens in another group. All settle before the fallbacks run.
+            // 0. Return to where the user was when F4 opened Thumbview (the tracker's return point).
             // 1. Otherwise try lastActiveTextEditor if valid and not closed
-            const returnResult = await editorGroups.returnToEditor();
+            const exiting = thumbviewEnteredZenMode ? (thumbviewEnteredZenMode = false, exitFullscreen()) : Promise.resolve();
+            const unmaximizing = unmaximizeIfSplits();
+            const returning = editorGroups.returnToEditor();
+            const [, , returnSettled] = await Promise.allSettled([exiting, unmaximizing, returning]);
+            const returnResult: OpenResult = returnSettled.status === "fulfilled" ? returnSettled.value : "failed";
             // A timed-out return may still land, so no fallback open is started after it.
             let switched = returnResult !== "failed";
             if (!switched && lastActiveTextEditor && !lastActiveTextEditor.document.isClosed) {
@@ -1560,6 +1551,35 @@ export async function activate(context: vscode.ExtensionContext) {
             // layoutOpsInFlight raised, which would make the view-state handler ignore every event.
             releaseLayoutOp();
 
+            // Settings, ignore patterns, and one-time notices (settings_actions.ts).
+            const settingsActions = createSettingsActions({
+                context,
+                get activePanel() {
+                    return activePanel;
+                },
+                refreshThumbview,
+                updateLayoutFromCache,
+                getIgnoreState,
+                persistIgnoreState,
+                refreshProviders,
+                isFullscreenOnOpen,
+                forgetSpanningPlacements: () => {
+                    lastSpanningPlacements = [];
+                }
+            });
+
+            // Explorer-style file actions from tiles and folder cards (file_actions.ts).
+            const fileActions = createFileActions({
+                get activePanel() {
+                    return activePanel;
+                },
+                refreshThumbview,
+                updateLayoutFromCache,
+                getIgnoreState,
+                persistIgnoreState,
+                refreshProviders
+            });
+
             panel.webview.onDidReceiveMessage(async msg => {
                 if (!isSafeWebviewMessage(msg, isUriInsideWorkspace)) {
                     console.warn("THUMBVIEW: rejected webview message targeting a path outside the workspace", msg && msg.command);
@@ -1592,30 +1612,9 @@ export async function activate(context: vscode.ExtensionContext) {
                     maybeShowFullscreenNotice(panel);
                 }
 
-                if (msg.command === "dismissShortcutLegend") {
-                    await context.globalState.update(SHORTCUT_LEGEND_DISMISSED_KEY, true);
-                    return;
-                }
-
-                if (msg.command === "dismissFullscreenNotice") {
-                    await context.globalState.update(FULLSCREEN_NOTICE_KEY, true);
-                    return;
-                }
-
                 // From the fullscreen banner or the settings toggle. The configuration listener
                 // applies it (leaving fullscreen when turned off), exactly as for a settings.json
                 // edit, so a failed write never leaves the window out of step with the setting.
-                if (msg.command === "setFullscreenOnOpen") {
-                    await context.globalState.update(FULLSCREEN_NOTICE_KEY, true);
-                    try {
-                        await vscode.workspace.getConfiguration("thumbview").update("fullscreenOnOpen", !!msg.enabled, vscode.ConfigurationTarget.Global);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to change fullscreen setting: ${err?.message ?? String(err)}`);
-                        panel.webview.postMessage({ command: "fullscreenSetting", enabled: isFullscreenOnOpen() });
-                    }
-                    return;
-                }
-
                 // The webview lacks lines for these ids (e.g. a delta payload arrived after one it
                 // skipped). Fields: { ids: string[] } — see applyDataMessage in overview.js.
                 if (msg.command === "requestFileLines" && Array.isArray(msg.ids)) {
@@ -1885,547 +1884,18 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                 }
 
-                if (msg.command === "openPreview") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("vscode.open", uri, { preview: true });
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to open preview: ${err?.message ?? String(err)}`);
-                    }
+                // Settings, ignore patterns, and one-time notices (settings_actions.ts), by command name.
+                const settingsAction = settingsActions[msg.command];
+                if (settingsAction) {
+                    await settingsAction(msg);
+                    return;
                 }
 
-                if (msg.command === "openToSide") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("vscode.open", uri, { viewColumn: vscode.ViewColumn.Beside });
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to open to side: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "revealInFiles") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("revealInExplorer", uri);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to reveal in explorer: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "renameFile") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        const oldPath = msg.path || vscode.workspace.asRelativePath(uri);
-                        const newName = await vscode.window.showInputBox({
-                            prompt: "Enter new name/relative path for file",
-                            value: oldPath
-                        });
-                        if (newName && newName !== oldPath) {
-                            const wsFolder = vscode.workspace.getWorkspaceFolder(uri);
-                            const newUri = wsFolder && typedPathInside(wsFolder.uri, newName);
-                            if (wsFolder && newUri) {
-                                const edit = new vscode.WorkspaceEdit();
-                                edit.renameFile(uri, newUri, { overwrite: false });
-                                const success = await vscode.workspace.applyEdit(edit);
-                                if (success && activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to rename file: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "deleteFile") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        const fileName = vscode.workspace.asRelativePath(uri);
-                        const mode = await askDeleteMode(`'${fileName}'`);
-                        if (mode) {
-                            await vscode.workspace.fs.delete(uri, { useTrash: mode === "trash" });
-                            if (activePanel) {
-                                refreshThumbview(activePanel);
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to delete file: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "ignoreFile") {
-                    try {
-                        const relPath = (msg.path || "").replace(/\\/g, "/").trim();
-                        if (relPath) {
-                            const state = getIgnoreState();
-                            const cleanPattern = relPath.replace(/\/+$/, "");
-                            const exists = state.ignorePatterns.some(p => p === relPath || p.replace(/\/+$/, "") === cleanPattern);
-                            if (!exists) {
-                                await persistIgnoreState({ ...state, ignorePatterns: [relPath, ...state.ignorePatterns] });
-                                vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
-                                refreshProviders();
-                            }
-                            if (activePanel) {
-                                await updateLayoutFromCache(activePanel);
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to ignore file: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "copyPath") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.env.clipboard.writeText(uri.fsPath);
-                        vscode.window.showInformationMessage("Copied path to clipboard.");
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to copy path: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "copyRelativePath") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        const rel = vscode.workspace.asRelativePath(uri);
-                        await vscode.env.clipboard.writeText(rel);
-                        vscode.window.showInformationMessage("Copied relative path to clipboard.");
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to copy relative path: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "copyFile") {
-                    const uri = vscode.Uri.parse(msg.uri);
-                    lastCopiedItem = { uri, isFolder: false, isCut: false };
-                    try {
-                        await vscode.commands.executeCommand("filesExplorer.copy", uri);
-                    } catch (err: any) {
-                        await vscode.env.clipboard.writeText(uri.fsPath);
-                    }
-                    vscode.window.showInformationMessage(`Copied '${vscode.workspace.asRelativePath(uri)}'.`);
-                }
-
-                if (msg.command === "cutFile") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        lastCopiedItem = { uri, isFolder: false, isCut: true };
-                        await vscode.commands.executeCommand("filesExplorer.cut", uri);
-                        vscode.window.showInformationMessage(`Cut '${vscode.workspace.asRelativePath(uri)}'.`);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to cut file: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "newFile") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderPrefix = msg.targetFolder ? msg.targetFolder.replace(/^\/+|\/+$/g, "") + "/" : "";
-                            const input = await vscode.window.showInputBox({
-                                prompt: "Enter file name or relative path",
-                                value: folderPrefix
-                            });
-                            const targetUri = input && input !== folderPrefix ? typedPathInside(wsFolder.uri, input) : undefined;
-                            if (targetUri) {
-                                await vscode.workspace.fs.writeFile(targetUri, new Uint8Array());
-                                const doc = await vscode.workspace.openTextDocument(targetUri);
-                                await vscode.window.showTextDocument(doc);
-                                if (activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to create file: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "newFolder") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderPrefix = msg.targetFolder ? msg.targetFolder.replace(/^\/+|\/+$/g, "") + "/" : "";
-                            const input = await vscode.window.showInputBox({
-                                prompt: "Enter folder name or relative path",
-                                value: folderPrefix
-                            });
-                            const targetUri = input && input !== folderPrefix ? typedPathInside(wsFolder.uri, input) : undefined;
-                            if (targetUri) {
-                                await vscode.workspace.fs.createDirectory(targetUri);
-                                vscode.window.showInformationMessage(`Created folder '${input}'.`);
-                                if (activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to create folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "copyFolder") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
-                            lastCopiedItem = { uri: folderUri, isFolder: true, isCut: false };
-                            try {
-                                await vscode.commands.executeCommand("filesExplorer.copy", folderUri);
-                            } catch {
-                                await vscode.env.clipboard.writeText(folderUri.fsPath);
-                            }
-                            vscode.window.showInformationMessage(`Copied folder '${folderRel}'.`);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to copy folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "cutFolder") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
-                            lastCopiedItem = { uri: folderUri, isFolder: true, isCut: true };
-                            try {
-                                await vscode.commands.executeCommand("filesExplorer.cut", folderUri);
-                            } catch {
-                                await vscode.env.clipboard.writeText(folderUri.fsPath);
-                            }
-                            vscode.window.showInformationMessage(`Cut folder '${folderRel}'.`);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to cut folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "copyFolderPath") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
-                            await vscode.env.clipboard.writeText(folderUri.fsPath);
-                            vscode.window.showInformationMessage("Copied folder path to clipboard.");
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to copy path: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "copyFolderRelativePath") {
-                    try {
-                        const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                        await vscode.env.clipboard.writeText(folderRel);
-                        vscode.window.showInformationMessage("Copied relative folder path to clipboard.");
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to copy relative path: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "renameFolder") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const oldRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                            const oldUri = vscode.Uri.joinPath(wsFolder.uri, oldRel);
-                            const newName = await vscode.window.showInputBox({
-                                prompt: "Enter new name/relative path for folder",
-                                value: oldRel
-                            });
-                            const newUri = newName && newName !== oldRel ? typedPathInside(wsFolder.uri, newName) : undefined;
-                            if (newUri) {
-                                const edit = new vscode.WorkspaceEdit();
-                                edit.renameFile(oldUri, newUri, { overwrite: false });
-                                const success = await vscode.workspace.applyEdit(edit);
-                                if (success && activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to rename folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "deleteFolder") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
-                            const mode = await askDeleteMode(`folder '${folderRel}' and all its contents`);
-                            if (mode) {
-                                await vscode.workspace.fs.delete(folderUri, { recursive: true, useTrash: mode === "trash" });
-                                if (activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to delete folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "revealFolder") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
-                            await vscode.commands.executeCommand("revealInExplorer", folderUri);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to reveal folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "openFolderInTerminal") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const folderRel = (msg.folderPath || "").replace(/^\/+|\/+$/g, "");
-                            const folderUri = vscode.Uri.joinPath(wsFolder.uri, folderRel);
-                            await vscode.commands.executeCommand("openInTerminal", folderUri);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to open in integrated terminal: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "ignoreFolder") {
-                    try {
-                        const relPath = (msg.folderPath || "").replace(/\\/g, "/").trim();
-                        if (relPath) {
-                            const state = getIgnoreState();
-                            const cleanPattern = relPath.replace(/\/+$/, "");
-                            const exists = state.ignorePatterns.some(p => p === relPath || p.replace(/\/+$/, "") === cleanPattern);
-                            if (!exists) {
-                                await persistIgnoreState({ ...state, ignorePatterns: [relPath, ...state.ignorePatterns] });
-                                vscode.window.showInformationMessage(`Added '${relPath}' to Thumbview ignore list.`);
-                            }
-                            refreshProviders();
-                            if (activePanel) {
-                                await updateLayoutFromCache(activePanel);
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to ignore folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "moveFileToFolder") {
-                    try {
-                        const sourceUri = vscode.Uri.parse(msg.uri);
-                        const fileName = sourceUri.path.split("/").pop() || "file";
-                        const wsFolder = vscode.workspace.getWorkspaceFolder(sourceUri) || vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const targetFolderRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "");
-                            const targetUri = targetFolderRel
-                                ? vscode.Uri.joinPath(wsFolder.uri, targetFolderRel, fileName)
-                                : vscode.Uri.joinPath(wsFolder.uri, fileName);
-
-                            if (sourceUri.toString() !== targetUri.toString()) {
-                                const edit = new vscode.WorkspaceEdit();
-                                edit.renameFile(sourceUri, targetUri, { overwrite: false });
-                                const success = await vscode.workspace.applyEdit(edit);
-                                if (success) {
-                                    vscode.window.showInformationMessage(`Moved '${fileName}' to '${targetFolderRel || "root"}'.`);
-                                    if (activePanel) {
-                                        refreshThumbview(activePanel);
-                                    }
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to move file: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "pasteItem") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const targetFolderRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "");
-                            const targetDirUri = targetFolderRel ? vscode.Uri.joinPath(wsFolder.uri, targetFolderRel) : wsFolder.uri;
-
-                            try {
-                                await vscode.workspace.fs.createDirectory(targetDirUri);
-                            } catch {
-                                // Already exists
-                            }
-
-                            if (lastCopiedItem) {
-                                const sourceUri = lastCopiedItem.uri;
-                                const sourceName = sourceUri.path.split("/").filter(Boolean).pop() || "item";
-                                let destUri = vscode.Uri.joinPath(targetDirUri, sourceName);
-
-                                if (lastCopiedItem.isCut) {
-                                    if (sourceUri.toString() !== destUri.toString()) {
-                                        const edit = new vscode.WorkspaceEdit();
-                                        edit.renameFile(sourceUri, destUri, { overwrite: false });
-                                        await vscode.workspace.applyEdit(edit);
-                                        vscode.window.showInformationMessage(`Moved '${sourceName}' to '${targetFolderRel || "root"}'.`);
-                                    }
-                                    lastCopiedItem = null;
-                                } else {
-                                    let finalDestUri = destUri;
-                                    let exists = true;
-                                    try {
-                                        await vscode.workspace.fs.stat(finalDestUri);
-                                    } catch {
-                                        exists = false;
-                                    }
-                                    if (exists) {
-                                        const ext = (!lastCopiedItem.isFolder && sourceName.includes(".")) ? "." + sourceName.split(".").pop() : "";
-                                        const base = ext ? sourceName.slice(0, -ext.length) : sourceName;
-                                        let copyIdx = 1;
-                                        while (true) {
-                                            const candName = `${base} copy${copyIdx > 1 ? " " + copyIdx : ""}${ext}`;
-                                            const candUri = vscode.Uri.joinPath(targetDirUri, candName);
-                                            try {
-                                                await vscode.workspace.fs.stat(candUri);
-                                                copyIdx++;
-                                            } catch {
-                                                finalDestUri = candUri;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    await vscode.workspace.fs.copy(sourceUri, finalDestUri, { overwrite: false });
-                                    vscode.window.showInformationMessage(`Pasted '${finalDestUri.path.split("/").pop()}'.`);
-                                }
-                                if (activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            } else {
-                                const clipboardText = (await vscode.env.clipboard.readText() || "").trim();
-                                if (clipboardText && (clipboardText.startsWith("/") || clipboardText.match(/^[A-Za-z]:[\\/]/))) {
-                                    const clipUri = vscode.Uri.file(clipboardText);
-                                    try {
-                                        await vscode.workspace.fs.stat(clipUri);
-                                        const clipName = clipUri.path.split("/").filter(Boolean).pop() || "item";
-                                        const destUri = vscode.Uri.joinPath(targetDirUri, clipName);
-                                        await vscode.workspace.fs.copy(clipUri, destUri, { overwrite: false });
-                                        vscode.window.showInformationMessage(`Pasted '${clipName}'.`);
-                                        if (activePanel) {
-                                            refreshThumbview(activePanel);
-                                        }
-                                        return;
-                                    } catch {
-                                        // Not a valid path, continue
-                                    }
-                                }
-                                await vscode.commands.executeCommand("filesExplorer.paste");
-                                if (activePanel) {
-                                    refreshThumbview(activePanel);
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to paste: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "selectForCompare") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("selectForCompare", uri);
-                        vscode.window.showInformationMessage(`Selected '${vscode.workspace.asRelativePath(uri)}' for compare.`);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to select for compare: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "compareWithSelected") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("compareFiles", uri);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to compare: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "openContainingFolder") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        const folderUri = vscode.Uri.joinPath(uri, "..");
-                        await vscode.commands.executeCommand("revealFileInOS", folderUri);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to open containing folder: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "openWith") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("explorer.openWith", uri);
-                    } catch {
-                        try {
-                            const uri = vscode.Uri.parse(msg.uri);
-                            await vscode.commands.executeCommand("workbench.action.openWith", uri);
-                        } catch (err: any) {
-                            vscode.window.showErrorMessage(`Failed to open with: ${err?.message ?? String(err)}`);
-                        }
-                    }
-                }
-
-                if (msg.command === "openInTerminal") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("openInTerminal", uri);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to open in integrated terminal: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "openTimeline") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        await vscode.commands.executeCommand("filesExplorer.openTimeline", uri);
-                    } catch {
-                        try {
-                            await vscode.commands.executeCommand("timeline.focus");
-                        } catch (err: any) {
-                            vscode.window.showErrorMessage(`Failed to open timeline: ${err?.message ?? String(err)}`);
-                        }
-                    }
-                }
-
-                if (msg.command === "runTests") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        const doc = await vscode.workspace.openTextDocument(uri);
-                        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
-                        await vscode.commands.executeCommand("testing.runCurrentFile");
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to run tests: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "debugTests") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        const doc = await vscode.workspace.openTextDocument(uri);
-                        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
-                        await vscode.commands.executeCommand("testing.debugCurrentFile");
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to debug tests: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "coverageTests") {
-                    try {
-                        const uri = vscode.Uri.parse(msg.uri);
-                        const doc = await vscode.workspace.openTextDocument(uri);
-                        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
-                        await vscode.commands.executeCommand("testing.coverageCurrentFile");
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to run tests with coverage: ${err?.message ?? String(err)}`);
-                    }
+                // File and Explorer actions (file_actions.ts), looked up by command name.
+                const fileAction = fileActions[msg.command];
+                if (fileAction) {
+                    await fileAction(msg);
+                    return;
                 }
 
                 if (msg.command === "reorderFile") {
@@ -2601,33 +2071,6 @@ export async function activate(context: vscode.ExtensionContext) {
                             vscode.window.showErrorMessage(`Failed to reorder file: ${err?.message ?? String(err)}`);
                         }
                     });
-                }
-
-                if (msg.command === "moveFolderToFolder") {
-                    try {
-                        const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (wsFolder) {
-                            const srcRel = (msg.sourceFolder || "").replace(/^\/+|\/+$/g, "");
-                            const tgtRel = (msg.targetFolder || "").replace(/^\/+|\/+$/g, "");
-                            const folderName = srcRel.split("/").filter(Boolean).pop() || "folder";
-                            const srcUri = vscode.Uri.joinPath(wsFolder.uri, srcRel);
-                            const destUri = tgtRel ? vscode.Uri.joinPath(wsFolder.uri, tgtRel, folderName) : vscode.Uri.joinPath(wsFolder.uri, folderName);
-
-                            if (srcUri.toString() !== destUri.toString()) {
-                                const edit = new vscode.WorkspaceEdit();
-                                edit.renameFile(srcUri, destUri, { overwrite: false });
-                                const success = await vscode.workspace.applyEdit(edit);
-                                if (success) {
-                                    vscode.window.showInformationMessage(`Moved folder '${folderName}' to '${tgtRel || "root"}'.`);
-                                    if (activePanel) {
-                                        refreshThumbview(activePanel);
-                                    }
-                                }
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to move folder: ${err?.message ?? String(err)}`);
-                    }
                 }
 
                 if (msg.command === "reorderFolder") {
@@ -2828,92 +2271,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                 }
 
-                if (msg.command === "setDragReorderMode") {
-                    try {
-                        const config = vscode.workspace.getConfiguration("thumbview");
-                        if (msg.mode !== "swap" && msg.mode !== "shift") {
-                            return;
-                        }
-                        await config.update("dragReorderMode", msg.mode, vscode.ConfigurationTarget.Global);
-                        const modeStr = !msg.mode ? "" : msg.mode.charAt(0).toUpperCase() + msg.mode.slice(1);
-                        vscode.window.showInformationMessage(`Thumbview Drag Reorder Mode set to ${modeStr}.`);
-                        if (activePanel) {
-                            updateLayoutFromCache(activePanel);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to set drag reorder mode: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "setLayoutMode") {
-                    try {
-                        const config = vscode.workspace.getConfiguration("thumbview");
-                        if (msg.mode !== "uniform_grid" && msg.mode !== "spanning_grid") {
-                            return;
-                        }
-                        await config.update("layoutMode", msg.mode, vscode.ConfigurationTarget.Global);
-                        if (activePanel) {
-                            refreshThumbview(activePanel);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to set layout mode: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "setRenderMediaThumbnails") {
-                    try {
-                        const config = vscode.workspace.getConfiguration("thumbview");
-                        await config.update("renderMediaThumbnails", !!msg.enabled, vscode.ConfigurationTarget.Global);
-                        if (activePanel) {
-                            refreshThumbview(activePanel);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to set media thumbnails: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "setCompressionPercentage") {
-                    try {
-                        const val = Math.max(0, Math.min(25, Math.round(Number(msg.value) || 0)));
-                        const config = vscode.workspace.getConfiguration("thumbview");
-                        await context.workspaceState.update("thumbview.spanningRows", undefined);
-                        await context.workspaceState.update("thumbview.spanningAllocations", undefined);
-                        lastSpanningPlacements = [];
-                        await config.update("compressionPercentage", val, vscode.ConfigurationTarget.Global);
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to set compression percentage: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "setMinCellDimensions") {
-                    try {
-                        const w = Math.max(10, Math.min(500, Math.round(Number(msg.minCellWidth) || 60)));
-                        const h = Math.max(10, Math.min(500, Math.round(Number(msg.minCellHeight) || 40)));
-                        const config = vscode.workspace.getConfiguration("thumbview");
-                        await config.update("minCellWidth", w, vscode.ConfigurationTarget.Global);
-                        await config.update("minCellHeight", h, vscode.ConfigurationTarget.Global);
-                        if (activePanel) {
-                            refreshThumbview(activePanel);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to set tile collapse dimensions: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "setAutoIgnoreThreshold") {
-                    try {
-                        const val = Math.max(0, Math.round(Number(msg.threshold) || 0));
-                        const config = vscode.workspace.getConfiguration("thumbview");
-                        await config.update("autoIgnoreThreshold", val, vscode.ConfigurationTarget.Global);
-                        clearScanCache();
-                        if (activePanel) {
-                            refreshThumbview(activePanel);
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to set auto-ignore threshold: ${err?.message ?? String(err)}`);
-                    }
-                }
-
                 if (msg.command === "refresh") {
                     try {
                         clearScanCache();
@@ -2972,53 +2329,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                 }
 
-                if (msg.command === "addIgnorePattern") {
-                    try {
-                        const pattern = (msg.pattern || "").replace(/\\/g, "/").trim();
-                        if (pattern) {
-                            const state = getIgnoreState();
-                            const cleanPattern = pattern.replace(/\/+$/, "");
-                            const exists = state.ignorePatterns.some(p => p === pattern || p.replace(/\/+$/, "") === cleanPattern);
-                            if (!exists) {
-                                await persistIgnoreState({ ...state, ignorePatterns: [pattern, ...state.ignorePatterns] });
-                                vscode.window.showInformationMessage(`Added '${pattern}' to ignore list.`);
-                                refreshProviders();
-                            }
-                            if (activePanel) {
-                                await updateLayoutFromCache(activePanel);
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to add ignore pattern: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "removeIgnorePattern") {
-                    try {
-                        const pattern = (msg.pattern || "").trim();
-                        if (pattern) {
-                            const state = getIgnoreState();
-                            const cleanPattern = pattern.replace(/\/+$/, "");
-                            const updatedPatterns = state.ignorePatterns.filter(p => p !== pattern && p.replace(/\/+$/, "") !== cleanPattern);
-                            const updatedExclusions = [...state.autoIgnoreExclusions];
-                            if (!updatedExclusions.some(p => p === pattern || p.replace(/\/+$/, "") === cleanPattern)) {
-                                updatedExclusions.push(pattern);
-                            }
-                            await persistIgnoreState({ ignorePatterns: updatedPatterns, autoIgnoreExclusions: updatedExclusions });
-                            vscode.window.showInformationMessage(`Unignored '${pattern}'.`);
-                            refreshProviders();
-                            if (activePanel) {
-                                await refreshThumbview(activePanel);
-                            }
-                        }
-                    } catch (err: any) {
-                        vscode.window.showErrorMessage(`Failed to remove ignore pattern: ${err?.message ?? String(err)}`);
-                    }
-                }
-
-                if (msg.command === "configureHotkey") {
-                    vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "thumbview.open");
-                }
             });
 
             panel.onDidChangeViewState(async e => {
@@ -3076,11 +2386,12 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (activePanel === panel) {
                     activePanel = undefined;
                 }
-                await unmaximizeIfSplits();
+                // Same order as every other path: leave Zen first, then undo our maximize.
                 if (thumbviewEnteredZenMode) {
                     thumbviewEnteredZenMode = false;
                     await exitFullscreen();
                 }
+                await unmaximizeIfSplits();
             }));
     }, withLayoutLock);
 
@@ -3597,26 +2908,6 @@ let deactivateHook: (() => Promise<void>) | undefined;
  * Asks how to delete `label`. Moving to the Trash is the first, recoverable choice; a permanent
  * delete needs a second, explicit confirmation because it cannot be undone.
  */
-async function askDeleteMode(label: string): Promise<"trash" | "permanent" | undefined> {
-    const choice = await vscode.window.showWarningMessage(
-        `Delete ${label}?`,
-        { modal: true, detail: "Moving to the Trash can be undone from your system's Trash." },
-        "Move to Trash",
-        "Delete Permanently"
-    );
-    if (choice === "Move to Trash") {
-        return "trash";
-    }
-    if (choice !== "Delete Permanently") {
-        return undefined;
-    }
-    const confirmed = await vscode.window.showWarningMessage(
-        `Permanently delete ${label}?`,
-        { modal: true, detail: "This cannot be undone." },
-        "Delete Permanently"
-    );
-    return confirmed === "Delete Permanently" ? "permanent" : undefined;
-}
 
 export function deactivate(): Promise<void> | undefined {
     return deactivateHook?.();

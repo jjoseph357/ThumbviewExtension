@@ -17,6 +17,7 @@
   "bugs": {
     "url": "https://github.com/jjoseph357/thumbview-issues/issues"
   },
+  "homepage": "https://github.com/jjoseph357/thumbview-issues#readme",
   "engines": {
     "vscode": "^1.107.0"
   },

@@ -158,9 +158,10 @@ assert(compInputSetupSlice.includes('e.key === "Enter"'), "compPercentageInput m
 
 // In extension.ts, setCompressionPercentage handler must not make duplicate calls to updateLayoutFromCache
 const extCompSlice = extSource.substring(
-    extSource.indexOf('if (msg.command === "setCompressionPercentage")'),
-    extSource.indexOf('if (msg.command === "setMinCellDimensions")')
+    extSource.indexOf("setCompressionPercentage: async"),
+    extSource.indexOf("setMinCellDimensions: async")
 );
+assert(extCompSlice.length > 100, "the setCompressionPercentage handler must be found (settings_actions.ts)");
 assert(!extCompSlice.includes("updateLayoutFromCache"), "setCompressionPercentage must not redundantly call updateLayoutFromCache since onDidChangeConfiguration handles it");
 
 // 1% compression (raw = 1) must parse to 0.01 (not 0.25 or 1.0)
