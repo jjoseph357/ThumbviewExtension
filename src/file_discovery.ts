@@ -2,6 +2,7 @@
 // a hard-coded folder blocklist. Returns file URIs across all workspace folders.
 import * as vscode from "vscode";
 import { execFile } from "child_process";
+import { shouldIgnore } from "./ignore_rules";
 
 // Always skipped: VCS metadata and dependency trees are never source the user wrote, and
 // enumerating node_modules alone can cost more than the rest of the scan.
@@ -82,15 +83,36 @@ export function isAlwaysExcluded(relativePath: string): boolean {
     return relativePath.split("/").some(segment => ALWAYS_EXCLUDED_DIRS.includes(segment));
 }
 
+/** True when the folder itself is ignored by an enclosing git repository. */
+export function isFolderGitIgnored(folder: vscode.WorkspaceFolder): Promise<boolean> {
+    if (!folder?.uri || folder.uri.scheme !== "file" || !vscode.workspace?.isTrusted) {
+        return Promise.resolve(false);
+    }
+    return new Promise(resolve => {
+        execFile(
+            "git",
+            ["check-ignore", "-q", "."],
+            { cwd: folder.uri.fsPath, timeout: 3000 },
+            (error) => {
+                // Exit code 0 means git considers this folder ignored.
+                resolve(!error);
+            }
+        );
+    });
+}
+
 /**
  * `git ls-files` lists tracked files plus untracked files not ignored by any .gitignore level,
  * .git/info/exclude, or the global excludes file — exactly the files a developer considers
  * theirs. Returns null when git is unavailable, the folder is not a repository, or the
  * workspace is untrusted (a repository's own git config can run commands, e.g. core.fsmonitor).
  */
-function listViaGit(folder: vscode.WorkspaceFolder): Promise<string[] | null> {
+async function listViaGit(folder: vscode.WorkspaceFolder): Promise<string[] | null> {
     if (folder.uri.scheme !== "file" || !vscode.workspace.isTrusted) {
-        return Promise.resolve(null);
+        return null;
+    }
+    if (await isFolderGitIgnored(folder)) {
+        return null;
     }
     return new Promise(resolve => {
         execFile(
@@ -108,6 +130,16 @@ function listViaGit(folder: vscode.WorkspaceFolder): Promise<string[] | null> {
     });
 }
 
+/** Rules from a folder's root .gitignore, for the listing path that cannot ask git. */
+async function readRootGitignore(folder: vscode.WorkspaceFolder): Promise<string[]> {
+    try {
+        const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder.uri, ".gitignore"));
+        return Buffer.from(bytes).toString("utf8").split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith("#"));
+    } catch {
+        return [];
+    }
+}
+
 /** Files to scan across every workspace folder, after .gitignore (via git), files.exclude/search.exclude, and ALWAYS_EXCLUDED_DIRS. */
 export async function listWorkspaceFiles(): Promise<vscode.Uri[]> {
     const folders = vscode.workspace.workspaceFolders || [];
@@ -116,18 +148,25 @@ export async function listWorkspaceFiles(): Promise<vscode.Uri[]> {
         const isExcluded = (rel: string) => isAlwaysExcluded(rel) || excludeRegexes.some(re => re.test(rel));
 
         const gitPaths = await listViaGit(folder);
-        if (gitPaths) {
+        if (gitPaths && gitPaths.length > 0) {
             return gitPaths
                 .filter(rel => !isExcluded(rel))
                 .map(rel => vscode.Uri.joinPath(folder.uri, rel));
         }
 
-        // Not a git repository, git missing, untrusted, or a virtual/remote file system.
-        const found = await vscode.workspace.findFiles(
-            new vscode.RelativePattern(folder, "**/*"),
-            `**/{${ALWAYS_EXCLUDED_DIRS.join(",")}}/**`
-        );
-        return found.filter(uri => !isExcluded(vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/")));
+        // Not a git repository, git missing, untrusted, or a virtual/remote file system. The folder's
+        // root .gitignore still applies (read, never executed), so build output stays hidden here too.
+        const [found, gitignoreRules] = await Promise.all([
+            vscode.workspace.findFiles(
+                new vscode.RelativePattern(folder, "**/*"),
+                `**/{${ALWAYS_EXCLUDED_DIRS.join(",")}}/**`
+            ),
+            readRootGitignore(folder)
+        ]);
+        return found.filter(uri => {
+            const rel = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/");
+            return !isExcluded(rel) && !shouldIgnore(rel, gitignoreRules);
+        });
     }));
     return perFolder.flat();
 }
@@ -135,4 +174,63 @@ export async function listWorkspaceFiles(): Promise<vscode.Uri[]> {
 /** A file whose first 8KB contain a NUL character is treated as binary and not shown as code. */
 export function looksBinary(text: string): boolean {
     return text.slice(0, 8192).includes("\0");
+}
+
+/** Paths (relative to `folder`) that git ignores, among `rels`; null when git cannot answer. */
+async function gitIgnoredAmong(folder: vscode.WorkspaceFolder, rels: string[]): Promise<Set<string> | null> {
+    if (folder.uri.scheme !== "file" || !vscode.workspace.isTrusted) {
+        return null;
+    }
+    if (await isFolderGitIgnored(folder)) {
+        return null;
+    }
+    return new Promise(resolve => {
+        const child = execFile(
+            "git",
+            ["--no-optional-locks", "check-ignore", "--stdin", "-z"],
+            { cwd: folder.uri.fsPath, maxBuffer: GIT_LIST_MAX_BUFFER, timeout: GIT_LIST_TIMEOUT_MS },
+            (error, stdout) => {
+                // Exit code 1 means "none of these are ignored"; anything else is a real failure.
+                if (error && (error as { code?: unknown }).code !== 1) {
+                    resolve(null);
+                    return;
+                }
+                resolve(new Set(String(stdout).split("\0").filter(Boolean)));
+            }
+        );
+        child.stdin?.end(rels.join("\0") + "\0");
+    });
+}
+
+/**
+ * Which of these newly created paths the next listing would include (same rules as
+ * listWorkspaceFiles), so a create inside build output or a cache never costs a full rescan.
+ * Returns null when that cannot be decided cheaply (no git); the caller then rescans.
+ */
+export async function listableAmong(uris: vscode.Uri[]): Promise<vscode.Uri[] | null> {
+    const byFolder = new Map<vscode.WorkspaceFolder, { uri: vscode.Uri; rel: string }[]>();
+    for (const uri of uris) {
+        const folder = vscode.workspace.getWorkspaceFolder(uri);
+        if (!folder) {
+            continue;
+        }
+        const rel = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/");
+        const list = byFolder.get(folder) ?? [];
+        list.push({ uri, rel });
+        byFolder.set(folder, list);
+    }
+    const listable: vscode.Uri[] = [];
+    for (const [folder, entries] of byFolder) {
+        const excludeRegexes = excludeGlobs(folder).map(globToRegExp);
+        const candidates = entries.filter(e => !isAlwaysExcluded(e.rel) && !excludeRegexes.some(re => re.test(e.rel)));
+        if (candidates.length === 0) {
+            continue;
+        }
+        const ignored = await gitIgnoredAmong(folder, candidates.map(e => e.rel));
+        if (!ignored) {
+            return null;
+        }
+        listable.push(...candidates.filter(e => !ignored.has(e.rel)).map(e => e.uri));
+    }
+    return listable;
 }

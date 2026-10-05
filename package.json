@@ -6,7 +6,7 @@
   "author": {
     "name": "Woody Morrice and Joseph Elliott"
   },
-  "version": "0.5.0",
+  "version": "0.5.3",
   "icon": "media/icon.png",
   "galleryBanner": {
     "color": "#1e1e24",
@@ -16,6 +16,10 @@
   "qna": "marketplace",
   "bugs": {
     "url": "https://github.com/jjoseph357/thumbview-issues/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jjoseph357/ThumbviewExtension.git"
   },
   "homepage": "https://github.com/jjoseph357/thumbview-issues#readme",
   "engines": {
@@ -40,13 +44,16 @@
   "capabilities": {
     "virtualWorkspaces": {
       "supported": "limited",
-      "description": "Files are read through VS Code's file system API. Git status markers and .gitignore-based file listing are unavailable; files.exclude still applies."
+      "description": "Files are read through VS Code's file system API. Git status markers are unavailable, and only each folder's root .gitignore applies (nested ones do not); files.exclude still applies."
     },
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "In Restricted Mode Thumbview does not run git, so git status markers are hidden and .gitignore rules are not applied (files.exclude still is)."
+      "description": "In Restricted Mode Thumbview does not run git, so git status markers are hidden and only each folder's root .gitignore applies, read as text (nested ones do not). files.exclude still applies."
     }
   },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "configuration": {
@@ -79,8 +86,9 @@
           "description": "Select the drag-and-drop behaviour when manually re-arranging thumbnails."
         },
         "thumbview.autoIgnoreThreshold": {
-          "type": "number",
+          "type": "integer",
           "default": 30,
+          "minimum": 0,
           "description": "Automatically ignore subdirectories containing more than this number of files (set to 0 to disable)."
         },
         "thumbview.renderMediaThumbnails": {
@@ -96,13 +104,17 @@
           "description": "Compression threshold for spanning grid mode. When code shrinks to this percentage of its height in a cell, the tile expands one cell taller (0% disables expansion, recommended: 1% to 20%, default: 5%)."
         },
         "thumbview.minCellWidth": {
-          "type": "number",
-          "default": 60,
+          "type": "integer",
+          "default": 40,
+          "minimum": 10,
+          "maximum": 500,
           "description": "Minimum tile width in pixels before grouping workspace files into subfolder cards."
         },
         "thumbview.minCellHeight": {
-          "type": "number",
-          "default": 40,
+          "type": "integer",
+          "default": 28,
+          "minimum": 10,
+          "maximum": 500,
           "description": "Minimum tile height in pixels before grouping workspace files into subfolder cards."
         },
         "thumbview.fullscreenOnOpen": {
@@ -115,88 +127,132 @@
     "commands": [
       {
         "command": "thumbview.open",
-        "title": "Thumbview: Open Thumbview",
+        "title": "Open",
+        "category": "Thumbview",
         "icon": "media/icon.svg"
       },
       {
         "command": "thumbview.reflow",
-        "title": "Thumbview: Reflow Layout"
+        "title": "Reflow Layout",
+        "category": "Thumbview"
       },
       {
         "command": "thumbview.setUniformGrid",
-        "title": "Thumbview: Use Uniform Grid Layout"
+        "title": "Use Uniform Grid Layout",
+        "category": "Thumbview"
       },
       {
         "command": "thumbview.setSpanningGrid",
-        "title": "Thumbview: Use Spanning Grid Layout"
+        "title": "Use Spanning Grid Layout",
+        "category": "Thumbview"
       },
       {
         "command": "thumbview.setSwapReorderMode",
-        "title": "Thumbview: Use Swap Reorder Mode"
+        "title": "Use Swap Reorder Mode",
+        "category": "Thumbview"
       },
       {
         "command": "thumbview.setShiftReorderMode",
-        "title": "Thumbview: Use Shift Reorder Mode"
+        "title": "Use Shift Reorder Mode",
+        "category": "Thumbview"
       },
       {
         "command": "thumbview.expandSpace",
-        "title": "Thumbview: Expand Grid Space"
+        "title": "Expand Grid Space",
+        "category": "Thumbview"
       },
       {
         "command": "thumbview.reduceSpace",
-        "title": "Thumbview: Reduce Grid Space"
+        "title": "Reduce Grid Space",
+        "category": "Thumbview"
       },
       {
         "command": "thumbview.addIgnorePattern",
-        "title": "Thumbview: Add Ignore Pattern...",
+        "title": "Add Ignore Pattern...",
+        "category": "Thumbview",
         "icon": "$(add)"
       },
       {
         "command": "thumbview.removeIgnorePattern",
-        "title": "Thumbview: Unignore Directory",
+        "title": "Unignore Directory",
+        "category": "Thumbview",
         "icon": "$(eye)"
       },
       {
         "command": "thumbview.focusFolder",
-        "title": "Thumbview: Focus Directory in Thumbview",
+        "title": "Focus Directory in Thumbview",
+        "category": "Thumbview",
         "icon": "$(eye)"
       },
       {
         "command": "thumbview.showAllFolders",
-        "title": "Thumbview: Show All Workspace Directories",
+        "title": "Show All Workspace Directories",
+        "category": "Thumbview",
         "icon": "$(clear-all)"
       },
       {
         "command": "thumbview.ignoreDirectory",
-        "title": "Thumbview: Ignore Directory",
+        "title": "Ignore Directory",
+        "category": "Thumbview",
         "icon": "$(eye-closed)"
       },
       {
         "command": "thumbview.deleteDirectory",
-        "title": "Thumbview: Delete Directory",
+        "title": "Delete Directory",
+        "category": "Thumbview",
         "icon": "$(trash)"
       },
       {
         "command": "thumbview.deleteIgnoredItem",
-        "title": "Thumbview: Delete Ignored Item",
+        "title": "Delete Ignored Item",
+        "category": "Thumbview",
         "icon": "$(trash)"
       },
       {
         "command": "thumbview.revealInExplorer",
-        "title": "Thumbview: Reveal File in Explorer",
+        "title": "Reveal File in Explorer",
+        "category": "Thumbview",
         "icon": "$(folder-opened)"
       },
       {
         "command": "thumbview.configureHotkey",
-        "title": "Thumbview: Configure Hotkey (Keyboard Shortcuts)",
+        "title": "Configure Hotkey (Keyboard Shortcuts)",
+        "category": "Thumbview",
         "icon": "$(keyboard)"
+      },
+      {
+        "command": "thumbview.study.join",
+        "title": "Join the Research Study",
+        "category": "Thumbview"
+      },
+      {
+        "command": "thumbview.study.leave",
+        "title": "Leave the Research Study",
+        "category": "Thumbview"
+      },
+      {
+        "command": "thumbview.study.info",
+        "title": "Research Study Info",
+        "category": "Thumbview"
       }
     ],
     "keybindings": [
       {
         "command": "thumbview.open",
         "key": "f4",
-        "when": "!searchViewletFocus && !referenceSearchVisible"
+        "when": "!searchViewletFocus && !referenceSearchVisible && !inZenMode",
+        "args": {
+          "source": "keybinding"
+        }
+      },
+      {
+        "command": "thumbview.open",
+        "key": "f4",
+        "when": "!searchViewletFocus && !referenceSearchVisible && inZenMode",
+        "args": {
+          "source": "keybinding",
+          "inZen": true
+        }
       }
     ],
     "viewsContainers": {
@@ -285,10 +341,47 @@
           }
         ]
       }
-    ]
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "thumbview.ignoreDirectory",
+          "when": "false"
+        },
+        {
+          "command": "thumbview.deleteDirectory",
+          "when": "false"
+        },
+        {
+          "command": "thumbview.deleteIgnoredItem",
+          "when": "false"
+        },
+        {
+          "command": "thumbview.revealInExplorer",
+          "when": "false"
+        },
+        {
+          "command": "thumbview.focusFolder",
+          "when": "false"
+        },
+        {
+          "command": "thumbview.study.join",
+          "when": "thumbview.studyAvailable && !thumbview.studyEnrolled"
+        },
+        {
+          "command": "thumbview.study.leave",
+          "when": "thumbview.studyEnrolled"
+        },
+        {
+          "command": "thumbview.study.info",
+          "when": "thumbview.studyAvailable"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run check-core && tsc -p ./ --noEmit && node scripts/build.mjs --production",
+    "vscode:uninstall": "node ./dist/uninstall.js",
     "compile": "npm run sync-core && tsc -p ./ && node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "sync-core": "node scripts/sync-webview-core.mjs",
@@ -301,7 +394,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js && node src/test/settings_modal_and_config.test.js && node src/test/reflow_empty_columns_and_drag_explosion.test.js && node src/test/expand_reduce_gap_preservation.test.js && node src/test/tab_switch_and_opacity.test.js && node src/test/hover_alignment_and_subfolder_latency.test.js && node src/test/instant_open.test.js && node src/test/folder_ignore_stability.test.js && node src/test/crash_resilience.test.js && node src/test/respectful_guest.test.js && node src/test/robust_scale.test.js && node src/test/accessibility.test.js && node src/test/bundle_smoke.test.js && node src/test/editor_groups.test.js && node src/test/panel_session.test.js",
+    "test:unit": "npm run compile && node out/test/spanning_reorder.test.js && node out/test/bottom_drag.test.js && node out/test/empty_space_drag.test.js && node src/test/overview_diagnose.test.js && node src/test/ignore_directory_bug.test.js && node src/test/pasted_folder_bug.test.js && node src/test/collapsible_folder_tree.test.js && node src/test/grid_aspect_and_drag.test.js && node src/test/reflow_ignore_and_refresh.test.js && node src/test/unignore_large_folder_layout.test.js && node src/test/folder_cards_drag_and_drop.test.js && node src/test/unignore_preserve_positions.test.js && node src/test/tall_file_overflow.test.js && node src/test/subfolder_spanning_and_drag_bug.test.js && node src/test/leaf_folder_and_line_expansion.test.js && node src/test/nested_folder_preview_and_infolder_drag.test.js && node src/test/window_shrink_card_reorder_mouse_nav.test.js && node src/test/drag_reorder_flicker_and_card_space.test.js && node src/test/folder_drag_bottom_row_and_right_col.test.js && node src/test/expand_grid_space_and_drag_perf.test.js && node src/test/scoped_layer_grid_space.test.js && node src/test/folder_card_spanning_and_bottom_drag.test.js && node src/test/spanning_multi_tile_swap.test.js && node src/test/drag_perf_and_rapid_swap.test.js && node src/test/expand_reduce_grid_zoom.test.js && node src/test/folder_reflow_aspect_and_multi_axis_expand.test.js && node src/test/settings_modal_and_config.test.js && node src/test/reflow_empty_columns_and_drag_explosion.test.js && node src/test/expand_reduce_gap_preservation.test.js && node src/test/tab_switch_and_opacity.test.js && node src/test/hover_alignment_and_subfolder_latency.test.js && node src/test/instant_open.test.js && node src/test/folder_ignore_stability.test.js && node src/test/crash_resilience.test.js && node src/test/respectful_guest.test.js && node src/test/robust_scale.test.js && node src/test/accessibility.test.js && node src/test/bundle_smoke.test.js && node src/test/editor_groups.test.js && node src/test/panel_session.test.js && node src/test/disk_changes.test.js && node src/test/payload_stream.test.js && node src/test/study.test.js && node src/test/study_host.test.js && node src/test/deferred_pdf.test.js && node src/test/hover_keys_and_search_navigation.test.js && node src/test/order_guard_and_study_fields.test.js && node src/test/restart_swap_and_collapse_stability.test.js && node src/test/drag_drop_stability.test.js",
     "publish:marketplace": "vsce publish --baseImagesUrl https://raw.githubusercontent.com/jjoseph357/thumbview-assets/main/"
   },
   "devDependencies": {

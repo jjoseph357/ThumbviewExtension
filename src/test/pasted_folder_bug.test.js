@@ -276,8 +276,15 @@ assert(
 );
 console.log("✓ Test 5 passed: library folder is auto-ignored");
 
-console.log("\n=== Test 6: folderOrder with holes fills holes first and then appends ===");
-const orderWithHoles = ["f1", "", "f2"];
+console.log("\n=== Test 5b: lib/ and env/ are source, and a threshold of 0 disables auto-ignore ===");
+const sourceLibResult = computeAutoIgnorePatterns(["lib/main.dart", "src/lib/util.ts", "env/config.ts"], 30, [], []);
+assert.deepStrictEqual(sourceLibResult, [], "lib/ and env/ must not be auto-ignored by name");
+const disabledResult = computeAutoIgnorePatterns([...libFiles, ...Array.from({ length: 40 }, (_, i) => `assets/i${i}.svg`)], 0, [], []);
+assert.deepStrictEqual(disabledResult, [], "threshold 0 must disable auto-ignore, including dependency folders");
+console.log("✓ Test 5b passed");
+
+console.log("\n=== Test 6: new files fill holes left by removed files, never the user's \"\" gaps ===");
+const orderWithHoles = ["f1", "", "f2", "removed"];
 const threeFiles = [
     { id: "f1", path: "src/file1.ts", lineCount: 20 },
     { id: "f2", path: "src/file2.ts", lineCount: 30 },
@@ -287,8 +294,7 @@ const threeFiles = [
 const holeLayout = global.buildSpanningGridLocal(threeFiles, 1.777, orderWithHoles);
 const holePlacedIds = holeLayout.placements.map(p => p.file.id);
 console.log("Hole placements IDs:", holePlacedIds);
-assert.strictEqual(holePlacedIds[0], "f1");
-assert.strictEqual(holePlacedIds[1], "f3", "f3 should fill the hole at index 1");
-assert.strictEqual(holePlacedIds[2], "f2");
-assert.strictEqual(holePlacedIds[3], "f4", "f4 should append after f2");
-console.log("✓ Test 6 passed: holes are filled first and new files append cleanly");
+assert.deepStrictEqual(holePlacedIds, ["f1", "f2", "f3", "f4"], "f3 takes the removed file's hole, f4 appends");
+const f1 = holeLayout.placements.find(p => p.file.id === "f1");
+assert(!holeLayout.placements.some(p => p.col === f1.col && p.row === f1.row + 1), "the user's gap after f1 stays empty");
+console.log("✓ Test 6 passed: user gaps stay empty; holes are filled, then new files append");

@@ -5,7 +5,93 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.3] - 2026-10-05
+
+### Added
+- **Mouse wheel stepping between search results**: when holding `Ctrl` over a file with multiple search matches, rolling the mouse wheel steps directly between results (`MATCH 1 of N` → `MATCH 2 of N`...), while rolling past the boundaries scrolls through surrounding lines. `Shift`+wheel scrolls surrounding lines directly.
+- **Research study enrollment on first open**: prompts users on first open via a modal dialog to participate in spatial navigation telemetry, with one-click enablement if VS Code telemetry is off.
+
+### Fixed
+- **Hover search snapping in files with large match sets**: in files with 100+ matches, target hit areas are dynamically bounded within the thumbnail using a forward-backward squeeze distribution, so moving the cursor to the end of the file reaches the very last match instead of being stuck at Match 16.
+- **Adaptive snap hysteresis and wheel stability**: snap hysteresis scales with match density so intermediate matches are easily reachable without skipping, and mouse micro-movements during active wheel rolling no longer disrupt match stepping.
+
+## [0.5.2] - 2026-10-01
+
+### Added
+- **Opt-in research study on spatial code navigation**: participate to help evaluate code maps for an academic study (see `STUDY.md`). Telemetry is strictly opt-in, pseudonymous, and never collects code, file names, or search queries.
+- **Hovering a tile outlines it** and shows a pointer cursor, so you can see which file `Ctrl+C`, `Ctrl+X`, `Delete`, `F2`, and `Ctrl+Enter` will act on.
+- **From search to the results without the mouse.** `Enter` in the search box opens the first match; `↓` moves to it, and the arrow keys then move between matches only.
+- **`F2` renames and `Ctrl+Enter` (`⌘Enter` on macOS) opens to the side**, as the context menu always claimed.
+- **Raising `thumbview.autoIgnoreThreshold` shows folders it had hidden** that no longer exceed it (0 shows all of them). Your own ignores are never touched.
+- **A chip says when folders were auto-hidden** ("3 folders auto-hidden"), so a folder that disappeared on the first open is never a mystery. Click it to review them in Folders & Ignored, or close it.
+- **A one-time hint after installing** tells you to press `F4`.
+- **Better syntax colors** for Go, Rust, Java, C#, C and C++, Kotlin, Swift, PHP, shell, YAML, TOML, Ruby, Julia, Dockerfiles, Makefiles, SQL, Lua, Haskell, OCaml, F#, Clojure and other Lisps, Erlang, LaTeX, and Visual Basic (comments, strings, and keywords).
+- **The context menu works from the keyboard**: `Shift+F10` opens it on the focused tile, the arrow keys move, `Enter` runs an item, and `Escape` closes it.
+- **`Ctrl+F` (`⌘F`) jumps to the search box**, and in folder-card view `Enter` and `↓` from search reach the folder that holds the match.
+- **Screen readers hear where a tile is** (its column and its place in the column).
+
+### Changed
+- **Opening a folder paints immediately.** Tiles that are not ready yet show an outline of their code for a moment instead of holding up the whole view (in our benchmark, about 20 ms instead of 130 ms to the first picture), and resting the pointer on a folder card prepares its files.
+- **PDF previews render off the main thread** with pdf.js 6, so they never make Thumbview stutter.
+- **`F4` in your own Zen mode** opens Thumbview inside it and leaves Zen mode on when Thumbview closes.
+- **Less work in the background.** Typing while Thumbview is hidden no longer updates its copy of the file until you open it again, and windows where Thumbview was never opened ignore file and diagnostics events entirely.
+- **The context menu lists only shortcuts that work.**
+- **Auto-ignoring folders no longer shows a notification**; the in-grid chip replaces it.
+- **Commands appear under the "Thumbview" category** in the Command Palette and Keyboard Shortcuts, and the tile-size and auto-ignore settings have valid ranges.
+
+### Fixed
+- **PDF previews render in VS Code.** The PDF renderer used a JavaScript feature that VS Code's built-in browser does not have yet, so every preview failed; Thumbview now ships the renderer's build for older browsers.
+- **Dragging tiles of different heights swaps exactly what you expect.** The tile you drag and the same-height block of cells where you drop it (files and empty space alike) trade places, and nothing else moves. Earlier, a tall tile could be drawn over others, untouched tiles could move, and the arrangement could change again when the next update arrived.
+- **A two-tall tile moves down by one row** when you drag it one row; it used to need the cursor two rows down because the drop followed the cursor instead of the tile's top edge.
+- **Dropping on empty space below a file that grew** puts the tile exactly there and moves nothing else.
+- **Reduce Grid Space never turns the grid into folder cards.**
+- **The first move after Reflow Layout no longer adds an empty row** at the bottom of the grid.
+- **Adding files never changes how tall the columns are**, so it never moves existing tiles (Reflow Layout resets column height).
+- **Your arrangement survives restarting VS Code.** Every empty slot you left by dragging tiles came back closed after a restart, shifting the tiles after it; the saved layout is now restored exactly.
+- **Swapping tiles of different heights no longer moves unrelated tiles.** A tall tile displaced by a short one could overwrite tiles below it, which then reappeared in the far-right column or overlapped other tiles. Displaced tiles now go only to free space, and every other tile stays where it is.
+- **New files no longer fill empty slots you left on purpose** inside folders.
+- **Expanding the grid space or a file growing never turns the grid into folder cards.** Only adding files can; and views fall into folder cards less readily (the default minimum tile size is now 40 x 28 px, was 60 x 40).
+- **PDF previews**: if a file's text never finishes streaming, PDF previews load anyway after 3 seconds, and any PDF preview failure is written to **View > Output > Thumbview** with its reason.
+- **Moving the last tile, or dragging a folder card into empty space, no longer shrinks the grid** and shifts every other tile.
+- **New files in a folder no longer fill gaps you left on purpose** when you drag a tile in that folder.
+- **`.npmrc`, `.bashrc`, and other `rc` files** are no longer colored as JSON, and neither are source files with "json" in their name (such as `json_utils.py`).
+- **Closing a file without saving it no longer leaves the discarded edits on its tile.**
+- **Resizing Thumbview no longer flashes simplified tiles**; tiles keep their picture, scaled, until the sharp one is drawn.
+
+### Security
+- **pdf.js updated from 3.11 to 6.3**, which fixes CVE-2024-4367 (Thumbview was not exposed: it already disabled the affected code path).
+- **Rename, delete, move, copy, and new-file commands check real paths**, so a symlinked folder inside the workspace that points elsewhere cannot be used to change files outside it.
+- **Layout orders sent by the page are validated** before they are saved.
+
+## [0.5.1] - 2026-09-30
+
+### Changed
+- **Readable text in Thumbview tiles.** Short or spacious files render readable text (at 8px to 13px font size) budgeted up to 80 characters of line width. Denser files, smaller tiles, and single-line minified files (such as source maps or bundles) cleanly transition to crisp syntax-colored minimap rectangles when text would fall below the 8px readability threshold.
+- **Saving no longer makes Thumbview rescan your workspace.** A save or an outside edit re-reads just that file; only creating or deleting files lists the workspace again. Build output that Thumbview does not show (such as a gitignored `out/`) no longer causes any work.
+- **Nothing runs in the background for a hidden Thumbview.** Git markers refresh only while Thumbview is visible, or once when you reopen it, including after commits and branch switches.
+- **The first F4 is instant.** In workspaces where you have used Thumbview, it scans a few seconds after VS Code starts, instead of on the first F4. Workspaces where you never open Thumbview are never scanned.
+- **Faster typing and search in large workspaces.** Search keystrokes are about 4 to 7 times faster (search highlights no longer force tiles and folder previews to redraw), layout state is written only when it changes, and ignore rules are compiled once per scan.
+- **Large workspaces open faster.** Thumbview shows the full grid right away and fills in file contents over the next moment, instead of waiting for every file's text (the first message at 10,000 files went from about 70 MB to 8 MB). Tiles never move while contents arrive.
+- **Less memory.** Extra copies of file text for Match Case and regex search are made only when you use those options.
+- **Your `.gitignore` is no longer copied into Thumbview's ignore list.** Git already applies it; copies from earlier versions are removed once. Without git (Restricted Mode, remote or virtual folders), each folder's root `.gitignore` is still applied.
+- **Commands that only work from a tree item are hidden from the Command Palette.**
+- **Quieter commands.** Changing the layout or reorder mode, reflowing, and expanding or reducing grid space confirm in the status bar instead of a notification.
+- **Git and error colors follow your theme** (the editor's gutter and error colors).
+
+### Fixed
+- **⌘⌫ on macOS only clears the search.** It used to also ask to delete the file under the pointer. Delete a file with fn+Delete (⌦) or from the context menu.
+- **PDF previews show the first page again, without slowing down opening Thumbview.** The PDF renderer now loads after Thumbview has opened and finished filling in file contents, instead of before every first open in workspaces that contain PDFs.
+- **`.map` source map syntax coloring follows theme.** Source maps (`.js.map`, `.css.map`, `.map`) are recognized as JSON, so keys, strings, and punctuation use theme colors in both hover previews and thumbnail tiles.
+- **`lib/`, `env/`, and `libraries/` folders are no longer auto-ignored by name**, so Flutter, Ruby, and Elixir projects show their source. Dependency and cache folders such as `vendor/`, `.venv/`, and `__pycache__/` still are. Folders that earlier versions already auto-ignored stay ignored until you unignore them.
+- **`thumbview.autoIgnoreThreshold: 0` now turns auto-ignore off completely**, as documented.
+- **After a crash, your Zen mode settings are restored when VS Code starts**, not the next time you open Thumbview.
+- **Editing `.gitignore`, `files.exclude`, or `search.exclude` updates the grid right away.**
+- **Creating files in ignored folders** (build output, caches, editor swap files) no longer makes Thumbview rescan.
+- **Workspaces with images no longer rescan and resend everything** on every file change.
+- **Reopening Thumbview no longer redraws every tile from scratch.** Showing and hiding the panel was mistaken for a theme change, which threw away all cached tile images.
+- **Deleting or moving a folder removes its tiles right away.**
+- **Search matches stay visible on lines that also show a git change or an error.**
+- **Auto-ignore messages and the README pointed to sidebar views that no longer exist**; they now point to the Folders & Ignored menu.
 
 ## [0.5.0] - 2026-09-29
 

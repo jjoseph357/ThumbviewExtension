@@ -75,4 +75,13 @@ export class PersistentFileOrder {
     setOrder(newOrder: string[]) {
         this.seenFiles = [...newOrder];
     }
+
+    /**
+     * The order saved by a previous session, exactly as stored, gaps included. Not update(): that
+     * treats its argument as live ids and kept only the first "" gap, so after every restart each
+     * tile after a later gap moved back.
+     */
+    restore(saved: string[]) {
+        this.seenFiles = saved.map(id => (typeof id === "string" ? id : ""));
+    }
 }

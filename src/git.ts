@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import { execFile } from "child_process";
+import { isFolderGitIgnored } from "./file_discovery";
 
 export interface GitLineChanges {
     [lineIndex0: number]: "added" | "modified" | "removed";
@@ -14,11 +15,12 @@ export interface GitFileStatus {
 export type WorkspaceGitDiff = Map<string, GitFileStatus>;
 
 let cachedGitDiff: WorkspaceGitDiff = new Map();
-let isFetchingGit = false;
 
 function execGit(args: string[], cwd: string): Promise<string> {
     return new Promise((resolve) => {
-        execFile("git", args, { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 3000 }, (error, stdout) => {
+        // --no-optional-locks: status must not refresh .git/index, whose change would come back
+        // through the file watcher as a commit-like event and trigger another fetch.
+        execFile("git", ["--no-optional-locks", ...args], { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 3000 }, (error, stdout) => {
             if (error) {
                 resolve("");
             } else {
@@ -28,11 +30,31 @@ function execGit(args: string[], cwd: string): Promise<string> {
     });
 }
 
-export async function fetchWorkspaceGitDiff(): Promise<WorkspaceGitDiff> {
-    if (isFetchingGit) {
-        return cachedGitDiff;
-    }
+let fetchInFlight: Promise<WorkspaceGitDiff> | undefined;
+let fetchQueued: Promise<WorkspaceGitDiff> | undefined;
 
+/**
+ * Refreshes git markers for every workspace folder. A call during a fetch queues exactly one more
+ * run and resolves with it, so a save's caller always gets markers computed after the save (the old
+ * guard returned the stale cache instead).
+ */
+export function fetchWorkspaceGitDiff(): Promise<WorkspaceGitDiff> {
+    if (!fetchInFlight) {
+        fetchInFlight = runGitDiffFetch().finally(() => {
+            fetchInFlight = undefined;
+        });
+        return fetchInFlight;
+    }
+    if (!fetchQueued) {
+        fetchQueued = fetchInFlight.then(() => {
+            fetchQueued = undefined;
+            return fetchWorkspaceGitDiff();
+        });
+    }
+    return fetchQueued;
+}
+
+async function runGitDiffFetch(): Promise<WorkspaceGitDiff> {
     // In Restricted Mode git must not run: a repository's own config can execute commands
     // (e.g. core.fsmonitor). Tiles simply show no git markers there.
     if (!vscode.workspace.isTrusted) {
@@ -43,11 +65,13 @@ export async function fetchWorkspaceGitDiff(): Promise<WorkspaceGitDiff> {
         return new Map();
     }
 
-    isFetchingGit = true;
     const result: WorkspaceGitDiff = new Map();
 
     try {
         for (const folder of folders) {
+            if (await isFolderGitIgnored(folder)) {
+                continue;
+            }
             const cwd = folder.uri.fsPath;
 
             // 1. Get status for untracked and modified files
@@ -90,8 +114,6 @@ export async function fetchWorkspaceGitDiff(): Promise<WorkspaceGitDiff> {
         }
         cachedGitDiff = result;
     } catch {
-    } finally {
-        isFetchingGit = false;
     }
 
     return cachedGitDiff;

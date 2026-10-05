@@ -28,7 +28,8 @@ function makeDataMessage() {
             });
         }
     }
-    return { command: "data", files, layout: { cols, rows: Math.ceil(files.length / cols) }, mode: "uniform_grid" };
+    // Folder mosaics need card mode, which this grid reaches at the pre-0.5.2 60 x 40 minimum tile size.
+    return { command: "data", files, layout: { cols, rows: Math.ceil(files.length / cols) }, mode: "uniform_grid", minCellWidth: 60, minCellHeight: 40 };
 }
 
 console.log("=== Test Suite: Instant Open (render coalescing, stable reveal, mosaic cache) ===");

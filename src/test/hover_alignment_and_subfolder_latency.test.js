@@ -14,12 +14,12 @@ const overviewCode = fs.readFileSync(overviewPath, "utf-8");
 console.log("\n--- Test 1: Verify overview.js constants and thresholds ---");
 {
     assert(
-        overviewCode.includes("const THUMBNAIL_MIN_READABLE_FONT_SIZE = 6.0;"),
-        "THUMBNAIL_MIN_READABLE_FONT_SIZE should be 6.0"
+        overviewCode.includes("const THUMBNAIL_MIN_READABLE_FONT_SIZE = 8.0;"),
+        "THUMBNAIL_MIN_READABLE_FONT_SIZE should be 8.0"
     );
     assert(
-        overviewCode.includes("const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 5.0;"),
-        "THUMBNAIL_MIN_READABLE_TEXT_PITCH should be 5.0"
+        overviewCode.includes("const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 8.0;"),
+        "THUMBNAIL_MIN_READABLE_TEXT_PITCH should be 8.0"
     );
     assert(
         overviewCode.includes("const MAX_TILE_CACHE_ENTRIES = 500;"),
@@ -41,16 +41,12 @@ console.log("\n--- Test 1: Verify overview.js constants and thresholds ---");
 // ---------------------------------------------------------------------------
 console.log("\n--- Test 2: Subfolder with 152 files bypasses text fillText rendering ---");
 {
-    const THUMBNAIL_MAX_LINE_CHARS = 100;
-    const THUMBNAIL_MIN_AVG_CHARS = 45;
-    const THUMBNAIL_DEFAULT_AVG_CHARS = 65;
-    const THUMBNAIL_WIDTH_BUDGET_FACTOR = 0.92;
-    const THUMBNAIL_CHAR_ASPECT_RATIO = 0.58;
     const THUMBNAIL_LINE_HEIGHT_RATIO = 0.88;
     const THUMBNAIL_MAX_FONT_SIZE = 13;
     const THUMBNAIL_MIN_FONT_SIZE = 3.2;
-    const THUMBNAIL_MIN_READABLE_FONT_SIZE = 6.0;
-    const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 5.0;
+    const THUMBNAIL_MIN_READABLE_FONT_SIZE = 8.0;
+    const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 8.0;
+    const THUMBNAIL_MIN_READABLE_WIDTH = 45;
     const THUMBNAIL_MAX_LINE_PITCH = 16;
 
     // Simulate 152 files on a standard 1920x1080 screen in drilldown mode
@@ -61,16 +57,86 @@ console.log("\n--- Test 2: Subfolder with 152 files bypasses text fillText rende
     const lineCount = lines.length;
     const stepY = Math.min(h / lineCount, THUMBNAIL_MAX_LINE_PITCH);
 
-    const targetLineChars = Math.min(THUMBNAIL_MAX_LINE_CHARS, Math.max(THUMBNAIL_MIN_AVG_CHARS, THUMBNAIL_DEFAULT_AVG_CHARS));
-    const fontForWidth = (w * THUMBNAIL_WIDTH_BUDGET_FACTOR) / (targetLineChars * THUMBNAIL_CHAR_ASPECT_RATIO);
     const fontForHeight = stepY * THUMBNAIL_LINE_HEIGHT_RATIO;
-    const rawFontSize = Math.min(fontForHeight, fontForWidth, THUMBNAIL_MAX_FONT_SIZE);
+    const rawFontSize = Math.min(fontForHeight, THUMBNAIL_MAX_FONT_SIZE);
     const fontSize = Math.max(THUMBNAIL_MIN_FONT_SIZE, Math.floor(rawFontSize * 10) / 10);
-    const useText = fontSize >= THUMBNAIL_MIN_READABLE_FONT_SIZE && stepY >= THUMBNAIL_MIN_READABLE_TEXT_PITCH;
+    const useText = fontSize >= THUMBNAIL_MIN_READABLE_FONT_SIZE && stepY >= THUMBNAIL_MIN_READABLE_TEXT_PITCH && w >= THUMBNAIL_MIN_READABLE_WIDTH;
 
     assert.strictEqual(useText, false, "152 files in drilldown view must NOT use text rendering (useText must be false)");
-    assert(stepY < THUMBNAIL_MIN_READABLE_TEXT_PITCH, `stepY (${stepY}) should be below readable pitch 5.0`);
+    assert(stepY < THUMBNAIL_MIN_READABLE_TEXT_PITCH, `stepY (${stepY}) should be below readable pitch 8.0`);
     console.log(`✓ Test 2 passed: 152 files thumbnail yields stepY=${stepY.toFixed(2)}px, fontSize=${fontSize.toFixed(2)}px -> useText=${useText} (0 text draw calls)`);
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Test spacious/short files render readable text
+// ---------------------------------------------------------------------------
+console.log("\n--- Test 2b: Spacious/short file renders readable text ---");
+{
+    const THUMBNAIL_WIDTH_BUDGET_FACTOR = 0.95;
+    const THUMBNAIL_CHAR_ASPECT_RATIO = 0.58;
+    const THUMBNAIL_LINE_HEIGHT_RATIO = 0.88;
+    const THUMBNAIL_MAX_FONT_SIZE = 13;
+    const THUMBNAIL_MIN_FONT_SIZE = 3.2;
+    const THUMBNAIL_MIN_READABLE_FONT_SIZE = 8.0;
+    const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 8.0;
+    const THUMBNAIL_MIN_READABLE_WIDTH = 45;
+    const THUMBNAIL_MAX_LINE_PITCH = 16;
+    const THUMBNAIL_TARGET_READABLE_CHARS = 80;
+    const THUMBNAIL_MIN_TARGET_CHARS = 20;
+    const THUMBNAIL_DEFAULT_TARGET_CHARS = 50;
+
+    // Spacious tile (w=200, h=180) with 15 lines of code, avg 25 chars
+    const w = 200;
+    const h = 180;
+    const lineCount = 15;
+    const avgChars = 25;
+    const stepY = Math.min(h / lineCount, THUMBNAIL_MAX_LINE_PITCH); // 12px
+    const targetLineChars = Math.min(THUMBNAIL_TARGET_READABLE_CHARS, Math.max(THUMBNAIL_MIN_TARGET_CHARS, avgChars || THUMBNAIL_DEFAULT_TARGET_CHARS));
+    const fontForWidth = (w * THUMBNAIL_WIDTH_BUDGET_FACTOR) / (targetLineChars * THUMBNAIL_CHAR_ASPECT_RATIO);
+    const fontForHeight = stepY * THUMBNAIL_LINE_HEIGHT_RATIO; // 10.56px
+    const rawFontSize = Math.min(fontForHeight, fontForWidth, THUMBNAIL_MAX_FONT_SIZE); // 10.56px
+    const fontSize = Math.max(THUMBNAIL_MIN_FONT_SIZE, Math.floor(rawFontSize * 10) / 10); // 10.5px
+    const useText = fontSize >= THUMBNAIL_MIN_READABLE_FONT_SIZE && stepY >= THUMBNAIL_MIN_READABLE_TEXT_PITCH && w >= THUMBNAIL_MIN_READABLE_WIDTH;
+
+    assert.strictEqual(useText, true, "Spacious 15-line file must use text rendering (useText must be true)");
+    assert(fontSize >= 8.0, `fontSize (${fontSize}) must be >= 8.0px`);
+    console.log(`✓ Test 2b passed: 15-line file yields stepY=${stepY.toFixed(2)}px, fontSize=${fontSize.toFixed(2)}px -> useText=true`);
+}
+
+// ---------------------------------------------------------------------------
+// 2c. Test single-line minified file (410 chars) uses rectangles (bypasses text)
+// ---------------------------------------------------------------------------
+console.log("\n--- Test 2c: Single-line minified file (410 chars) uses rectangles ---");
+{
+    const THUMBNAIL_WIDTH_BUDGET_FACTOR = 0.95;
+    const THUMBNAIL_CHAR_ASPECT_RATIO = 0.58;
+    const THUMBNAIL_LINE_HEIGHT_RATIO = 0.88;
+    const THUMBNAIL_MAX_FONT_SIZE = 13;
+    const THUMBNAIL_MIN_FONT_SIZE = 3.2;
+    const THUMBNAIL_MIN_READABLE_FONT_SIZE = 8.0;
+    const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 8.0;
+    const THUMBNAIL_MIN_READABLE_WIDTH = 45;
+    const THUMBNAIL_MAX_LINE_PITCH = 16;
+    const THUMBNAIL_TARGET_READABLE_CHARS = 80;
+    const THUMBNAIL_MIN_TARGET_CHARS = 20;
+    const THUMBNAIL_DEFAULT_TARGET_CHARS = 50;
+
+    // Single-line minified source map in standard tile (w=200, h=180, 1 line, 410 chars)
+    const w = 200;
+    const h = 180;
+    const lineCount = 1;
+    const avgChars = 100; // max clamped avg chars for minified line
+    const stepY = Math.min(h / lineCount, THUMBNAIL_MAX_LINE_PITCH); // 16px
+    const targetLineChars = Math.min(THUMBNAIL_TARGET_READABLE_CHARS, Math.max(THUMBNAIL_MIN_TARGET_CHARS, avgChars || THUMBNAIL_DEFAULT_TARGET_CHARS)); // 80
+    const fontForWidth = (w * THUMBNAIL_WIDTH_BUDGET_FACTOR) / (targetLineChars * THUMBNAIL_CHAR_ASPECT_RATIO); // ~4.09px
+    const fontForHeight = stepY * THUMBNAIL_LINE_HEIGHT_RATIO; // 14.08px
+    const rawFontSize = Math.min(fontForHeight, fontForWidth, THUMBNAIL_MAX_FONT_SIZE); // ~4.09px
+    const fontSize = Math.max(THUMBNAIL_MIN_FONT_SIZE, Math.floor(rawFontSize * 10) / 10); // 4.0px
+    const useText = fontSize >= THUMBNAIL_MIN_READABLE_FONT_SIZE && stepY >= THUMBNAIL_MIN_READABLE_TEXT_PITCH && w >= THUMBNAIL_MIN_READABLE_WIDTH;
+
+    assert.strictEqual(useText, false, "Single-line minified file (410 chars) must NOT use text rendering (useText must be false)");
+    assert(fontSize < THUMBNAIL_MIN_READABLE_FONT_SIZE, `fontSize (${fontSize}) should be below readable threshold 8.0`);
+    console.log(`✓ Test 2c passed: 410-char single-line file yields fontSize=${fontSize.toFixed(2)}px < 8.0px -> useText=false (renders as rectangle)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +323,8 @@ console.log("\n--- Test 7: Verify PDF_JS_URI exposure and dynamic loading handle
     const extCode = readHostSource();
     assert(extCode.includes("window.PDF_JS_URI ="), "extension.ts must expose window.PDF_JS_URI");
 
-    assert(overviewCode.includes("window.PDF_JS_URI && !window._pdfJsLoading"), "overview.js must handle dynamic PDF script loading");
+    // Behavior (deferred until after the first reveal and the text stream): deferred_pdf.test.js.
+    assert(overviewCode.includes("function requestPdfJs("), "overview.js must load pdf.js on demand");
     console.log("✓ Test 7 passed: window.PDF_JS_URI exposed and dynamic PDF loader present");
 }
 
@@ -306,4 +373,98 @@ console.log("\n--- Test 8: Hover tooltip leading indentation preservation and ta
     console.log("✓ Test 8 passed: Hover tooltip preserves leading indentation and expands tabs");
 }
 
+// ---------------------------------------------------------------------------
+// 9. Test .map file language detection and JSON syntax tokenization
+// ---------------------------------------------------------------------------
+console.log("\n--- Test 9: Verify .map file language detection and JSON syntax tokenization ---");
+{
+    assert(
+        overviewCode.includes("ext === 'map'"),
+        "overview.js detectLang must recognize 'map' as json"
+    );
+
+    // Simulate detectLang
+    function detectLang(path) {
+        if (!path) return 'plaintext';
+        const filename = path.split('/').pop().toLowerCase();
+        if (filename === '.gitignore' || filename === 'license' || filename.startsWith('license.')) {
+            return 'plaintext';
+        }
+        const ext = filename.includes('.') ? filename.split('.').pop() : '';
+        if (ext === 'md' || ext === 'markdown' || ext === 'mdx') return 'markdown';
+        if (!ext || ext === 'txt' || ext === 'log' || ext === 'conf' || ext === 'ini' || ext === 'env') {
+            return 'plaintext';
+        }
+        if (ext === 'css' || ext === 'scss' || ext === 'less') return 'css';
+        if (ext === 'html' || ext === 'htm' || ext === 'xml' || ext === 'svg' || ext === 'vue') return 'html';
+        if (ext === 'json' || ext === 'jsonc' || ext === 'json5' || ext === 'map' || filename.endsWith('rc') || filename.includes('json')) return 'json';
+        if (ext === 'py') return 'python';
+        return 'js';
+    }
+
+    assert.strictEqual(detectLang("client_01.js.map"), "json", ".js.map files must be detected as json");
+    assert.strictEqual(detectLang("style.css.map"), "json", ".css.map files must be detected as json");
+    assert.strictEqual(detectLang("bundle.MAP"), "json", "Uppercase .MAP files must be detected as json");
+
+    // Verify tokenization of sample .map line
+    function tokenizeJSON(text) {
+        const tokens = [];
+        const regex = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*(?:"|$)|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}()\[\]:,]|\s+|.)/g;
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+            const val = match[0];
+            let cat = "normal";
+            if (val.startsWith("//") || val.startsWith("/*")) {
+                cat = "comment";
+            } else if (val.startsWith('"')) {
+                cat = "string";
+            } else if (/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(val)) {
+                cat = "number";
+            } else if (/^(true|false|null)$/.test(val)) {
+                cat = "keyword";
+            } else if (/^[{}()\[\]:,]$/.test(val)) {
+                cat = "normal";
+            }
+            tokens.push({ text: val, category: cat, isKey: false });
+        }
+
+        for (let i = 0; i < tokens.length; i++) {
+            if (tokens[i].category === "string") {
+                let n = i + 1;
+                while (n < tokens.length && /^\s+$/.test(tokens[n].text)) n++;
+                if (n < tokens.length && tokens[n].text === ":") {
+                    tokens[i].isKey = true;
+                }
+            }
+        }
+        return tokens;
+    }
+
+    const mapLine = '{"version":3,"file":"client_01.js","sourceRoot":""}';
+    const tokens = tokenizeJSON(mapLine);
+
+    const versionTok = tokens.find(t => t.text === '"version"');
+    assert(versionTok && versionTok.isKey === true, 'Property "version" must be flagged with isKey = true');
+
+    const numTok = tokens.find(t => t.text === '3');
+    assert(numTok && numTok.category === 'number', 'Value 3 must have category "number"');
+
+    const fileTok = tokens.find(t => t.text === '"file"');
+    assert(fileTok && fileTok.isKey === true, 'Property "file" must be flagged with isKey = true');
+
+    const fileValTok = tokens.find(t => t.text === '"client_01.js"');
+    assert(fileValTok && fileValTok.category === 'string' && fileValTok.isKey === false, 'Value "client_01.js" must be string with isKey = false');
+
+    // Test truncated map line (e.g. client_09.js.map cut off at 300 chars mid-string)
+    const truncatedLine = '{"version":3,"file":"client_09.js","mappings":";;;AAMA,MAAa,QAAQ;IACC;IAApB';
+    const truncTokens = tokenizeJSON(truncatedLine);
+    const lastTok = truncTokens[truncTokens.length - 1];
+    assert.strictEqual(lastTok.category, "string", "Truncated/unclosed string at end of line must be categorized as string (orange), not normal (gray)");
+    assert.strictEqual(lastTok.isKey, false, "Truncated string value must not be flagged as key");
+
+    console.log("✓ Test 9 passed: .map files detected as JSON and tokenized with theme-matching keys and values (including truncated strings)");
+}
+
 console.log("\n=== ALL SUBFOLDER LATENCY & HOVER ALIGNMENT TESTS PASSED ===");
+
+

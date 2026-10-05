@@ -186,6 +186,9 @@ const sampleData = {
         slots: []
     },
     layoutMode: "spanning_grid",
+    // Card mode at 25 columns needs the pre-0.5.2 minimum tile size (the default is now 40 x 28).
+    minCellWidth: 60,
+    minCellHeight: 40,
     openFiles: [],
     activeFile: null,
     previewMode: "full",

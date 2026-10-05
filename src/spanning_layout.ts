@@ -66,13 +66,11 @@ export function buildSpanningGrid<F extends RepoFile>(
     }
 
     const calculatedRows = Math.max(MIN_GRID_ROWS, Math.round(Math.sqrt(Math.max(totalCells, files.length, 1) / targetAspect)));
-    let wrapRows = savedGridRows && savedGridRows > 0 ? Math.max(savedGridRows, maxNCells) : Math.max(calculatedRows, maxNCells);
-
-    // If savedGridRows forces an extreme column count compared to target aspect ratio, adapt wrapRows to maintain reasonable proportion
-    const estCols = Math.ceil(totalCells / wrapRows);
-    if (estCols / wrapRows > targetAspect * 1.25 && wrapRows < calculatedRows) {
-        wrapRows = Math.max(calculatedRows, maxNCells);
-    }
+    // A saved column height is kept, always: it freezes which column every file sits in. It used to
+    // be replaced by a new height whenever the grid grew wide (files added), which re-wrapped every
+    // column and moved every tile; the webview's buildSpanningGridLocal never did, so the two also
+    // disagreed. Columns added by growth are the price of stability (Reflow Layout resets them).
+    const wrapRows = savedGridRows && savedGridRows > 0 ? Math.max(savedGridRows, maxNCells) : Math.max(calculatedRows, maxNCells);
 
     let currCol = 0;
     let currRow = 0;        // flow position: decides column breaks

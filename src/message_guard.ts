@@ -33,25 +33,88 @@ export function hasDotDotSegment(uri: string): boolean {
 }
 
 /**
- * True when a webview message may be handled. `uri` (if present) must be inside a workspace
- * folder, as decided by `isInsideWorkspace`; relative path fields must pass isSafeRelativePath.
+ * Commands that create, change, move, or delete files, or copy them (a copy brings its source's
+ * content into the workspace on paste): their paths must be inside by real path.
  */
-export function isSafeWebviewMessage(msg: unknown, isInsideWorkspace: (uri: string) => boolean): boolean {
+export const FILE_CHANGING_COMMANDS = new Set([
+    "renameFile", "deleteFile", "cutFile", "copyFile", "newFile", "newFolder", "cutFolder", "copyFolder",
+    "renameFolder", "deleteFolder", "moveFileToFolder", "moveFolderToFolder", "pasteItem"
+]);
+
+/**
+ * Real-path checks for FILE_CHANGING_COMMANDS. The lexical check passes a path that runs through a
+ * symlinked folder pointing outside the workspace, which would let a rename or delete change files
+ * there. Opening and reading keep the lexical check, so files under such links still open.
+ */
+export interface RealPathChecks {
+    uri(uri: string): boolean;
+    relative(relativePath: string): boolean;
+}
+
+/**
+ * True when a webview message may be handled. `uri` (if present) must be inside a workspace
+ * folder, as decided by `isInsideWorkspace`, and for FILE_CHANGING_COMMANDS also by `real`;
+ * relative path fields must pass isSafeRelativePath.
+ */
+export function isSafeWebviewMessage(msg: unknown, isInsideWorkspace: (uri: string) => boolean, real?: RealPathChecks): boolean {
     if (!msg || typeof msg !== "object") {
         return false;
     }
     const fields = msg as { [key: string]: unknown };
+    const strict = !!real && typeof fields.command === "string" && FILE_CHANGING_COMMANDS.has(fields.command);
     if (fields.uri !== undefined) {
         if (typeof fields.uri !== "string" || hasDotDotSegment(fields.uri)) {
             return false;
         }
         try {
-            if (!isInsideWorkspace(fields.uri)) {
+            if (!isInsideWorkspace(fields.uri) || (strict && !real!.uri(fields.uri))) {
                 return false;
             }
         } catch {
             return false;
         }
     }
-    return RELATIVE_PATH_FIELDS.every(field => isSafeRelativePath(fields[field]));
+    return RELATIVE_PATH_FIELDS.every(field => {
+        const value = fields[field];
+        if (!isSafeRelativePath(value)) {
+            return false;
+        }
+        if (!strict || typeof value !== "string" || !value) {
+            return true;
+        }
+        try {
+            return real!.relative(value);
+        } catch {
+            return false;
+        }
+    });
+}
+
+/** Longest layout order accepted from the webview (far above MAX_SCANNED_FILES plus gaps). */
+export const MAX_ORDER_LENGTH = 200_000;
+
+/**
+ * A layout order sent by the webview, made safe to persist: anything but a string becomes a gap,
+ * a repeated id becomes a gap (one file drawn twice would corrupt every later slot), and the length
+ * is bounded. Null when it is not an array. Gaps keep their position, so nothing shifts.
+ */
+export function sanitizeOrderIds(raw: unknown): string[] | null {
+    if (!Array.isArray(raw) || raw.length > MAX_ORDER_LENGTH) {
+        return null;
+    }
+    const seen = new Set<string>();
+    return raw.map(id => {
+        if (typeof id !== "string" || id.length > 4096 || seen.has(id)) {
+            return "";
+        }
+        if (id) {
+            seen.add(id);
+        }
+        return id;
+    });
+}
+
+/** A positive row count from the webview, or undefined. */
+export function sanitizeRowCount(raw: unknown): number | undefined {
+    return typeof raw === "number" && Number.isInteger(raw) && raw > 0 && raw <= 100_000 ? raw : undefined;
 }

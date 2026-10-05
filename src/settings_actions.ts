@@ -7,6 +7,12 @@ import { clearScanCache, type ScanIgnoreState } from "./scanner";
 // globalState keys for the one-time fullscreen banner and the dismissible shortcut legend.
 export const FULLSCREEN_NOTICE_KEY = "thumbview.fullscreenNoticeShown";
 export const SHORTCUT_LEGEND_DISMISSED_KEY = "thumbview.shortcutLegendDismissed";
+/** workspaceState: folders auto-ignore added (extension.ts persistIgnoreState). */
+export const AUTO_IGNORED_FOLDERS_KEY = "thumbview.autoIgnoredFolders";
+/** workspaceState: the auto-hidden set the user dismissed the chip for; a different set shows it again. */
+export const AUTO_HIDDEN_DISMISSED_KEY = "thumbview.autoHiddenChipDismissed";
+/** Confirmations whose effect is visible or trivial go to the status bar, not a notification. */
+export const STATUS_MESSAGE_MS = 3000;
 
 /** What the actions need from extension.ts. `host.activePanel` is read at call time (it changes). */
 export interface SettingsActionHost {
@@ -32,6 +38,13 @@ export function createSettingsActions(host: SettingsActionHost): Record<string, 
             await context.globalState.update(SHORTCUT_LEGEND_DISMISSED_KEY, true);
             return;
         },
+        // Fields: { signature: string } (overview.js autoHiddenSignature of the folders shown).
+        dismissAutoHiddenChip: async (msg: any) => {
+            if (typeof msg.signature === "string" && msg.signature.length <= 100_000) {
+                await context.workspaceState.update(AUTO_HIDDEN_DISMISSED_KEY, msg.signature);
+            }
+            return;
+        },
         dismissFullscreenNotice: async (msg: any) => {
             await context.globalState.update(FULLSCREEN_NOTICE_KEY, true);
             return;
@@ -54,7 +67,7 @@ export function createSettingsActions(host: SettingsActionHost): Record<string, 
                 }
                 await config.update("dragReorderMode", msg.mode, vscode.ConfigurationTarget.Global);
                 const modeStr = !msg.mode ? "" : msg.mode.charAt(0).toUpperCase() + msg.mode.slice(1);
-                vscode.window.showInformationMessage(`Thumbview Drag Reorder Mode set to ${modeStr}.`);
+                vscode.window.setStatusBarMessage(`Thumbview Drag Reorder Mode set to ${modeStr}.`, STATUS_MESSAGE_MS);
                 if (host.activePanel) {
                     updateLayoutFromCache(host.activePanel);
                 }
@@ -101,8 +114,8 @@ export function createSettingsActions(host: SettingsActionHost): Record<string, 
         },
         setMinCellDimensions: async (msg: any) => {
             try {
-                const w = Math.max(10, Math.min(500, Math.round(Number(msg.minCellWidth) || 60)));
-                const h = Math.max(10, Math.min(500, Math.round(Number(msg.minCellHeight) || 40)));
+                const w = Math.max(10, Math.min(500, Math.round(Number(msg.minCellWidth) || 40)));
+                const h = Math.max(10, Math.min(500, Math.round(Number(msg.minCellHeight) || 28)));
                 const config = vscode.workspace.getConfiguration("thumbview");
                 await config.update("minCellWidth", w, vscode.ConfigurationTarget.Global);
                 await config.update("minCellHeight", h, vscode.ConfigurationTarget.Global);

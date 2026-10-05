@@ -5,3 +5,6 @@ node_modules/
 .agents/
 demo-workspace/
 dist/
+
+# Local tooling (e.g. the Gemini orchestrator MCP); never part of the extension or the repository.
+tools/

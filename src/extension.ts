@@ -1,17 +1,19 @@
 import * as vscode from "vscode";
-import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache, invalidateScanFile, setScanPriorityProvider } from "./scanner";
-import { isAlwaysExcluded } from "./file_discovery";
-import { isSafeWebviewMessage } from "./message_guard";
+import { scanRepository, ScanIgnoreState, shouldIgnore, RepoFile, isSourceRootRegex, clearScanCache, invalidateScanFile, setScanPriorityProvider, rescanFile, getLastListedPaths, isListedPath, containsListedPath } from "./scanner";
+import { isAlwaysExcluded, listableAmong } from "./file_discovery";
+import { chunkBySize, inlineWithinBudget, lineTextSize } from "./payload_stream";
+import { ChangeGenerations, emptyPendingChanges, isListingRuleFile, planDiskChanges, type PendingDiskChanges } from "./disk_changes";
+import { isSafeWebviewMessage, sanitizeOrderIds, sanitizeRowCount } from "./message_guard";
 import { askDeleteMode, createFileActions } from "./file_actions";
-import { createSettingsActions, FULLSCREEN_NOTICE_KEY, SHORTCUT_LEGEND_DISMISSED_KEY } from "./settings_actions";
+import { createSettingsActions, AUTO_HIDDEN_DISMISSED_KEY, AUTO_IGNORED_FOLDERS_KEY, FULLSCREEN_NOTICE_KEY, SHORTCUT_LEGEND_DISMISSED_KEY, STATUS_MESSAGE_MS } from "./settings_actions";
 import { isThumbviewViewType, THUMBVIEW_VIEW_TYPE } from "./webview_tabs";
 import { PanelSession } from "./panel_session";
 import { decideF4, EditorGroupTracker, type EditorInfo, type GroupInfo, type OpenResult, type TabInfo } from "./editor_groups";
 import { buildStableGrid, slotToIndex, findSlotIndex, MIN_GRID_COLS, MIN_GRID_ROWS } from "./layout";
 import { buildSpanningGrid, cellsNeeded, SpanningPlacement, DEFAULT_BASE_LINES_PER_CELL, DEFAULT_COMPRESSION_PCT } from "./spanning_layout";
-import { PersistentFileOrder } from "./state";
+import { PersistentFileOrder, fillLayoutHoles } from "./state";
 import { createReentrantLock, createCoalescedToggle } from "./locks";
-import { applyZenOverrides, ConfigLike, ZEN_ENTERED_KEY, ZEN_OWNER_HEARTBEAT_MS, ZEN_OWNER_STALE_MS, claimZenOwnership, hasOtherLiveOwners, releaseZenOwnership } from "./zen_settings";
+import { applyZenOverrides, ConfigLike, ZEN_BACKUP_KEY, ZEN_ENTERED_KEY, ZEN_OWNER_HEARTBEAT_MS, ZEN_OWNER_STALE_MS, claimZenOwnership, hasOtherLiveOwners, releaseZenOwnership } from "./zen_settings";
 
 function getCompressionPct(): number {
     const raw = vscode.workspace.getConfiguration("thumbview").get<number>("compressionPercentage") ?? 5;
@@ -24,6 +26,8 @@ import { DirectoryTreeItem } from "./directoryProvider";
 import { fetchWorkspaceGitDiff, getCachedGitDiff } from "./git";
 import { ACCENT_SEARCH, withAlpha } from "./colors";
 import { getHtml } from "./webview_html";
+import { createStudy } from "./study/study";
+import { HostVisitTracker } from "./study/study_events";
 
 // Re-exported for scripts/capture-screenshots.mjs, which renders the page headlessly from the bundle.
 export { getHtml } from "./webview_html";
@@ -50,11 +54,23 @@ export async function activate(context: vscode.ExtensionContext) {
     // --- Helpers: read/write ignore state from workspaceState (never touches .vscode/settings.json) ---
     const getIgnoreState = (): ScanIgnoreState => ({
         ignorePatterns: context.workspaceState.get<string[]>("thumbview.ignorePatterns") ?? [],
-        autoIgnoreExclusions: context.workspaceState.get<string[]>("thumbview.autoIgnoreExclusions") ?? []
+        autoIgnoreExclusions: context.workspaceState.get<string[]>("thumbview.autoIgnoreExclusions") ?? [],
+        autoIgnoredFolders: context.workspaceState.get<string[]>(AUTO_IGNORED_FOLDERS_KEY) ?? []
     });
     const persistIgnoreState = async (state: ScanIgnoreState): Promise<void> => {
         await context.workspaceState.update("thumbview.ignorePatterns", state.ignorePatterns);
         await context.workspaceState.update("thumbview.autoIgnoreExclusions", state.autoIgnoreExclusions);
+        if ((state.autoIgnored && state.autoIgnored.length > 0) || (state.autoUnhidden && state.autoUnhidden.length > 0)) {
+            const unhidden = new Set(state.autoUnhidden ?? []);
+            const known = (context.workspaceState.get<string[]>(AUTO_IGNORED_FOLDERS_KEY) ?? []).filter(folder => !unhidden.has(folder));
+            await context.workspaceState.update(AUTO_IGNORED_FOLDERS_KEY, Array.from(new Set([...known, ...(state.autoIgnored ?? [])])));
+        }
+    };
+    // Auto-ignored folders still ignored now (unignoring one removes it from the chip's count).
+    // Recorded only from 0.5.2 on; earlier auto-ignores cannot be told apart from the user's own.
+    const autoHiddenFolders = (ignorePatterns: string[]): string[] => {
+        const current = new Set(ignorePatterns);
+        return (context.workspaceState.get<string[]>(AUTO_IGNORED_FOLDERS_KEY) ?? []).filter(folder => current.has(folder));
     };
 
     // --- One-time migration: move old settings.json values into workspaceState, then delete them ---
@@ -107,52 +123,37 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     }
 
-    // Auto-populate ignorePatterns with workspace .gitignore rules once initialized and sanitize stale source ignore rules
-    if (workspaceFolders && workspaceFolders.length > 0) {
+    // Versions before 0.5.1 copied every root .gitignore line into ignorePatterns at activation. git
+    // ls-files (and the non-git fallback in file_discovery.ts) already apply .gitignore, so the copies
+    // only cluttered Folders & Ignored and hid tracked files. Remove them once; nothing shown moves.
+    const GITIGNORE_COPIES_REMOVED_KEY = "thumbview.gitignoreCopiesRemoved";
+    if (workspaceFolders && workspaceFolders.length > 0 && !context.workspaceState.get<boolean>(GITIGNORE_COPIES_REMOVED_KEY)) {
         const gitignorePath = path.join(workspaceFolders[0].uri.fsPath, ".gitignore");
-        const actualGitignoreRules = new Set<string>();
-        if (fs.existsSync(gitignorePath)) {
-            try {
-                const content = fs.readFileSync(gitignorePath, "utf-8");
-                content
-                    .split("\n")
-                    .map(line => line.trim())
-                    .filter(line => line && !line.startsWith("#"))
-                    .forEach(rule => {
-                        actualGitignoreRules.add(rule);
-                        actualGitignoreRules.add(rule.replace(/^\/+|\/+$/g, ""));
-                    });
-            } catch {
-            }
+        const copiedRules = new Set<string>();
+        try {
+            fs.readFileSync(gitignorePath, "utf-8")
+                .split("\n")
+                .map(line => line.trim())
+                .filter(line => line && !line.startsWith("#"))
+                .forEach(rule => {
+                    copiedRules.add(rule);
+                    copiedRules.add(rule.replace(/^\/+|\/+$/g, ""));
+                });
+        } catch {
         }
-
         const { ignorePatterns, autoIgnoreExclusions } = getIgnoreState();
-        const exclusionSet = new Set(autoIgnoreExclusions.map(e => e.trim().replace(/^\/+|\/+$/g, "")));
-        const isExcluded = (pat: string) => {
-            const clean = pat.trim().replace(/^\/+|\/+$/g, "");
-            return exclusionSet.has(clean) || autoIgnoreExclusions.includes(pat);
-        };
-
-        const updatedIgnored = [...ignorePatterns];
-        let changed = false;
-
-        for (const rule of actualGitignoreRules) {
-            if (!updatedIgnored.includes(rule) && !isExcluded(rule)) {
-                updatedIgnored.push(rule);
-                changed = true;
-            }
+        const kept = ignorePatterns.filter(pattern => !copiedRules.has(pattern));
+        if (kept.length !== ignorePatterns.length) {
+            await persistIgnoreState({ ignorePatterns: kept, autoIgnoreExclusions });
         }
-
-        if (changed) {
-            await persistIgnoreState({ ignorePatterns: updatedIgnored, autoIgnoreExclusions });
-        }
+        await context.workspaceState.update(GITIGNORE_COPIES_REMOVED_KEY, true);
     }
 
     const fileOrder = new PersistentFileOrder();
     setScanPriorityProvider(() => fileOrder.getOrder().filter(Boolean));
     const savedOrder = context.workspaceState.get<string[]>("thumbview.seenFiles");
     if (savedOrder) {
-        fileOrder.update(savedOrder);
+        fileOrder.restore(savedOrder);
     }
 
     const cursorLocations: { [uri: string]: number } = {};
@@ -160,6 +161,40 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
+    // Opt-in usage study (src/study, STUDY.md); every method is a no-op unless the user joined.
+    const study = createStudy(context, { isThumbviewVisible: () => !!activePanel?.visible, log });
+    // Webview messages recorded by name only, as study "action" events (never their arguments).
+    const STUDY_ACTIONS = new Set([
+        "reorderFile", "reorderFolder", "swapCardItems", "reflow", "expandSpace", "reduceSpace",
+        "addIgnorePattern", "removeIgnorePattern", "ignoreFile", "ignoreFolder", "setLayoutMode", "setDragReorderMode",
+        "openPreview", "openToSide", "revealInFiles", "renameFile", "deleteFile", "copyPath", "copyRelativePath",
+        "newFile", "newFolder", "renameFolder", "deleteFolder", "moveFileToFolder", "moveFolderToFolder",
+        "compareWithSelected", "openInTerminal", "openFolderInTerminal", "runTests", "debugTests", "close"
+    ]);
+    let studyPanelVisible = false;
+    let studyHiddenAt = -Infinity;
+    let studyVisitEndTimer: NodeJS.Timeout | undefined;
+    // The visit announced to the webview; onDidDispose reports one the closed tab took with it.
+    const hostVisit = new HostVisitTracker();
+    // The webview's last drop the host has processed (reorderFile reorderSeq), echoed in payloads.
+    let lastReorderSeq = 0;
+    // When F4 or the Open command was last invoked, and the request behind the current visit (null
+    // for a tab click): the start of the episode's reveal_latency_ms (study.ts).
+    let lastOpenRequestedAt: number | null = null;
+    let studyVisitRequestedAt: number | null = null;
+    // How the last open was requested: the F4 keybinding passes { source: "keybinding" } (package.json).
+    let lastOpenSource: "f4" | "command" = "command";
+    // A hide shorter than this (Zen/maximize steps flipping visibility) continues the same visit.
+    const STUDY_FLICKER_MS = 500;
+    const studyShown = (panel: vscode.WebviewPanel, trigger: "f4" | "command" | "tab", coldStart: boolean) => {
+        if (study.recordShown(trigger, coldStart, cachedScannedFiles ? cachedScannedFiles.length : null)) {
+            hostVisit.started(Date.now());
+            studyVisitRequestedAt = trigger === "tab" ? null : lastOpenRequestedAt;
+            // Starts the visit clock in the webview even when no reveal gate runs (tab click).
+            // Protocol: "studyVisitStart", no fields (overview.js beginStudyEpisode).
+            panel.webview.postMessage({ command: "studyVisitStart" });
+        }
+    };
 
     // Reads the user setting fresh each call (rather than caching) so a config change
     // picked up by the onDidChangeConfiguration listener below is always honored.
@@ -357,7 +392,7 @@ export async function activate(context: vscode.ExtensionContext) {
     };
 
     const updateDocumentInCache = (doc: vscode.TextDocument) => {
-        if (doc.uri.scheme !== "file" || doc.lineCount === 0 || !cachedScannedFiles) {
+        if (doc.uri.scheme !== "file" || doc.isClosed || doc.lineCount === 0 || !cachedScannedFiles) {
             return;
         }
         const fsPath = doc.uri.fsPath;
@@ -410,6 +445,20 @@ export async function activate(context: vscode.ExtensionContext) {
             fullLines
         };
     };
+    // Documents edited since the cache last took them in (onDidChangeTextDocument, debounced; queued
+    // without work while Thumbview is hidden). Applied before every payload is built.
+    const pendingChangedDocs = new Map<string, vscode.TextDocument>();
+    // Documents edited since their last save, so a close without saving re-reads the file from disk.
+    const docsWithUnsavedText = new Set<string>();
+    const applyPendingDocChanges = () => {
+        if (pendingChangedDocs.size === 0) {
+            return;
+        }
+        for (const doc of pendingChangedDocs.values()) {
+            updateDocumentInCache(doc);
+        }
+        pendingChangedDocs.clear();
+    };
 
     const getWorkspaceDiagnostics = (): Map<string, { hasError: boolean; errorCount: number; errorLines: { [line0: number]: string } }> => {
         const map = new Map<string, { hasError: boolean; errorCount: number; errorLines: { [line0: number]: string } }>();
@@ -439,17 +488,6 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }
         return map;
-    };
-
-    let cachedAllRelativePaths: string[] = [];
-    const getAllWorkspaceRelativePaths = async (): Promise<string[]> => {
-        try {
-            const uris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git}/**");
-            cachedAllRelativePaths = uris.map(u => vscode.workspace.asRelativePath(u).replace(/\\/g, "/"));
-            return cachedAllRelativePaths;
-        } catch {
-            return cachedAllRelativePaths;
-        }
     };
 
     let cachedIgnoreCountsKey = "";
@@ -531,15 +569,85 @@ export async function activate(context: vscode.ExtensionContext) {
     // Lines go out as plain strings: the webview reads only their text, and string arrays are
     // about half the size of {text, indent, length, category} objects and several times faster
     // to clone across the webview boundary (see DESIGN.md "Scale benchmark").
-    const withDeltaLines = <T extends { id: string; contentVersion: number; lines: { text: string }[]; fullLines?: unknown }>(files: T[]) =>
-        files.map(file => {
-            if (postedContentVersions.get(file.id) === file.contentVersion) {
+    //
+    // Text beyond FIRST_PAYLOAD_LINE_BUDGET (payload_stream.ts) is not inlined: those files go out as
+    // `linesPending: true` and their text follows in "fileLines" chunks once the payload is delivered
+    // (streamPendingLines), so a 10k-file first open paints its full layout without waiting for
+    // ~70 MB of text. Every payload starts a new stream generation, which stops an older stream;
+    // files it had not sent yet are simply pending again in the newer payload.
+    type StreamedLines = { id: string; contentVersion: number; lines: string[]; fullLines?: string[] };
+    let lineStreamGeneration = 0;
+    let queuedLineStream: { generation: number; files: StreamedLines[] } | null = null;
+    const withDeltaLines = <T extends { id: string; contentVersion: number; lines: { text: string }[]; fullLines?: string[] }>(files: T[]) => {
+        const generation = ++lineStreamGeneration;
+        const needed = files.filter(file => postedContentVersions.get(file.id) !== file.contentVersion);
+        const texts = new Map(needed.map(file => [file.id, file.lines.map(line => line.text)]));
+        const inline = inlineWithinBudget(needed.map(file => lineTextSize({ lines: texts.get(file.id)!, fullLines: file.fullLines })));
+        const inlineIds = new Set(needed.filter((_, i) => inline[i]).map(file => file.id));
+        const streamed: StreamedLines[] = [];
+        const result = files.map(file => {
+            const lines = texts.get(file.id);
+            if (!lines) {
                 const { lines: _lines, fullLines: _fullLines, ...rest } = file;
                 return { ...rest, lines: [] as string[], linesOmitted: true };
             }
-            postedContentVersions.set(file.id, file.contentVersion);
-            return { ...file, lines: file.lines.map(line => line.text) };
+            if (inlineIds.has(file.id)) {
+                postedContentVersions.set(file.id, file.contentVersion);
+                return { ...file, lines };
+            }
+            streamed.push({ id: file.id, contentVersion: file.contentVersion, lines, fullLines: file.fullLines });
+            const { lines: _lines, fullLines: _fullLines, ...rest } = file;
+            return { ...rest, lines: [] as string[], linesPending: true };
         });
+        queuedLineStream = streamed.length > 0 ? { generation, files: streamed } : null;
+        return result;
+    };
+    // Fields: { files: { id, contentVersion, lines: string[], fullLines? }[] } (overview.js "fileLines").
+    const streamPendingLines = async (panel: vscode.WebviewPanel, stream: { generation: number; files: StreamedLines[] }) => {
+        const startedAt = performance.now();
+        const chunks = chunkBySize(stream.files, lineTextSize);
+        for (const chunk of chunks) {
+            if (stream.generation !== lineStreamGeneration) {
+                return;
+            }
+            let delivered = false;
+            try {
+                delivered = await panel.webview.postMessage({ command: "fileLines", files: chunk });
+            } catch {
+            }
+            // A reload ("ready") during the await cleared postedContentVersions for a new page that
+            // never got this chunk; recording it there would make the next payload omit its text.
+            if (!delivered || stream.generation !== lineStreamGeneration) {
+                return;
+            }
+            for (const file of chunk) {
+                postedContentVersions.set(file.id, file.contentVersion);
+            }
+        }
+        log.info(`Streamed text of ${stream.files.length} files in ${chunks.length} chunks after the payload, ${Math.round(performance.now() - startedAt)} ms.`);
+    };
+
+    // Every payload (one per typing pause) used to rewrite 10k-entry orders to workspaceState. Compare
+    // against the stored value first; it is in memory, so the comparison is far cheaper than a write.
+    // No private cache: reflow and drag handlers write these keys directly.
+    const sameShallow = (a: unknown, b: unknown): boolean => {
+        if (a === b) {
+            return true;
+        }
+        if (Array.isArray(a) && Array.isArray(b)) {
+            return a.length === b.length && a.every((v, i) => v === b[i]);
+        }
+        if (a && b && typeof a === "object" && typeof b === "object" && !Array.isArray(a) && !Array.isArray(b)) {
+            const ka = Object.keys(a);
+            return ka.length === Object.keys(b).length && ka.every(k => (a as Record<string, unknown>)[k] === (b as Record<string, unknown>)[k]);
+        }
+        return false;
+    };
+    const persistIfChanged = async (key: string, value: unknown): Promise<void> => {
+        if (!sameShallow(context.workspaceState.get(key), value)) {
+            await context.workspaceState.update(key, value);
+        }
+    };
 
     const updateLayoutFromCache = (panel: vscode.WebviewPanel, forceBreakBeforeId?: string): Promise<void> =>
         withOrderLock(() => updateLayoutFromCacheLocked(panel, forceBreakBeforeId));
@@ -553,8 +661,13 @@ export async function activate(context: vscode.ExtensionContext) {
         const builtAt = performance.now();
         const count = (dataPostsByPanel.get(panel) ?? 0) + 1;
         dataPostsByPanel.set(panel, count);
+        const stream = queuedLineStream;
+        queuedLineStream = null;
         panel.webview.postMessage(message).then(() => {
-            const line = `Data payload ${count} (${message.files.length} files): built in ${Math.round(builtAt - layoutStartedAt)} ms, delivered in ${Math.round(performance.now() - builtAt)} ms`;
+            if (stream) {
+                streamPendingLines(panel, stream).catch(() => { });
+            }
+            const line = `Data payload ${count} (${message.files.length} files${stream ? `, text of ${stream.files.length} streamed after` : ""}): built in ${Math.round(builtAt - layoutStartedAt)} ms, delivered in ${Math.round(performance.now() - builtAt)} ms`;
             if (count === 1) {
                 log.info(line);
             } else {
@@ -569,14 +682,15 @@ export async function activate(context: vscode.ExtensionContext) {
             await refreshThumbview(panel);
             return;
         }
+        // Edits made while Thumbview was hidden or closed were only queued (onDidChangeTextDocument).
+        applyPendingDocChanges();
 
         try {
             const { ignorePatterns } = getIgnoreState();
             const activeFiles = cachedScannedFiles.filter(file => !shouldIgnore(file.path, ignorePatterns));
 
-            const allPaths = cachedAllRelativePaths.length > 0
-                ? cachedAllRelativePaths
-                : cachedScannedFiles.map(f => f.path);
+            const listedPaths = getLastListedPaths();
+            const allPaths = listedPaths.length > 0 ? listedPaths : cachedScannedFiles.map(f => f.path);
             const { counts: ignorePatternCounts, filesMap: ignoredFilesMap } = computeIgnoreCounts(ignorePatterns, allPaths);
 
             const activeFileIds = activeFiles.map(f => f.id);
@@ -615,20 +729,20 @@ export async function activate(context: vscode.ExtensionContext) {
             } else {
                 fileOrder.update(activeFileIds);
             }
-            await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
+            await persistIfChanged("thumbview.seenFiles", fileOrder.getOrder());
 
             const order = fileOrder.getOrder();
             const dragReorderMode = getDragReorderMode();
             const config = vscode.workspace.getConfiguration("thumbview");
             const renderMediaThumbnails = config.get<boolean>("renderMediaThumbnails") ?? true;
-            const minCellWidth = config.get<number>("minCellWidth") ?? 60;
-            const minCellHeight = config.get<number>("minCellHeight") ?? 40;
+            const minCellWidth = config.get<number>("minCellWidth") ?? 40;
+            const minCellHeight = config.get<number>("minCellHeight") ?? 28;
             const autoIgnoreThreshold = config.get<number>("autoIgnoreThreshold") ?? 30;
             const compressionPercentage = config.get<number>("compressionPercentage") ?? 5;
             const compressionPct = getCompressionPct();
             const openKeybinding = getOpenKeybindingLabel();
+            // Git markers come from the cache; saves, commits, and reveals refresh it (requestGitRefresh).
             const gitDiff = getCachedGitDiff();
-            fetchWorkspaceGitDiff().catch(() => {});
 
             const extraCols = context.workspaceState.get<number>("thumbview.extraCols") || 0;
             const extraRows = context.workspaceState.get<number>("thumbview.extraRows") || 0;
@@ -679,8 +793,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 const layout = buildSpanningGrid(filesWithWebviewUris, order, flowAllocations, savedRows, forceBreakBeforeId ?? null, 16 / 9, DEFAULT_BASE_LINES_PER_CELL, compressionPct, displayCells);
                 lastSpanningPlacements = layout.placements;
 
-                await context.workspaceState.update("thumbview.spanningAllocations", layout.allocations);
-                await context.workspaceState.update("thumbview.spanningRows", layout.wrapRows);
+                await persistIfChanged("thumbview.spanningAllocations", layout.allocations);
+                await persistIfChanged("thumbview.spanningRows", layout.wrapRows);
 
                 const filesWithSlots = withDeltaLines(layout.placements.map(p => ({
                     ...p.file,
@@ -701,8 +815,15 @@ export async function activate(context: vscode.ExtensionContext) {
                     dragReorderMode,
                     renderMediaThumbnails,
                     fullscreenOnOpen: isFullscreenOnOpen(),
+                    // The webview reports one "studyEpisode" per visit only while this is true.
+                    studyActive: study.isActive(),
                     // In-grid legend of the non-obvious keys, until dismissed ("dismissShortcutLegend").
                     showShortcutLegend: !context.globalState.get<boolean>(SHORTCUT_LEGEND_DISMISSED_KEY),
+                    reorderSeq: lastReorderSeq,
+                    // In-grid chip "N folders auto-hidden" (overview.js updateAutoHiddenChip) until dismissed
+                    // for this exact set ("dismissAutoHiddenChip" { signature }).
+                    autoHiddenFolders: autoHiddenFolders(ignorePatterns),
+                    autoHiddenDismissed: context.workspaceState.get<string>(AUTO_HIDDEN_DISMISSED_KEY) ?? "",
                     compressionPercentage,
                     autoIgnoreThreshold,
                     minCellWidth,
@@ -728,7 +849,11 @@ export async function activate(context: vscode.ExtensionContext) {
                         rows: layout.rows + extraRows,
                         wrapRows: layout.wrapRows,
                         flowCols: layout.flowCols + extraCols,
-                        flowRows: layout.flowRows + extraRows
+                        flowRows: layout.flowRows + extraRows,
+                        // Without Expand Grid Space's extras: the only size the folder-card decision uses
+                        // (overview.js rootCellsTooSmall), so expanding or reducing can never flip it.
+                        baseFlowCols: layout.flowCols,
+                        baseFlowRows: layout.flowRows
                     }
                 });
             } else { // uniform grid (default)
@@ -762,8 +887,15 @@ export async function activate(context: vscode.ExtensionContext) {
                     dragReorderMode,
                     renderMediaThumbnails,
                     fullscreenOnOpen: isFullscreenOnOpen(),
+                    // The webview reports one "studyEpisode" per visit only while this is true.
+                    studyActive: study.isActive(),
                     // In-grid legend of the non-obvious keys, until dismissed ("dismissShortcutLegend").
                     showShortcutLegend: !context.globalState.get<boolean>(SHORTCUT_LEGEND_DISMISSED_KEY),
+                    reorderSeq: lastReorderSeq,
+                    // In-grid chip "N folders auto-hidden" (overview.js updateAutoHiddenChip) until dismissed
+                    // for this exact set ("dismissAutoHiddenChip" { signature }).
+                    autoHiddenFolders: autoHiddenFolders(ignorePatterns),
+                    autoHiddenDismissed: context.workspaceState.get<string>(AUTO_HIDDEN_DISMISSED_KEY) ?? "",
                     compressionPercentage,
                     autoIgnoreThreshold,
                     minCellWidth,
@@ -787,7 +919,10 @@ export async function activate(context: vscode.ExtensionContext) {
                     layout: {
                         cols: Math.max(layout.cols + extraCols, ugMaxCol + 1),
                         rows: Math.max(layout.rows + extraRows, ugMaxRow + 1),
-                        slots: layout.slots
+                        slots: layout.slots,
+                        // Without extras, for the folder-card decision (see the spanning branch).
+                        baseFlowCols: layout.cols,
+                        baseFlowRows: layout.rows
                     }
                 });
             }
@@ -816,8 +951,69 @@ export async function activate(context: vscode.ExtensionContext) {
     // Raw result of the last scan. The scanner reuses a RepoFile object while its file is unchanged,
     // so an identical array means nothing visible changed (e.g. a build writing a gitignored folder).
     let lastRawScan: RepoFile[] | null = null;
+    // The listing also counts: a file added to an ignored folder changes the Folders & Ignored counts.
+    let lastListedCount = -1;
     const sameScan = (a: RepoFile[] | null, b: RepoFile[]) =>
-        !!a && a.length === b.length && a.every((file, i) => file === b[i]);
+        !!a && a.length === b.length && a.every((file, i) => file === b[i]) && lastListedCount === getLastListedPaths().length;
+
+    // Files changed on disk, by generation. A full scan can read a file before it changes and then
+    // install that older text over the newer incremental re-read; installScan re-reads those files.
+    const diskChanges = new ChangeGenerations<vscode.Uri>();
+    let installedScanGeneration = -1;
+    let reReadAfterScan: (uris: vscode.Uri[]) => void = () => { };
+    /**
+     * Installs a finished full scan as the cache. A scan that started before the last installed one
+     * is dropped (its reads are older). Returns "same" when nothing visible changed.
+     */
+    // Full scans are single-flight: a request during a scan queues exactly one more, which starts after
+    // it and so sees every event that led to the request. Without this, two overlapping scans could
+    // finish out of order and the older listing (e.g. one still holding a deleted file) would win.
+    type ScanResult = { files: RepoFile[]; startedAt: number };
+    let scanInFlight: Promise<ScanResult> | undefined;
+    let scanQueued: Promise<ScanResult> | undefined;
+    const fullScan = (): Promise<ScanResult> => {
+        if (!scanInFlight) {
+            const startedAt = diskChanges.current();
+            scanInFlight = scanRepository(getIgnoreState(), persistIgnoreState)
+                .then(files => ({ files, startedAt }))
+                .finally(() => {
+                    scanInFlight = undefined;
+                });
+            return scanInFlight;
+        }
+        if (!scanQueued) {
+            scanQueued = scanInFlight.catch(() => undefined).then(() => {
+                scanQueued = undefined;
+                return fullScan();
+            });
+        }
+        return scanQueued;
+    };
+
+    const installScan = (files: RepoFile[], startedAt: number, onlyIfChanged: boolean): "stale" | "same" | "installed" => {
+        if (startedAt < installedScanGeneration) {
+            return "stale";
+        }
+        installedScanGeneration = startedAt;
+        const late = diskChanges.changedSince(startedAt);
+        diskChanges.forgetThrough(startedAt);
+        if (late.length > 0) {
+            reReadAfterScan(late);
+        }
+        if (onlyIfChanged && sameScan(lastRawScan, files)) {
+            return "same";
+        }
+        lastRawScan = files;
+        lastListedCount = getLastListedPaths().length;
+        cachedScannedFiles = files;
+        // The scan reads disk; re-apply unsaved buffers so their tiles keep showing the edits.
+        for (const doc of vscode.workspace.textDocuments) {
+            if (doc.isDirty) {
+                updateDocumentInCache(doc);
+            }
+        }
+        return "installed";
+    };
 
     const refreshThumbview = async (panel: vscode.WebviewPanel, onlyIfChanged = false) => {
         try {
@@ -829,17 +1025,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 });
             }
 
-            const files = await scanRepository(getIgnoreState(), persistIgnoreState);
-            if (onlyIfChanged && sameScan(lastRawScan, files)) {
+            const { files, startedAt } = await fullScan();
+            if (installScan(files, startedAt, onlyIfChanged) !== "installed" && onlyIfChanged) {
                 return;
-            }
-            lastRawScan = files;
-            cachedScannedFiles = files;
-            // The scan reads disk; re-apply unsaved buffers so their tiles keep showing the edits.
-            for (const doc of vscode.workspace.textDocuments) {
-                if (doc.isDirty) {
-                    updateDocumentInCache(doc);
-                }
             }
 
             await updateLayoutFromCache(panel);
@@ -852,8 +1040,33 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    // With no panel, the startup pre-scan's cache must still follow creates and deletes, or the first
+    // F4 would show a stale file set. Coalesced: events during a scan queue one more.
+    let backgroundRescan: Promise<void> | undefined;
+    let backgroundRescanAgain = false;
+    const rescanInBackground = () => {
+        if (backgroundRescan) {
+            backgroundRescanAgain = true;
+            return;
+        }
+        backgroundRescan = fullScan().then(({ files, startedAt }) => {
+            if (installScan(files, startedAt, true) === "installed" && activePanel) {
+                refreshOrDefer("layout");
+            }
+        }).catch(() => {}).finally(() => {
+            backgroundRescan = undefined;
+            if (backgroundRescanAgain) {
+                backgroundRescanAgain = false;
+                rescanInBackground();
+            }
+        });
+    };
+
     const refreshOrDefer = (kind: "layout" | "rescan") => {
         if (!activePanel) {
+            if (kind === "rescan" && cachedScannedFiles) {
+                rescanInBackground();
+            }
             return;
         }
         if (!activePanel.visible) {
@@ -869,23 +1082,39 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    // Git markers refresh after saves, disk changes, and commits (.git/index, .git/HEAD), and only while
+    // Thumbview is visible: a hidden panel just marks them stale and the next reveal fetches once.
+    // Each fetch runs `git status -uall` and `git diff HEAD` over the whole repository.
+    // Stale until the first fetch: without the startup pre-scan, the first open fetches after its first paint.
+    let gitStale = true;
+    const requestGitRefresh = (): Promise<unknown> => {
+        if (activePanel?.visible) {
+            gitStale = false;
+            return fetchWorkspaceGitDiff().catch(() => {});
+        }
+        gitStale = true;
+        return Promise.resolve();
+    };
+
     // Runs after the reveal has painted, so the instant reveal shows the retained frame first and
     // the (full-payload) catch-up update lands afterwards instead of stalling the reveal.
     const HIDDEN_REFRESH_FLUSH_DELAY_MS = 250;
     const flushHiddenRefresh = (panel: vscode.WebviewPanel) => {
-        if (!hiddenRefreshPending) {
+        if (!hiddenRefreshPending && !gitStale) {
             return;
         }
-        setTimeout(() => detachFromLocks(() => {
-            const kind = hiddenRefreshPending;
-            hiddenRefreshPending = null;
+        setTimeout(() => detachFromLocks(async () => {
             if (!panel.visible) {
-                hiddenRefreshPending = kind;
                 return;
+            }
+            const kind = hiddenRefreshPending ?? "layout";
+            hiddenRefreshPending = null;
+            if (gitStale) {
+                await requestGitRefresh();
             }
             if (kind === "rescan") {
                 refreshThumbview(panel, true);
-            } else if (kind === "layout") {
+            } else {
                 updateLayoutFromCache(panel);
             }
         }), HIDDEN_REFRESH_FLUSH_DELAY_MS);
@@ -897,6 +1126,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // enter/exit calls from the command path and onDidChangeViewState must not stack blind toggles.
     let fullscreenActive = false;
     let thumbviewEnteredZenMode = false;
+    // F4 pressed while the user was already in Zen mode (package.json passes { inZen: true } under
+    // the inZenMode context key). Thumbview then neither toggles Zen nor changes Zen settings, so the
+    // user's Zen mode stays on when Thumbview closes.
+    let userZenOnOpen = false;
     let groupMaximizedByUs = false;
     let layoutOpsInFlight = 0;
 
@@ -985,26 +1218,77 @@ export async function activate(context: vscode.ExtensionContext) {
             zenHeartbeat = undefined;
         }
         // Release even if this session never opened Thumbview, so its own entry never lingers.
+        // First: restoring the user's settings matters more than the study's last upload.
         await releaseZenOwnership(zenConfig, context.globalState, zenSessionId, Date.now());
+        await study.shutdown();
     };
 
-    // Background pre-scan and git diff fetch so opening Thumbview is instant O(1).
-    // The promise is kept so a "ready" that arrives mid-scan awaits it instead of starting a second full scan.
-    const prescanStartedAt = performance.now();
-    let prescanPromise: Promise<void> | undefined = scanRepository(getIgnoreState(), persistIgnoreState).then(files => {
-        log.info(`Initial workspace scan: ${files.length} files in ${Math.round(performance.now() - prescanStartedAt)} ms.`);
-        if (!cachedScannedFiles) {
-            cachedScannedFiles = files;
-            lastRawScan = files;
+    // Background pre-scan and git diff fetch so opening Thumbview is instant. The extension activates
+    // at startup (onStartupFinished, which also lets Zen crash recovery run before any F4), but the
+    // scan waits PRESCAN_DELAY_MS so it never competes with the window, language servers, and other
+    // extensions while they load. F4 before then starts it at once (startPrescan is idempotent), and
+    // "ready" awaits the same promise instead of starting a second full scan.
+    const PRESCAN_DELAY_MS = 3000;
+    const GIT_FIRST_PAINT_WAIT_MS = 100;
+    const HAS_OPENED_KEY = "thumbview.hasOpened";
+    const EVER_OPENED_KEY = "thumbview.everOpened";
+
+    // First-run hint: nothing else tells a new install that F4 opens Thumbview. Once per install, a
+    // few seconds after startup, with a folder open, and only for someone who never used Thumbview
+    // (state that earlier versions left behind counts as use, so upgrading users are not told).
+    const F4_HINT_KEY = "thumbview.f4HintShown";
+    const F4_HINT_DELAY_MS = 5000;
+    const usedThumbviewBefore = () => [EVER_OPENED_KEY, F4_HINT_KEY, FULLSCREEN_NOTICE_KEY, SHORTCUT_LEGEND_DISMISSED_KEY, ZEN_BACKUP_KEY]
+        .some(key => context.globalState.get(key) !== undefined) || !!context.workspaceState.get(HAS_OPENED_KEY);
+    if (!usedThumbviewBefore() && (vscode.workspace.workspaceFolders?.length ?? 0) > 0) {
+        const hintTimer = setTimeout(async () => {
+            if (usedThumbviewBefore() || activePanel) {
+                return;
+            }
+            await context.globalState.update(F4_HINT_KEY, true);
+            const key = getOpenKeybindingLabel();
+            const choice = await vscode.window.showInformationMessage(
+                `Thumbview: press ${key} to see every file in this workspace on one screen, and ${key} again to go back.`,
+                "Open Thumbview",
+                "Show Me Around"
+            );
+            if (choice === "Open Thumbview") {
+                void vscode.commands.executeCommand("thumbview.open");
+            } else if (choice === "Show Me Around") {
+                void vscode.commands.executeCommand("workbench.action.openWalkthrough", `${context.extension.id}#gettingStarted`, false);
+            }
+        }, F4_HINT_DELAY_MS);
+        context.subscriptions.push({ dispose: () => clearTimeout(hintTimer) });
+    }
+    let prescanPromise: Promise<void> | undefined;
+    const startPrescan = (): Promise<void> | undefined => {
+        if (cachedScannedFiles || prescanPromise) {
+            return prescanPromise;
         }
-    }).catch(() => {}).finally(() => {
-        prescanPromise = undefined;
-    });
-    fetchWorkspaceGitDiff().catch(() => {});
-    getAllWorkspaceRelativePaths().catch(() => {});
+        const prescanStartedAt = performance.now();
+        prescanPromise = fullScan().then(({ files, startedAt }) => {
+            log.info(`Initial workspace scan: ${files.length} files in ${Math.round(performance.now() - prescanStartedAt)} ms.`);
+            if (!cachedScannedFiles) {
+                installScan(files, startedAt, false);
+            }
+        }).catch(() => {}).finally(() => {
+            prescanPromise = undefined;
+        });
+        gitStale = false;
+        fetchWorkspaceGitDiff().catch(() => {});
+        return prescanPromise;
+    };
+    // Only where Thumbview has been opened before: a window whose user never opens it must not pay
+    // for a scan, hold the file cache, or see auto-ignore messages. The first open elsewhere scans on demand.
+    const prescanTimer = setTimeout(() => {
+        if (context.workspaceState.get<boolean>(HAS_OPENED_KEY)) {
+            startPrescan();
+        }
+    }, PRESCAN_DELAY_MS);
+    context.subscriptions.push({ dispose: () => clearTimeout(prescanTimer) });
 
     const enterFullscreen = async (): Promise<void> => {
-        if (fullscreenActive || !isFullscreenOnOpen()) {
+        if (fullscreenActive || !isFullscreenOnOpen() || userZenOnOpen) {
             return;
         }
         fullscreenActive = true;
@@ -1198,6 +1482,38 @@ export async function activate(context: vscode.ExtensionContext) {
             return target === root || target.startsWith(root + path.sep);
         });
     };
+    // Real paths (symlinks resolved) for commands that change files (message_guard.ts RealPathChecks).
+    // A path that does not exist yet (a new file) resolves through its nearest existing parent.
+    const realPathOf = (p: string): string => {
+        let current = path.resolve(p);
+        const rest: string[] = [];
+        for (;;) {
+            try {
+                return path.join(fs.realpathSync.native(current), ...rest.reverse());
+            } catch {
+                const parent = path.dirname(current);
+                if (parent === current) {
+                    return path.resolve(p);
+                }
+                rest.push(path.basename(current));
+                current = parent;
+            }
+        }
+    };
+    const realInside = (target: string, folderPath: string) => {
+        const root = realPathOf(folderPath);
+        const real = realPathOf(target);
+        return real === root || real.startsWith(root + path.sep);
+    };
+    const fileFolders = () => (vscode.workspace.workspaceFolders || []).filter(folder => folder.uri.scheme === "file");
+    const realPathChecks = {
+        uri: (uriString: string) => {
+            const uri = vscode.Uri.parse(uriString);
+            return uri.scheme !== "file" || fileFolders().some(folder => realInside(uri.fsPath, folder.uri.fsPath));
+        },
+        relative: (relativePath: string) => fileFolders().length === 0
+            || fileFolders().some(folder => realInside(path.join(folder.uri.fsPath, relativePath), folder.uri.fsPath))
+    };
 
     // After jump/switchTab has shown the target editor over Thumbview: exit the Zen mode and group
     // maximize Thumbview entered. The editor opened in Thumbview's own group, so unmaximizing
@@ -1268,6 +1584,8 @@ export async function activate(context: vscode.ExtensionContext) {
         if (result.status === "rejected") {
             // Thumbview is still in front, so its state must flow again.
             session.switchFailed();
+            // A later manual open of the same file must not be credited to this failed jump.
+            study.clearThumbviewTarget();
             sendOpenState();
             throw result.reason;
         }
@@ -1452,7 +1770,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     updateDocumentInCache(doc);
                 }
             }
-            fetchWorkspaceGitDiff().catch(() => {});
 
             if (activePanel) {
                 layoutOpsInFlight++;
@@ -1532,13 +1849,18 @@ export async function activate(context: vscode.ExtensionContext) {
                         ]
                     }
                 );
+                // From now on this workspace pre-scans at startup, so later first opens are instant.
+                context.workspaceState.update(HAS_OPENED_KEY, true);
+                context.globalState.update(EVER_OPENED_KEY, true);
 
                 activePanel = panel;
                 session.shown();
+                studyPanelVisible = true;
+                studyShown(panel, lastOpenSource, true);
                 editorGroups.recordCovered(editorsBeforeCreate, createColumn);
 
-                const hasPdfs = (cachedScannedFiles || []).some(f => f.isPdf);
-                panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel(), hasPdfs);
+                // pdf.js is not on the page: overview.js loads it after Thumbview has opened (requestPdfJs).
+                panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
             } catch (err) {
                 log.error(`Failed to open the Thumbview panel: ${err instanceof Error ? err.message : String(err)}`);
                 // Zen and the maximize were entered for a panel that does not exist: undo them.
@@ -1581,7 +1903,7 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             panel.webview.onDidReceiveMessage(async msg => {
-                if (!isSafeWebviewMessage(msg, isUriInsideWorkspace)) {
+                if (!isSafeWebviewMessage(msg, isUriInsideWorkspace, realPathChecks)) {
                     console.warn("THUMBVIEW: rejected webview message targeting a path outside the workspace", msg && msg.command);
                     return;
                 }
@@ -1591,30 +1913,66 @@ export async function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                if (msg.command === "ensureZenMode") {
-                    thumbviewEnteredZenMode = true;
-                    await enterFullscreen();
+                // PDF preview stages and failures (overview.js reportPdf): { level: "info" | "warn", text }.
+                if (msg.command === "pdfStatus") {
+                    const text = `PDF previews: ${String(msg.text ?? "").slice(0, 300)}`;
+                    if (msg.level === "warn") {
+                        log.warn(text);
+                    } else {
+                        log.info(text);
+                    }
+                    return;
+                }
+
+                // One visit's summary (overview.js studyEpisode); validated field by field in study_events.ts.
+                if (msg.command === "studyEpisode") {
+                    hostVisit.handedOff();
+                    study.recordEpisode(msg, studyVisitRequestedAt, { layoutMode: getLayoutMode(), fullscreen: fullscreenActive });
+                    studyVisitRequestedAt = null;
+                    return;
+                }
+                if (STUDY_ACTIONS.has(msg.command)) {
+                    study.recordAction(msg.command);
+                }
+                if ((msg.command === "jump" || msg.command === "switchTab" || msg.command === "openPreview" || msg.command === "openToSide") && typeof msg.uri === "string") {
+                    study.noteThumbviewTarget(msg.uri);
                 }
 
                 if (msg.command === "ready") {
                     postedContentVersions.clear();
-                    if (!cachedScannedFiles && prescanPromise) {
+                    lastReorderSeq = 0; // a new page numbers its drops from 1 again
+                    lineStreamGeneration++;
+                    const pendingPrescan = cachedScannedFiles ? undefined : startPrescan();
+                    if (pendingPrescan) {
                         const scanWaitStart = performance.now();
-                        await prescanPromise;
+                        await pendingPrescan;
                         log.info(`Webview ready; waited ${Math.round(performance.now() - scanWaitStart)} ms for the initial workspace scan (${(cachedScannedFiles as RepoFile[] | null)?.length ?? 0} files).`);
                     }
-                    if (cachedScannedFiles && cachedScannedFiles.length > 0) {
-                        updateLayoutFromCache(panel);
-                    } else {
-                        refreshThumbview(panel);
+                    // Markers went stale while no panel was visible (or were never fetched). A fetch that
+                    // finishes within GIT_FIRST_PAINT_WAIT_MS lands in the first payload; a slower one
+                    // follows as a second payload so it never holds up the first paint.
+                    let lateGit: Promise<unknown> | undefined;
+                    if (gitStale) {
+                        gitStale = false;
+                        const git = fetchWorkspaceGitDiff().catch(() => { });
+                        const inTime = await Promise.race([
+                            git.then(() => true),
+                            new Promise<boolean>(resolve => setTimeout(() => resolve(false), GIT_FIRST_PAINT_WAIT_MS))
+                        ]);
+                        if (!inTime) {
+                            lateGit = git;
+                        }
+                    }
+                    const firstPaint = cachedScannedFiles && cachedScannedFiles.length > 0
+                        ? updateLayoutFromCache(panel)
+                        : refreshThumbview(panel);
+                    if (lateGit) {
+                        Promise.all([firstPaint, lateGit]).then(() => refreshOrDefer("layout"));
                     }
                     endTransition(panel);
                     maybeShowFullscreenNotice(panel);
                 }
 
-                // From the fullscreen banner or the settings toggle. The configuration listener
-                // applies it (leaving fullscreen when turned off), exactly as for a settings.json
-                // edit, so a failed write never leaves the window out of step with the setting.
                 // The webview lacks lines for these ids (e.g. a delta payload arrived after one it
                 // skipped). Fields: { ids: string[] } — see applyDataMessage in overview.js.
                 if (msg.command === "requestFileLines" && Array.isArray(msg.ids)) {
@@ -1629,7 +1987,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 // persists them here. Fields: { scope: "folderFiles" | "folderCards" | "rootCards",
                 // folder, ids, footprints?, wrapRows?, flowCells? } — see requestLayoutOrderSave in overview.js.
                 if (msg.command === "saveLayoutOrder" && Array.isArray(msg.ids)) {
-                    const ids: string[] = msg.ids.map((id: unknown) => (typeof id === "string" ? id : ""));
+                    const ids = sanitizeOrderIds(msg.ids);
+                    if (!ids) {
+                        return;
+                    }
                     await withOrderLock(async () => {
                         if (msg.scope === "rootCards") {
                             await context.workspaceState.update("thumbview.cardOrder", ids);
@@ -1643,14 +2004,15 @@ export async function activate(context: vscode.ExtensionContext) {
                         orders[msg.folder] = ids;
                         await context.workspaceState.update(key, orders);
                     });
-                    if (typeof msg.wrapRows === "number" && msg.wrapRows > 0) {
+                    const savedWrapRows = sanitizeRowCount(msg.wrapRows);
+                    if (savedWrapRows !== undefined) {
                         await withOrderLock(async () => {
                             if (msg.scope === "rootCards") {
-                                await context.workspaceState.update("thumbview.cardWrapRows", msg.wrapRows);
+                                await context.workspaceState.update("thumbview.cardWrapRows", savedWrapRows);
                             } else if (typeof msg.folder === "string" && msg.folder) {
                                 const wrapKey = msg.scope === "folderCards" ? "thumbview.folderCardWrapRows" : "thumbview.folderWrapRows";
                                 const wraps = context.workspaceState.get<{ [folder: string]: number }>(wrapKey) || {};
-                                wraps[msg.folder] = msg.wrapRows;
+                                wraps[msg.folder] = savedWrapRows;
                                 await context.workspaceState.update(wrapKey, wraps);
                             }
                         });
@@ -1899,6 +2261,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
 
                 if (msg.command === "reorderFile") {
+                    // Fields: reorderSeq (number), echoed in every later payload so the webview knows
+                    // which of its drops a payload already includes (overview.js keepPendingRootOrder).
+                    if (typeof msg.reorderSeq === "number" && Number.isFinite(msg.reorderSeq)) {
+                        lastReorderSeq = Math.max(lastReorderSeq, msg.reorderSeq);
+                    }
                     await withOrderLock(async () => {
                         const mode = getDragReorderMode();
                         const layoutMode = getLayoutMode();
@@ -1918,25 +2285,23 @@ export async function activate(context: vscode.ExtensionContext) {
                                 if (currentFolderOrder.length === 0) {
                                     currentFolderOrder = [...scopedIds];
                                 } else {
-                                    const presentIds = new Set(currentFolderOrder.filter(Boolean));
-                                    for (const sid of scopedIds) {
-                                        if (!presentIds.has(sid)) {
-                                            const holeIdx = currentFolderOrder.indexOf("");
-                                            if (holeIdx !== -1) {
-                                                currentFolderOrder[holeIdx] = sid;
-                                            } else {
-                                                currentFolderOrder.push(sid);
-                                            }
-                                        }
-                                    }
+                                    // The one stability rule (fillLayoutHoles): new files fill holes left by removed
+                                    // ones; "" user gaps are never filled. In spanning mode a hole has the removed
+                                    // file's cells, and a file takes only a hole it fits in.
+                                    const spanning = layoutMode === "spanning_grid";
+                                    const holeCells = spanning ? context.workspaceState.get<{ [id: string]: number }>("thumbview.naturalCells") || {} : {};
+                                    const scopedCells = new Map(scopedFiles.map(f => [f.id, spanning ? cellsNeeded(f.lineCount, DEFAULT_BASE_LINES_PER_CELL, getCompressionPct()) : 1]));
+                                    currentFolderOrder = fillLayoutHoles(currentFolderOrder, scopedIds, id => scopedCells.get(id) ?? 1, id => holeCells[id] ?? 1).order;
                                 }
 
                                 if (layoutMode === "spanning_grid") {
                                     const folderWrapRowsMap = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderWrapRows") || {};
-                                    if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
-                                        currentFolderOrder = msg.currentOrder;
-                                        if (typeof msg.wrapRows === "number") {
-                                            folderWrapRowsMap[msg.focusedFolder] = msg.wrapRows;
+                                    const sentOrder = sanitizeOrderIds(msg.currentOrder);
+                                    if (sentOrder && sentOrder.length > 0) {
+                                        currentFolderOrder = sentOrder;
+                                        const sentWrapRows = sanitizeRowCount(msg.wrapRows);
+                                        if (sentWrapRows !== undefined) {
+                                            folderWrapRowsMap[msg.focusedFolder] = sentWrapRows;
                                             await context.workspaceState.update("thumbview.folderWrapRows", folderWrapRowsMap);
                                         }
                                     } else {
@@ -1999,10 +2364,12 @@ export async function activate(context: vscode.ExtensionContext) {
                                 folderOrders[msg.focusedFolder] = currentFolderOrder;
                                 await context.workspaceState.update("thumbview.folderOrders", folderOrders);
                             } else if (layoutMode === "spanning_grid") {
-                                if (Array.isArray(msg.currentOrder) && msg.currentOrder.length > 0) {
-                                    fileOrder.setOrder(msg.currentOrder);
-                                    if (typeof msg.wrapRows === "number") {
-                                        await context.workspaceState.update("thumbview.spanningRows", msg.wrapRows);
+                                const sentOrder = sanitizeOrderIds(msg.currentOrder);
+                                if (sentOrder && sentOrder.length > 0) {
+                                    fileOrder.setOrder(sentOrder);
+                                    const sentWrapRows = sanitizeRowCount(msg.wrapRows);
+                                    if (sentWrapRows !== undefined) {
+                                        await context.workspaceState.update("thumbview.spanningRows", sentWrapRows);
                                     }
                                 } else {
                                     const { ignorePatterns } = getIgnoreState();
@@ -2126,8 +2493,9 @@ export async function activate(context: vscode.ExtensionContext) {
                                 ? (context.workspaceState.get<{ [folder: string]: string[] }>("thumbview.folderCardOrders") || {})
                                 : {};
                             let cardOrder: string[] = [];
-                            if (Array.isArray(msg.currentCardIds) && msg.currentCardIds.length > 0) {
-                                cardOrder = [...msg.currentCardIds];
+                            const sentCardIds = sanitizeOrderIds(msg.currentCardIds);
+                            if (sentCardIds && sentCardIds.length > 0) {
+                                cardOrder = sentCardIds;
                             } else if (isFolderTarget) {
                                 cardOrder = folderCardOrders[msg.focusedFolder] ? [...folderCardOrders[msg.focusedFolder]] : [];
                             } else {
@@ -2138,17 +2506,18 @@ export async function activate(context: vscode.ExtensionContext) {
                             }
 
                             if (msg.isSpanning) {
+                                const cardWrapRows = sanitizeRowCount(msg.wrapRows);
                                 if (isFolderTarget) {
                                     folderCardOrders[msg.focusedFolder] = cardOrder;
-                                    if (typeof msg.wrapRows === "number") {
+                                    if (cardWrapRows !== undefined) {
                                         const folderCardWrapRows = context.workspaceState.get<{ [folder: string]: number }>("thumbview.folderCardWrapRows") || {};
-                                        folderCardWrapRows[msg.focusedFolder] = msg.wrapRows;
+                                        folderCardWrapRows[msg.focusedFolder] = cardWrapRows;
                                         await context.workspaceState.update("thumbview.folderCardWrapRows", folderCardWrapRows);
                                     }
                                     await context.workspaceState.update("thumbview.folderCardOrders", folderCardOrders);
                                 } else {
-                                    if (typeof msg.wrapRows === "number") {
-                                        await context.workspaceState.update("thumbview.cardWrapRows", msg.wrapRows);
+                                    if (cardWrapRows !== undefined) {
+                                        await context.workspaceState.update("thumbview.cardWrapRows", cardWrapRows);
                                     }
                                     await context.workspaceState.update("thumbview.cardOrder", cardOrder);
                                 }
@@ -2229,7 +2598,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
                             await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
                         }
-                        vscode.window.showInformationMessage("Expanded grid space.");
+                        vscode.window.setStatusBarMessage("Expanded grid space.", STATUS_MESSAGE_MS);
                         if (activePanel) {
                             updateLayoutFromCache(activePanel);
                         }
@@ -2262,7 +2631,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
                             await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
                         }
-                        vscode.window.showInformationMessage("Reduced grid space.");
+                        vscode.window.setStatusBarMessage("Reduced grid space.", STATUS_MESSAGE_MS);
                         if (activePanel) {
                             updateLayoutFromCache(activePanel);
                         }
@@ -2274,9 +2643,6 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (msg.command === "refresh") {
                     try {
                         clearScanCache();
-                        cachedAllRelativePaths = [];
-                        await getAllWorkspaceRelativePaths().catch(() => {});
-                        refreshProviders();
                         if (activePanel) {
                             await refreshThumbview(activePanel);
                         }
@@ -2332,6 +2698,37 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             panel.onDidChangeViewState(async e => {
+                if (e.webviewPanel.visible !== studyPanelVisible) {
+                    studyPanelVisible = e.webviewPanel.visible;
+                    if (!studyPanelVisible) {
+                        studyHiddenAt = Date.now();
+                        study.recordHidden();
+                        // The visit ends only if the panel stays hidden past the flicker window; Zen and
+                        // maximize steps hide it briefly. Protocol: "studyVisitEnd", no fields.
+                        if (studyVisitEndTimer) {
+                            clearTimeout(studyVisitEndTimer);
+                        }
+                        studyVisitEndTimer = setTimeout(() => {
+                            studyVisitEndTimer = undefined;
+                            try {
+                                if (!panel.visible) {
+                                    // The webview reports this visit now (as dismissed unless a jump already did).
+                                    hostVisit.handedOff();
+                                    panel.webview.postMessage({ command: "studyVisitEnd" });
+                                }
+                            } catch {
+                                // Disposed meanwhile; onDidDispose reported the visit.
+                            }
+                        }, STUDY_FLICKER_MS);
+                    } else if (studyVisitEndTimer) {
+                        // Back within the flicker window: the same visit continues.
+                        clearTimeout(studyVisitEndTimer);
+                        studyVisitEndTimer = undefined;
+                    } else if (Date.now() - studyHiddenAt > STUDY_FLICKER_MS) {
+                        // Shown by F4 or the Open command just now, else by a tab click or Ctrl+Tab.
+                        studyShown(panel, Date.now() - lastToggleAt < 2000 ? lastOpenSource : "tab", false);
+                    }
+                }
                 const actions = session.viewStateChanged(
                     { visible: e.webviewPanel.visible, active: e.webviewPanel.active, layoutOpInFlight: layoutOpsInFlight > 0 },
                     !!editorGroups.returnPoint
@@ -2382,24 +2779,46 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             });
 
-            panel.onDidDispose(() => withLayoutLock(async () => {
-                if (activePanel === panel) {
-                    activePanel = undefined;
+            panel.onDidDispose(() => {
+                // Synchronously, before the layout lock: a panel created while the lock is held must
+                // not have its visit reported or its visibility reset by this one's dispose.
+                if (studyVisitEndTimer) {
+                    clearTimeout(studyVisitEndTimer);
+                    studyVisitEndTimer = undefined;
                 }
-                // Same order as every other path: leave Zen first, then undo our maximize.
-                if (thumbviewEnteredZenMode) {
-                    thumbviewEnteredZenMode = false;
-                    await exitFullscreen();
+                // A tab closed mid-visit took the page and its summary with it (HostVisitTracker).
+                const closedVisit = hostVisit.closedTab(studyPanelVisible ? Date.now() : studyHiddenAt);
+                if (closedVisit) {
+                    study.recordEpisode(closedVisit, null, { layoutMode: getLayoutMode(), fullscreen: fullscreenActive });
                 }
-                await unmaximizeIfSplits();
-            }));
+                studyPanelVisible = false;
+                return withLayoutLock(async () => {
+                    if (activePanel === panel) {
+                        activePanel = undefined;
+                    }
+                    // Same order as every other path: leave Zen first, then undo our maximize.
+                    if (thumbviewEnteredZenMode) {
+                        thumbviewEnteredZenMode = false;
+                        await exitFullscreen();
+                    }
+                    await unmaximizeIfSplits();
+                });
+            });
     }, withLayoutLock);
 
-    const disposable = vscode.commands.registerCommand("thumbview.open", () => toggleThumbview());
+    const disposable = vscode.commands.registerCommand("thumbview.open", (args?: { source?: string; inZen?: boolean }) => {
+        lastOpenSource = args?.source === "keybinding" ? "f4" : "command";
+        lastOpenRequestedAt = Date.now();
+        // inZenMode is also true while Thumbview's own Zen is on (F4 to close); only otherwise is it the user's.
+        userZenOnOpen = args?.inZen === true && !fullscreenActive;
+        // Overlaps a scan not yet started (F4 within PRESCAN_DELAY_MS of startup) with panel creation.
+        startPrescan();
+        return toggleThumbview();
+    });
     context.subscriptions.push(disposable);
 
     const reflowDisposable = vscode.commands.registerCommand("thumbview.reflow", async () => {
-        const files = await scanRepository(getIgnoreState(), persistIgnoreState);
+        const { files } = await fullScan();
         fileOrder.reflow(files.map(f => f.id));
         await context.workspaceState.update("thumbview.seenFiles", fileOrder.getOrder());
         await context.workspaceState.update("thumbview.spanningAllocations", undefined);
@@ -2424,7 +2843,7 @@ export async function activate(context: vscode.ExtensionContext) {
         } else {
             vscode.commands.executeCommand("thumbview.open");
         }
-        vscode.window.showInformationMessage("Thumbview layout reflowed and gaps filled.");
+        vscode.window.setStatusBarMessage("Thumbview layout reflowed and gaps filled.", STATUS_MESSAGE_MS);
     });
     context.subscriptions.push(reflowDisposable);
 
@@ -2439,7 +2858,7 @@ export async function activate(context: vscode.ExtensionContext) {
         folderRowsMap[""] = curRows + 1;
         await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
         await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
-        vscode.window.showInformationMessage("Expanded grid space.");
+        vscode.window.setStatusBarMessage("Expanded grid space.", STATUS_MESSAGE_MS);
         if (activePanel) {
             updateLayoutFromCache(activePanel);
         }
@@ -2457,7 +2876,7 @@ export async function activate(context: vscode.ExtensionContext) {
         folderRowsMap[""] = Math.max(0, curRows - 1);
         await context.workspaceState.update("thumbview.folderExtraCols", folderColsMap);
         await context.workspaceState.update("thumbview.folderExtraRows", folderRowsMap);
-        vscode.window.showInformationMessage("Reduced grid space.");
+        vscode.window.setStatusBarMessage("Reduced grid space.", STATUS_MESSAGE_MS);
         if (activePanel) {
             updateLayoutFromCache(activePanel);
         }
@@ -2467,7 +2886,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const setUniformGridDisposable = vscode.commands.registerCommand("thumbview.setUniformGrid", async () => {
         const config = vscode.workspace.getConfiguration("thumbview");
         await config.update("layoutMode", "uniform_grid", vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage("Thumbview Layout set to Uniform Grid.");
+        vscode.window.setStatusBarMessage("Thumbview Layout set to Uniform Grid.", STATUS_MESSAGE_MS);
         if (activePanel) {
             updateLayoutFromCache(activePanel);
         }
@@ -2477,7 +2896,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const setSpanningGridDisposable = vscode.commands.registerCommand("thumbview.setSpanningGrid", async () => {
         const config = vscode.workspace.getConfiguration("thumbview");
         await config.update("layoutMode", "spanning_grid", vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage("Thumbview Layout set to Spanning Grid.");
+        vscode.window.setStatusBarMessage("Thumbview Layout set to Spanning Grid.", STATUS_MESSAGE_MS);
         if (activePanel) {
             updateLayoutFromCache(activePanel);
         }
@@ -2487,7 +2906,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const setSwapReorderModeDisposable = vscode.commands.registerCommand("thumbview.setSwapReorderMode", async () => {
         const config = vscode.workspace.getConfiguration("thumbview");
         await config.update("dragReorderMode", "swap", vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage("Thumbview Drag Reorder Mode set to Swap.");
+        vscode.window.setStatusBarMessage("Thumbview Drag Reorder Mode set to Swap.", STATUS_MESSAGE_MS);
         if (activePanel) {
             updateLayoutFromCache(activePanel);
         }
@@ -2497,7 +2916,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const setShiftReorderModeDisposable = vscode.commands.registerCommand("thumbview.setShiftReorderMode", async () => {
         const config = vscode.workspace.getConfiguration("thumbview");
         await config.update("dragReorderMode", "shift", vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage("Thumbview Drag Reorder Mode set to Shift.");
+        vscode.window.setStatusBarMessage("Thumbview Drag Reorder Mode set to Shift.", STATUS_MESSAGE_MS);
         if (activePanel) {
             updateLayoutFromCache(activePanel);
         }   
@@ -2524,7 +2943,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const exists = state.ignorePatterns.some(p => p === folderPath || p.replace(/\/+$/, "") === cleanPattern);
             if (!exists) {
                 await persistIgnoreState({ ...state, ignorePatterns: [folderPath, ...state.ignorePatterns] });
-                vscode.window.showInformationMessage(`Ignored directory '${folderPath}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`);
+                vscode.window.showInformationMessage(`Ignored directory '${folderPath}'. Unignore it from the Folders & Ignored menu in the Thumbview toolbar.`);
                 refreshProviders();
                 if (activePanel) {
                     updateLayoutFromCache(activePanel);
@@ -2708,6 +3127,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // Watch configuration changes (ignorePatterns no longer lives in config — only
     // layoutMode, renderMediaThumbnails, and autoIgnoreThreshold are real settings)
     const configDisposable = vscode.workspace.onDidChangeConfiguration(e => {
+        // Both decide which files are listed (file_discovery.ts); works with or without a panel.
+        if (e.affectsConfiguration("files.exclude") || e.affectsConfiguration("search.exclude")) {
+            refreshOrDefer("rescan");
+        }
         if (!activePanel) return;
         if (e.affectsConfiguration("thumbview.fullscreenOnOpen")) {
             const enabled = isFullscreenOnOpen();
@@ -2798,69 +3221,159 @@ export async function activate(context: vscode.ExtensionContext) {
     // instead of flooding the webview with a message per file event.
     const watcher = vscode.workspace.createFileSystemWatcher("**/*");
     let debounceTimer: NodeJS.Timeout | undefined;
-    let pendingSaveGitDiff: Promise<unknown> = Promise.resolve();
-    const triggerUpdate = (uri?: vscode.Uri) => {
-        if (uri) {
-            invalidateScanFile(uri.fsPath);
+    let pendingDisk: PendingDiskChanges<vscode.Uri> = emptyPendingChanges();
+    // "listing": a .gitignore or .git/info/exclude edit, which changes what is listed.
+    const triggerUpdate = (uri: vscode.Uri, kind: "change" | "create" | "delete" | "listing") => {
+        invalidateScanFile(uri.fsPath);
+        const event = { key: uri.fsPath, rel: vscode.workspace.asRelativePath(uri).replace(/\\/g, "/"), uri };
+        if (kind === "listing") {
+            pendingDisk.structural = true;
+        } else if (kind === "delete") {
+            pendingDisk.deleted.set(event.key, event);
         } else {
-            clearScanCache();
+            (kind === "create" ? pendingDisk.created : pendingDisk.changed).set(event.key, event);
+            diskChanges.record(event.key, uri);
         }
         if (debounceTimer) {
             clearTimeout(debounceTimer);
         }
-        debounceTimer = setTimeout(async () => {
-            // A save starts a git diff fetch; wait for it so the rescan's single payload carries fresh git markers.
-            await pendingSaveGitDiff;
-            await getAllWorkspaceRelativePaths().catch(() => {});
-            refreshProviders();
-            refreshOrDefer("rescan");
+        debounceTimer = setTimeout(() => {
+            const batch = pendingDisk;
+            pendingDisk = emptyPendingChanges();
+            applyDiskChanges(batch).catch(err => log.error(`Applying file changes failed: ${err?.message ?? err}`));
         }, 200);
     };
+    reReadAfterScan = uris => uris.forEach(uri => triggerUpdate(uri, "change"));
 
-    // .git churn and dependency installs never touch shown files. Other ignored output (e.g.
-    // `npm run watch` writing a gitignored out/) still reaches the debounced rescan, which posts
-    // nothing when the scanned file set is unchanged (see refreshThumbview).
-    const isUnscannedPath = (uri: vscode.Uri) =>
-        isAlwaysExcluded(vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/"));
-    const onWatcherEvent = (uri: vscode.Uri) => {
-        if (!isUnscannedPath(uri)) {
-            triggerUpdate(uri);
+    // The cheapest correct refresh for a batch (planDiskChanges in disk_changes.ts): shown files are
+    // re-read one by one, and only a delete of a listed path, a create git would list, or a listing
+    // rule change takes the full rescan. Build output, caches, and swap files cost nothing.
+    const applyDiskChanges = async (batch: PendingDiskChanges<vscode.Uri>): Promise<void> => {
+        const { ignorePatterns } = getIgnoreState();
+        const shownIds = new Set((cachedScannedFiles ?? []).map(f => f.id));
+        const plan = planDiskChanges(batch, {
+            isShown: key => shownIds.has(key),
+            isListed: isListedPath,
+            containsListed: containsListedPath,
+            isIgnored: rel => shouldIgnore(rel, ignorePatterns)
+        });
+        let needsRescan = plan.rescan;
+        if (!needsRescan && plan.toCheck.length > 0) {
+            const listable = await listableAmong(plan.toCheck);
+            needsRescan = listable === null || listable.length > 0;
+        }
+        if (!cachedScannedFiles) {
+            // No scan installed yet. A scan in flight may have listed before this change; rescan after it.
+            if (needsRescan && prescanPromise) {
+                prescanPromise.then(() => refreshOrDefer("rescan"));
+            }
+            return;
+        }
+        if (!needsRescan && plan.toRead.length === 0) {
+            return;
+        }
+        // A save's git markers land in the same payload as its lines.
+        const gitRefresh = requestGitRefresh();
+        const reread = await Promise.all(plan.toRead.map(uri => rescanFile(uri)));
+        await gitRefresh;
+        if (!cachedScannedFiles) {
+            return;
+        }
+        const dirtyDocs = new Map(vscode.workspace.textDocuments.filter(d => d.isDirty).map(d => [d.uri.fsPath, d]));
+        for (let i = 0; i < plan.toRead.length; i++) {
+            const index = cachedScannedFiles.findIndex(f => f.id === plan.toRead[i].fsPath);
+            const file = reread[i];
+            if (!file) {
+                // Now binary, empty, oversized, or gone: the listing decides what happens to its slot.
+                needsRescan = true;
+            } else if (index !== -1) {
+                cachedScannedFiles[index] = file;
+                const dirty = dirtyDocs.get(file.id);
+                if (dirty) {
+                    updateDocumentInCache(dirty);
+                }
+            }
+        }
+        refreshOrDefer(needsRescan ? "rescan" : "layout");
+    };
+
+    // Commits, checkouts, and staging change git markers without touching a shown file.
+    let gitMetaTimer: NodeJS.Timeout | undefined;
+    const isGitMetaPath = (rel: string) => /(^|\/)\.git\/(index|HEAD)$/.test(rel);
+
+    // .git churn and dependency installs never touch shown files.
+    // Nothing is cached until Thumbview's first scan in this workspace (startPrescan), and the first
+    // scan reads everything anyway: until then file, edit, and diagnostics events cost nothing.
+    const nothingToUpdate = () => !cachedScannedFiles && !scanInFlight;
+    const onWatcherEvent = (uri: vscode.Uri, kind: "change" | "create" | "delete") => {
+        if (nothingToUpdate()) {
+            return;
+        }
+        const rel = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/");
+        if (isListingRuleFile(rel)) {
+            triggerUpdate(uri, "listing");
+            return;
+        }
+        if (isGitMetaPath(rel)) {
+            if (gitMetaTimer) {
+                clearTimeout(gitMetaTimer);
+            }
+            gitMetaTimer = setTimeout(() => {
+                requestGitRefresh().then(() => refreshOrDefer("layout"));
+            }, 300);
+            return;
+        }
+        if (!isAlwaysExcluded(rel)) {
+            triggerUpdate(uri, kind);
         }
     };
-    watcher.onDidCreate(onWatcherEvent);
-    watcher.onDidDelete(onWatcherEvent);
-    watcher.onDidChange(onWatcherEvent);
+    watcher.onDidCreate(uri => onWatcherEvent(uri, "create"));
+    watcher.onDidDelete(uri => onWatcherEvent(uri, "delete"));
+    watcher.onDidChange(uri => onWatcherEvent(uri, "change"));
 
     // Debounced so typing rebuilds the cached document and re-posts the workspace payload once
-    // per pause, not once per keystroke.
+    // per pause, not once per keystroke. While Thumbview is hidden or closed nothing is rebuilt:
+    // the documents stay queued until the next payload is built (applyPendingDocChanges), so typing
+    // never costs a copy of the document on the extension host for a map nobody is looking at.
     let docChangeDebounceTimer: NodeJS.Timeout | undefined;
-    const pendingChangedDocs = new Map<string, vscode.TextDocument>();
     const docChangeDisposable = vscode.workspace.onDidChangeTextDocument(e => {
-        if (e.contentChanges.length === 0) {
+        // A scan re-applies every unsaved document (refreshThumbview), so nothing is queued before one.
+        if (e.contentChanges.length === 0 || nothingToUpdate()) {
             return;
         }
         pendingChangedDocs.set(e.document.uri.toString(), e.document);
+        docsWithUnsavedText.add(e.document.uri.toString());
         if (docChangeDebounceTimer) {
             clearTimeout(docChangeDebounceTimer);
         }
         docChangeDebounceTimer = setTimeout(() => {
-            for (const doc of pendingChangedDocs.values()) {
-                updateDocumentInCache(doc);
+            if (activePanel?.visible) {
+                applyPendingDocChanges();
             }
-            pendingChangedDocs.clear();
             refreshOrDefer("layout");
         }, 300);
     });
     context.subscriptions.push(docChangeDisposable);
 
-    // The save's own watcher event (or this triggerUpdate) rescans the file from disk, so a save
-    // produces one payload instead of a git-diff layout post followed by a rescan post.
+    // The save joins its own watcher event in triggerUpdate's debounce: one re-read of the file,
+    // one git refresh, and one payload.
     const docSaveDisposable = vscode.workspace.onDidSaveTextDocument(doc => {
         pendingChangedDocs.delete(doc.uri.toString());
-        pendingSaveGitDiff = fetchWorkspaceGitDiff().catch(() => {});
-        triggerUpdate(doc.uri);
+        docsWithUnsavedText.delete(doc.uri.toString());
+        triggerUpdate(doc.uri, "change");
     });
     context.subscriptions.push(docSaveDisposable);
+
+    // Closing a document whose edits were never saved ("Don't Save") leaves its unsaved text in the
+    // cache; nothing on disk changed, so no watcher event would correct it. Re-read the file instead.
+    const docCloseDisposable = vscode.workspace.onDidCloseTextDocument(doc => {
+        const key = doc.uri.toString();
+        pendingChangedDocs.delete(key);
+        if (docsWithUnsavedText.delete(key) && doc.uri.scheme === "file") {
+            triggerUpdate(doc.uri, "change");
+        }
+    });
+    context.subscriptions.push(docCloseDisposable);
 
     let diagDebounceTimer: NodeJS.Timeout | undefined;
     let lastErrorDiagnosticsSignature = "";
@@ -2879,6 +3392,9 @@ export async function activate(context: vscode.ExtensionContext) {
         return parts.sort().join("\n");
     };
     const diagDisposable = vscode.languages.onDidChangeDiagnostics(() => {
+        if (nothingToUpdate()) {
+            return;
+        }
         if (diagDebounceTimer) {
             clearTimeout(diagDebounceTimer);
         }
@@ -2903,11 +3419,6 @@ export async function activate(context: vscode.ExtensionContext) {
 // Set by activate(): restores the user's zenMode.* settings if Thumbview is fullscreen when the
 // extension host shuts down.
 let deactivateHook: (() => Promise<void>) | undefined;
-
-/**
- * Asks how to delete `label`. Moving to the Trash is the first, recoverable choice; a permanent
- * delete needs a second, explicit confirmation because it cannot be undone.
- */
 
 export function deactivate(): Promise<void> | undefined {
     return deactivateHook?.();

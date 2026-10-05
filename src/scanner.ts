@@ -6,6 +6,8 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { listWorkspaceFiles, looksBinary } from "./file_discovery";
+import { shouldIgnore } from "./ignore_rules";
+export { shouldIgnore } from "./ignore_rules";
 import { categorizeLine, type LineCategory } from "./layout_core";
 
 export interface MiniLine {
@@ -32,62 +34,6 @@ export interface RepoFile {
     errorLines?: { [lineIndex0: number]: string | boolean };
 }
 
-
-function matchSingleRule(pathStr: string, rule: string): boolean {
-    const ruleStr = rule.replace(/\\/g, "/");
-    const isDirRule = ruleStr.endsWith("/");
-    const cleanRule = isDirRule ? ruleStr.slice(0, -1) : ruleStr;
-
-    let regexPattern = cleanRule
-        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-        .replace(/\*/g, '.*')
-        .replace(/\?/g, '.');
-
-    if (cleanRule.startsWith("/")) {
-        regexPattern = "^" + regexPattern.slice(1);
-    } else {
-        regexPattern = "(^|/)" + regexPattern;
-    }
-
-    if (isDirRule) {
-        regexPattern = regexPattern + "(/|$)";
-    } else {
-        regexPattern = regexPattern + "($|/)";
-    }
-
-    try {
-        const rx = new RegExp(regexPattern);
-        return rx.test(pathStr);
-    } catch {
-        return pathStr.includes(cleanRule);
-    }
-}
-
-// Hand-rolled gitignore-glob-to-regex translator (falls back to a plain substring
-// match if the generated pattern fails to compile). Evaluates rules sequentially
-// in order and supports negation patterns ("!foo") to un-ignore files.
-export function shouldIgnore(relativePath: string, rules: string[]): boolean {
-    const pathStr = relativePath.replace(/\\/g, "/");
-    let ignored = false;
-
-    for (const rule of rules) {
-        if (!rule) continue;
-        const isNegated = rule.startsWith("!");
-        const pattern = isNegated ? rule.slice(1).trim() : rule.trim();
-        if (!pattern) continue;
-
-        const cleanPattern = pattern.replace(/^\/+|\/+$/g, "");
-        if (cleanPattern === "(root files)") {
-            if (!pathStr.includes("/")) {
-                ignored = !isNegated;
-            }
-        } else if (matchSingleRule(pathStr, pattern)) {
-            ignored = !isNegated;
-        }
-    }
-
-    return ignored;
-}
 
 // Fast PDF Page 1 text stream extractor (parses text brackets (text) and TJ arrays from PDF stream chunks)
 async function extractPdfPage1Lines(fileUri: vscode.Uri): Promise<MiniLine[]> {
@@ -122,9 +68,18 @@ async function extractPdfPage1Lines(fileUri: vscode.Uri): Promise<MiniLine[]> {
 export interface ScanIgnoreState {
     ignorePatterns: string[];
     autoIgnoreExclusions: string[];
+    /** Folders this scan auto-ignored (added to ignorePatterns), recorded for the in-grid chip. */
+    autoIgnored?: string[];
+    /** In: folders auto-ignore added earlier (thumbview.autoIgnoredFolders). */
+    autoIgnoredFolders?: string[];
+    /** Out: recorded auto-ignored folders this scan un-hid because they no longer qualify. */
+    autoUnhidden?: string[];
 }
 
-export const isLibFolderRegex = /(^|\/)(lib|lib64|vendor|libraries|venv|\.venv|env|\.env|__pycache__|\.pytest_cache|\.mypy_cache)(\/|$)/i;
+// Dependency trees and tool caches: never code the user wrote, even when not gitignored. Names that
+// are also common source folders (lib/, env/, libraries/) are deliberately absent; a dense one is
+// still caught by the file-count threshold.
+export const isLibFolderRegex = /(^|\/)(vendor|venv|\.venv|__pycache__|\.pytest_cache|\.mypy_cache|\.tox)(\/|$)/i;
 export const isSourceRootRegex = /^(src|app|packages|pkg|source|frontend|backend|client|server|pages|components|routes)([\s_-].*)?(\/|$)/i;
 
 export function computeAutoIgnorePatterns(
@@ -184,6 +139,11 @@ export function computeAutoIgnorePatterns(
         return a.localeCompare(b);
     });
 
+    // A threshold of 0 turns auto-ignore off entirely (package.json thumbview.autoIgnoreThreshold).
+    if (threshold <= 0) {
+        return denseFolders;
+    }
+
     for (const dir of sortedDirs) {
         if (isUserExcluded(dir)) continue;
         if (isAlreadyCovered(dir, combinedRules)) continue;
@@ -200,16 +160,39 @@ export function computeAutoIgnorePatterns(
             continue;
         }
 
-        if (threshold > 0) {
-            const directCount = dirDirectCounts.get(dir) || 0;
-            if (directCount > threshold) {
-                denseFolders.push(dir);
-                combinedRules.push(dir);
-            }
+        const directCount = dirDirectCounts.get(dir) || 0;
+        if (directCount > threshold) {
+            denseFolders.push(dir);
+            combinedRules.push(dir);
         }
     }
 
     return denseFolders;
+}
+
+/**
+ * Folders auto-ignore hid earlier (`recorded`) that are still ignored but no longer qualify under
+ * `threshold` (raised, or 0 for off): they are shown again. The user's own ignores are never listed.
+ */
+export function autoIgnoresToUnhide(
+    relativePaths: string[],
+    threshold: number,
+    ignorePatterns: string[],
+    autoIgnoreExclusions: string[],
+    recorded: string[]
+): string[] {
+    const recordedNow = recorded.filter(folder => ignorePatterns.includes(folder));
+    if (recordedNow.length === 0) {
+        return [];
+    }
+    const recordedSet = new Set(recordedNow);
+    const qualifiesNow = new Set(computeAutoIgnorePatterns(
+        relativePaths,
+        threshold,
+        ignorePatterns.filter(rule => !recordedSet.has(rule)),
+        autoIgnoreExclusions
+    ));
+    return recordedNow.filter(folder => !qualifiesNow.has(folder));
 }
 
 interface FileCacheEntry {
@@ -237,13 +220,234 @@ export function setScanPriorityProvider(provider: () => Iterable<string>): void 
     scanPriorityProvider = provider;
 }
 
+/** Reads one listed file into a RepoFile (null for binary, empty, oversized, or unreadable files). */
+async function readRepoFile(file: vscode.Uri, relPath: string): Promise<RepoFile | null> {
+    try {
+        const ext = path.extname(file.fsPath).toLowerCase().slice(1);
+        const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext);
+        const isPdf = ext === "pdf";
+
+        let statMtime = 0;
+        let statSize = 0;
+        try {
+            if (file.scheme !== "file") {
+                // Virtual/remote URIs: fsPath could name an unrelated local file.
+                throw new Error("non-file scheme");
+            }
+            const st = await fs.promises.stat(file.fsPath);
+            statMtime = st.mtimeMs;
+            statSize = st.size;
+        } catch {
+            try {
+                const st = await vscode.workspace.fs.stat(file);
+                statMtime = st.mtime || 0;
+                statSize = st.size || 0;
+            } catch {
+                statMtime = 0;
+                statSize = 0;
+            }
+        }
+
+        // Skip massive files (>2MB) to prevent memory overload; images are drawn from disk by the webview.
+        if (statSize > 2 * 1024 * 1024 && !isImage) {
+            return null;
+        }
+
+        // Images are cached too: an unchanged file must be the same object on every scan, or the
+        // "nothing changed" check (sameScan) fails and every rescan posts a full payload.
+        const cached = scanFileCache.get(file.fsPath);
+        if (cached && cached.mtime === statMtime && cached.size === statSize && statMtime !== 0) {
+            return cached.repoFile;
+        }
+
+        if (isImage) {
+            const imageFile: RepoFile = {
+                id: file.fsPath,
+                path: relPath,
+                uri: file.toString(),
+                lines: [],
+                lineCount: 1,
+                isImage: true,
+                isPdf: false,
+                mediaUri: file.toString()
+            };
+            if (statMtime !== 0) {
+                scanFileCache.set(file.fsPath, { mtime: statMtime, size: statSize, repoFile: imageFile });
+            }
+            return imageFile;
+        }
+
+        if (isPdf) {
+            const pdfLines = await extractPdfPage1Lines(file);
+            const pdfFile: RepoFile = {
+                id: file.fsPath,
+                path: relPath,
+                uri: file.toString(),
+                lines: pdfLines,
+                lineCount: Math.max(pdfLines.length, 1),
+                isImage: false,
+                isPdf: true,
+                mediaUri: file.toString()
+            };
+            if (statMtime !== 0) {
+                scanFileCache.set(file.fsPath, { mtime: statMtime, size: statSize, repoFile: pdfFile });
+            }
+            return pdfFile;
+        }
+
+        let rawText: string | null = null;
+        try {
+            if (file.scheme !== "file") {
+                throw new Error("non-file scheme");
+            }
+            rawText = await fs.promises.readFile(file.fsPath, "utf-8");
+        } catch {
+            if (vscode.workspace.fs && typeof vscode.workspace.fs.readFile === "function") {
+                try {
+                    const bytes = await vscode.workspace.fs.readFile(file);
+                    rawText = Buffer.from(bytes).toString("utf-8");
+                } catch {
+                    rawText = null;
+                }
+            }
+            if (rawText === null && typeof vscode.workspace.openTextDocument === "function") {
+                try {
+                    const doc = await vscode.workspace.openTextDocument(file);
+                    const lines: string[] = [];
+                    for (let i = 0; i < doc.lineCount; i++) {
+                        lines.push(doc.lineAt(i).text);
+                    }
+                    rawText = lines.join("\n");
+                } catch {
+                    rawText = null;
+                }
+            }
+        }
+
+        if (rawText === null || looksBinary(rawText)) {
+            return null;
+        }
+
+        const lines = rawText.split(/\r?\n/);
+        const lineCount = lines.length;
+        if (lineCount === 0 || (lineCount === 1 && lines[0] === "")) {
+            return null;
+        }
+
+        const MAX_LINES = 2000;
+        const MAX_LINE_LENGTH = 300;
+        const step = lineCount > MAX_LINES ? lineCount / MAX_LINES : 1;
+
+        const rawLines: MiniLine[] = [];
+        for (let idx = 0; idx < Math.min(lineCount, MAX_LINES); idx++) {
+            const i = Math.floor(idx * step);
+            if (i >= lineCount) break;
+
+            let textLine = lines[i];
+            if (textLine.length > MAX_LINE_LENGTH) {
+                textLine = textLine.substring(0, MAX_LINE_LENGTH);
+            }
+            const trimmedRight = textLine.trimEnd();
+            const indent = textLine.length - textLine.trimStart().length;
+            const len = trimmedRight.length;
+
+            rawLines.push({
+                text: textLine,
+                indent,
+                length: len,
+                category: categorizeLine(textLine)
+            });
+        }
+
+        let fullLines: string[] | undefined = undefined;
+        if (lineCount > MAX_LINES) {
+            fullLines = [];
+            for (let i = 0; i < lineCount; i++) {
+                let text = lines[i];
+                if (text.length > MAX_LINE_LENGTH) {
+                    text = text.substring(0, MAX_LINE_LENGTH);
+                }
+                fullLines.push(text);
+            }
+        }
+
+        const repoFile: RepoFile = {
+            id: file.fsPath,
+            path: relPath,
+            uri: file.toString(),
+            lines: rawLines,
+            lineCount,
+            fullLines
+        };
+
+        if (statMtime !== 0) {
+            scanFileCache.set(file.fsPath, {
+                mtime: statMtime,
+                size: statSize,
+                repoFile
+            });
+        }
+
+        return repoFile;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Re-reads a single file that the watcher reports as changed, so a save or an external edit costs one
+ * read instead of a full listing and stat of the workspace. Returns null when it can no longer be shown.
+ */
+export async function rescanFile(file: vscode.Uri): Promise<RepoFile | null> {
+    scanFileCache.delete(file.fsPath);
+    return readRepoFile(file, vscode.workspace.asRelativePath(file));
+}
+
+// Every path the last scan listed (after .gitignore and files.exclude, before Thumbview's own
+// ignore patterns), for the Folders & Ignored menu's per-pattern counts.
+let lastListedPaths: string[] = [];
+let lastListedSet: Set<string> | undefined;
+let lastListedSorted: string[] | undefined;
+export function getLastListedPaths(): string[] {
+    return lastListedPaths;
+}
+/** True when the last scan listed this relative path (shown or not, e.g. an empty file that just got content). */
+export function isListedPath(relativePath: string): boolean {
+    lastListedSet ??= new Set(lastListedPaths);
+    return lastListedSet.has(relativePath);
+}
+/**
+ * True when the last scan listed a file inside this folder path. VS Code reports a deleted or moved
+ * folder as one event for the folder, without events for the files in it.
+ */
+export function containsListedPath(folderPath: string): boolean {
+    const prefix = folderPath.replace(/\/+$/, "") + "/";
+    lastListedSorted ??= [...lastListedPaths].sort();
+    let lo = 0;
+    let hi = lastListedSorted.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (lastListedSorted[mid] < prefix) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < lastListedSorted.length && lastListedSorted[lo].startsWith(prefix);
+}
+
 export async function scanRepository(
     ignoreState: ScanIgnoreState,
     persistIgnore: (updated: ScanIgnoreState) => Promise<void>
 ): Promise<RepoFile[]> {
     // The user's own rules decide what is source: every .gitignore level (via git), files.exclude,
     // and .git/node_modules. A blanket folder-name blocklist used to hide real code such as lib/.
-    const files = await listWorkspaceFiles();
+    // asRelativePath is computed once per file here; calling it inside the sort comparator cost
+    // about 2·n·log n lookups.
+    const files = (await listWorkspaceFiles()).map(uri => ({ uri, rel: vscode.workspace.asRelativePath(uri).replace(/\\/g, "/") }));
+    lastListedPaths = files.map(f => f.rel);
+    lastListedSet = undefined;
+    lastListedSorted = undefined;
 
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
     const config = vscode.workspace.getConfiguration("thumbview", wsFolder?.uri);
@@ -253,8 +457,20 @@ export async function scanRepository(
 
     // Prioritize auto-ignoring top-level dense folders & library subdirectories (>threshold files)
     const threshold = config.get<number>("autoIgnoreThreshold") ?? 30;
+
+    // Auto-ignores follow the threshold: a folder auto-ignore hid is shown again once it no longer
+    // qualifies (the threshold was raised, or set to 0). The user's own ignores are never touched;
+    // only folders auto-ignore recorded (from 0.5.2 on) can tell the two apart.
+    const autoUnhidden = autoIgnoresToUnhide(lastListedPaths, threshold, gitignoreRules, autoIgnoreExclusions, ignoreState.autoIgnoredFolders ?? []);
+    if (autoUnhidden.length > 0) {
+        const unhiddenSet = new Set(autoUnhidden);
+        const kept = gitignoreRules.filter(rule => !unhiddenSet.has(rule));
+        gitignoreRules.length = 0;
+        gitignoreRules.push(...kept);
+    }
+
     const denseFolders = computeAutoIgnorePatterns(
-        files.map(f => vscode.workspace.asRelativePath(f)),
+        lastListedPaths,
         threshold,
         gitignoreRules,
         autoIgnoreExclusions
@@ -276,29 +492,27 @@ export async function scanRepository(
         }
     }
 
-    if (denseFolders.length > 0 || cleanedRules.length !== gitignoreRules.length) {
+    if (denseFolders.length > 0 || cleanedRules.length !== gitignoreRules.length || autoUnhidden.length > 0) {
         const updatedIgnored = Array.from(new Set([...cleanedRules, ...denseFolders]));
         await persistIgnore({
             ignorePatterns: updatedIgnored,
-            autoIgnoreExclusions
+            autoIgnoreExclusions,
+            autoIgnored: denseFolders,
+            autoUnhidden
         });
-        if (denseFolders.length > 0) {
-            const msg = denseFolders.length === 1
-                ? `Auto-ignored folder '${denseFolders[0]}'. Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore it if you want.`
-                : `Auto-ignored ${denseFolders.length} folders (e.g. '${denseFolders[0]}'). Check out 'Ignored Files & Directories' in the Thumbview sidebar to unignore them if you want.`;
-            vscode.window.showInformationMessage(msg);
-        }
+        // No notification: Zen mode silences it on the first open, and the grid's "N folders
+        // auto-hidden" chip (autoIgnored, extension.ts persistIgnoreState) says it where it is seen.
         gitignoreRules.length = 0;
         gitignoreRules.push(...updatedIgnored);
     }
 
     const result: RepoFile[] = [];
-    const validFiles = files.filter(file => !shouldIgnore(vscode.workspace.asRelativePath(file), gitignoreRules));
+    const validFiles = files.filter(file => !shouldIgnore(file.rel, gitignoreRules));
 
     // Sort files by directory level so root-level files and subdirectories sit adjacent to their siblings
     validFiles.sort((a, b) => {
-        const relA = vscode.workspace.asRelativePath(a).replace(/\\/g, "/");
-        const relB = vscode.workspace.asRelativePath(b).replace(/\\/g, "/");
+        const relA = a.rel;
+        const relB = b.rel;
 
         const lastSlashA = relA.lastIndexOf("/");
         const lastSlashB = relB.lastIndexOf("/");
@@ -329,9 +543,9 @@ export async function scanRepository(
         // Spatial stability: files already shown stay shown; new files take the remaining slots
         // in layout order. Sort order alone would let one added file push another off the map.
         const shown = new Set(scanPriorityProvider());
-        const kept = validFiles.filter(file => shown.has(file.fsPath)).slice(0, MAX_SCANNED_FILES);
+        const kept = validFiles.filter(file => shown.has(file.uri.fsPath)).slice(0, MAX_SCANNED_FILES);
         const room = MAX_SCANNED_FILES - kept.length;
-        const added = room > 0 ? validFiles.filter(file => !shown.has(file.fsPath)).slice(0, room) : [];
+        const added = room > 0 ? validFiles.filter(file => !shown.has(file.uri.fsPath)).slice(0, room) : [];
         const keep = new Set([...kept, ...added]);
         const capped = validFiles.filter(file => keep.has(file));
         validFiles.length = 0;
@@ -342,173 +556,7 @@ export async function scanRepository(
     const CHUNK_SIZE = 50;
     for (let c = 0; c < validFiles.length; c += CHUNK_SIZE) {
         const chunk = validFiles.slice(c, c + CHUNK_SIZE);
-        const chunkResults = await Promise.all(chunk.map(async file => {
-            try {
-                const ext = path.extname(file.fsPath).toLowerCase().slice(1);
-                const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext);
-                const isPdf = ext === "pdf";
-
-                if (isImage) {
-                    return {
-                        id: file.fsPath,
-                        path: vscode.workspace.asRelativePath(file),
-                        uri: file.toString(),
-                        lines: [],
-                        lineCount: 1,
-                        isImage: true,
-                        isPdf: false,
-                        mediaUri: file.toString()
-                    } as RepoFile;
-                }
-
-                let statMtime = 0;
-                let statSize = 0;
-                try {
-                    if (file.scheme !== "file") {
-                        // Virtual/remote URIs: fsPath could name an unrelated local file.
-                        throw new Error("non-file scheme");
-                    }
-                    const st = await fs.promises.stat(file.fsPath);
-                    statMtime = st.mtimeMs;
-                    statSize = st.size;
-                } catch {
-                    try {
-                        const st = await vscode.workspace.fs.stat(file);
-                        statMtime = st.mtime || 0;
-                        statSize = st.size || 0;
-                    } catch {
-                        statMtime = 0;
-                        statSize = 0;
-                    }
-                }
-
-                // Skip massive files (>2MB) to prevent memory overload
-                if (statSize > 2 * 1024 * 1024) {
-                    return null;
-                }
-
-                const cached = scanFileCache.get(file.fsPath);
-                if (cached && cached.mtime === statMtime && cached.size === statSize && statMtime !== 0) {
-                    return cached.repoFile;
-                }
-
-                if (isPdf) {
-                    const pdfLines = await extractPdfPage1Lines(file);
-                    const pdfFile: RepoFile = {
-                        id: file.fsPath,
-                        path: vscode.workspace.asRelativePath(file),
-                        uri: file.toString(),
-                        lines: pdfLines,
-                        lineCount: Math.max(pdfLines.length, 1),
-                        isImage: false,
-                        isPdf: true,
-                        mediaUri: file.toString()
-                    };
-                    if (statMtime !== 0) {
-                        scanFileCache.set(file.fsPath, { mtime: statMtime, size: statSize, repoFile: pdfFile });
-                    }
-                    return pdfFile;
-                }
-
-                let rawText: string | null = null;
-                try {
-                    if (file.scheme !== "file") {
-                        throw new Error("non-file scheme");
-                    }
-                    rawText = await fs.promises.readFile(file.fsPath, "utf-8");
-                } catch {
-                    if (vscode.workspace.fs && typeof vscode.workspace.fs.readFile === "function") {
-                        try {
-                            const bytes = await vscode.workspace.fs.readFile(file);
-                            rawText = Buffer.from(bytes).toString("utf-8");
-                        } catch {
-                            rawText = null;
-                        }
-                    }
-                    if (rawText === null && typeof vscode.workspace.openTextDocument === "function") {
-                        try {
-                            const doc = await vscode.workspace.openTextDocument(file);
-                            const lines: string[] = [];
-                            for (let i = 0; i < doc.lineCount; i++) {
-                                lines.push(doc.lineAt(i).text);
-                            }
-                            rawText = lines.join("\n");
-                        } catch {
-                            rawText = null;
-                        }
-                    }
-                }
-
-                if (rawText === null || looksBinary(rawText)) {
-                    return null;
-                }
-
-                const lines = rawText.split(/\r?\n/);
-                const lineCount = lines.length;
-                if (lineCount === 0 || (lineCount === 1 && lines[0] === "")) {
-                    return null;
-                }
-
-                const MAX_LINES = 2000;
-                const MAX_LINE_LENGTH = 300;
-                const step = lineCount > MAX_LINES ? lineCount / MAX_LINES : 1;
-
-                const rawLines: MiniLine[] = [];
-                for (let idx = 0; idx < Math.min(lineCount, MAX_LINES); idx++) {
-                    const i = Math.floor(idx * step);
-                    if (i >= lineCount) break;
-
-                    let textLine = lines[i];
-                    if (textLine.length > MAX_LINE_LENGTH) {
-                        textLine = textLine.substring(0, MAX_LINE_LENGTH);
-                    }
-                    const trimmedRight = textLine.trimEnd();
-                    const indent = textLine.length - textLine.trimStart().length;
-                    const len = trimmedRight.length;
-
-                    rawLines.push({
-                        text: textLine,
-                        indent,
-                        length: len,
-                        category: categorizeLine(textLine)
-                    });
-                }
-
-                let fullLines: string[] | undefined = undefined;
-                if (lineCount > MAX_LINES) {
-                    fullLines = [];
-                    for (let i = 0; i < lineCount; i++) {
-                        let text = lines[i];
-                        if (text.length > MAX_LINE_LENGTH) {
-                            text = text.substring(0, MAX_LINE_LENGTH);
-                        }
-                        fullLines.push(text);
-                    }
-                }
-
-                const repoFile: RepoFile = {
-                    id: file.fsPath,
-                    path: vscode.workspace.asRelativePath(file),
-                    uri: file.toString(),
-                    lines: rawLines,
-                    lineCount,
-                    fullLines
-                };
-
-                if (statMtime !== 0) {
-                    scanFileCache.set(file.fsPath, {
-                        mtime: statMtime,
-                        size: statSize,
-                        repoFile
-                    });
-                }
-
-                return repoFile;
-            } catch {
-                return null;
-            }
-        }));
-
+        const chunkResults = await Promise.all(chunk.map(file => readRepoFile(file.uri, file.rel)));
         for (const item of chunkResults) {
             if (item) result.push(item);
         }

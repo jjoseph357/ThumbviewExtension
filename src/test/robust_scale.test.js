@@ -8,8 +8,9 @@ const { loadTs } = require("./helpers/load_ts");
 
 console.log("=== Test Suite: Robustness & scale (Phase 3) ===");
 
+(async () => {
 console.log("\n--- Test 1: files.exclude globs ---");
-const { globToRegExp, looksBinary, isAlwaysExcluded } = loadTs("../file_discovery.ts", { vscode: {} });
+const { globToRegExp, looksBinary, isAlwaysExcluded, isFolderGitIgnored } = loadTs("../file_discovery.ts", { vscode: { workspace: { isTrusted: true } } });
 const cases = [
     ["**/*.pyc", "src/a/b.pyc", true],
     ["**/*.pyc", "src/a/b.py", false],
@@ -41,8 +42,18 @@ assert.strictEqual(isAlwaysExcluded("lib/parser.ts"), false, "lib/ is real sourc
 assert.strictEqual(isAlwaysExcluded("out/extension.js"), false, "out/ is decided by .gitignore, not a blocklist");
 console.log("✓ Test 2 passed");
 
+console.log("\n--- Test 2b: isFolderGitIgnored detects gitignored workspace folders ---");
+const path = require("path");
+const demoFolder = { uri: { scheme: "file", fsPath: path.resolve(__dirname, "../../demo-workspace") } };
+const rootFolder = { uri: { scheme: "file", fsPath: path.resolve(__dirname, "../..") } };
+const isDemoIgnored = await isFolderGitIgnored(demoFolder);
+assert.strictEqual(isDemoIgnored, true, "demo-workspace should be detected as gitignored by parent repo");
+const isRootIgnored = await isFolderGitIgnored(rootFolder);
+assert.strictEqual(isRootIgnored, false, "root repo should not be gitignored");
+console.log("✓ Test 2b passed");
+
 console.log("\n--- Test 3: delta payloads reuse lines the webview already has ---");
-const h = loadOverview(["lowerLineText", "lineShape"]);
+const h = loadOverview(["lowerLineText", "lineShape", "combinedOriginalText", "studyNote", "beginStudyEpisode", "endStudyEpisode"]);
 const { onMessage, flushFrames, postedMessages } = h;
 const { getData } = h.exports;
 h.resizeTo(1600, 900);
@@ -76,7 +87,8 @@ flushFrames();
 const s1 = getData().files.find(f => f.id === "s1.ts");
 assert.strictEqual(s1.lines[0].text, "const Alpha1 = 1;", "string lines become line objects that can carry render caches");
 assert(s1._combinedText === "s1.ts\nconst alpha1 = 1;\nexport {};", `lowercased index covers the path and every line (${JSON.stringify(s1._combinedText)})`);
-assert(s1._combinedTextOriginal === "const Alpha1 = 1;\nexport {};", "original-case index keeps case for Match Case");
+assert.strictEqual(s1._combinedTextOriginal, undefined, "the original-case index is not built up front (only Match Case / regex need it)");
+assert.strictEqual(h.exports.combinedOriginalText(s1), "const Alpha1 = 1;\nexport {};", "original-case index keeps case for Match Case");
 assert.strictEqual(s1.lines[0]._lowerText, undefined, "per-line lowercase copies are not built up front");
 assert.strictEqual(h.exports.lowerLineText(s1.lines[0]), "const alpha1 = 1;");
 assert.strictEqual(s1.lines[0]._lowerText, "const alpha1 = 1;", "and are kept once computed");
@@ -161,6 +173,96 @@ assert.strictEqual(isThumbviewViewType("x-thumbview"), false);
 assert.strictEqual(isThumbviewViewType(undefined), false, "text editor tabs have no viewType");
 console.log("✓ Test 6 passed");
 
+console.log("\n--- Test 3d: streamed text (linesPending, then fileLines) ---");
+const postedBefore3c = postedMessages.length;
+const requestedSince3c = () => postedMessages.slice(postedBefore3c).some(m => m.command === "requestFileLines");
+onMessage({ data: payload([0, 1].map(i => ({
+    id: `p${i}.ts`, path: `p${i}.ts`, uri: `file:///ws/p${i}.ts`, lineCount: 1, contentVersion: 1, slot: [i, 0],
+    ...(i === 0 ? { lines: ["const inline = 0;"] } : { lines: [], linesPending: true })
+}))) });
+flushFrames();
+const pending = getData().files.find(f => f.id === "p1.ts");
+assert.strictEqual(pending._linesPending, true, "a streamed file is placed with no text yet");
+assert(!requestedSince3c(), "pending text is not requested; it is on its way");
+assert.strictEqual(pending._combinedText, "p1.ts", "a pending file is searchable by path only");
+onMessage({ data: { command: "fileLines", files: [{ id: "p1.ts", contentVersion: 2, lines: ["stale"] }] } });
+assert.strictEqual(pending._linesPending, true, "text for another content version is ignored");
+onMessage({ data: { command: "fileLines", files: [{ id: "p1.ts", contentVersion: 1, lines: ["const Streamed = 1;"] }] } });
+flushFrames();
+assert.strictEqual(pending._linesPending, undefined, "streamed text arrives");
+assert.strictEqual(pending.lines[0].text, "const Streamed = 1;");
+assert(pending._combinedText.includes("const streamed = 1;"), "and is indexed for search");
+onMessage({ data: payload([0, 1].map(i => ({
+    id: `p${i}.ts`, path: `p${i}.ts`, uri: `file:///ws/p${i}.ts`, lineCount: 1, contentVersion: 1, slot: [i, 0], lines: [], linesOmitted: true
+}))) });
+flushFrames();
+assert.strictEqual(getData().files[1].lines[0].text, "const Streamed = 1;", "a later delta reuses streamed text");
+assert(!requestedSince3c(), "nothing is missing after streaming");
+console.log("✓ Test 3d passed");
+
+console.log("\n--- Test 3e: usage study episodes (only when enrolled, never text) ---");
+const studyFiles = [0, 1].map(i => ({
+    id: `q${i}.ts`, path: `secret/q${i}.ts`, uri: `file:///ws/secret/q${i}.ts`, lineCount: 1, contentVersion: 1, slot: [i, 0], lines: ["const x = 1;"]
+}));
+const episodesSince = n => postedMessages.slice(n).filter(m => m.command === "studyEpisode");
+let mark = postedMessages.length;
+onMessage({ data: { ...payload(studyFiles), studyActive: false } });
+flushFrames();
+h.exports.beginStudyEpisode("reveal");
+h.exports.studyNote("searchEdit");
+h.exports.endStudyEpisode("jump", "click", getData().files[1]);
+assert.strictEqual(episodesSince(mark).length, 0, "nothing is reported unless the host says the user joined");
+onMessage({ data: { ...payload(studyFiles), studyActive: true } });
+flushFrames();
+mark = postedMessages.length;
+h.exports.beginStudyEpisode("reveal");
+h.exports.studyNote("hover", "q0.ts");
+h.exports.studyNote("hover", "q0.ts");
+h.exports.studyNote("hover", "q1.ts");
+h.exports.studyNote("magnifier");
+h.exports.endStudyEpisode("jump", "click", getData().files[1]);
+const [episode] = episodesSince(mark);
+assert(episode, "one summary per visit");
+assert.strictEqual(episode.tilesHovered, 2, "distinct tiles hovered");
+assert.strictEqual(episode.magnifierUses, 1);
+assert.strictEqual(episode.targetCol, 1, "the chosen tile's slot is reported");
+assert.strictEqual(episode.searchUsed, false);
+assert(typeof episode.sinceRevealMs === "number" && typeof episode.firstActionMs === "number");
+const { uri: _uri, ...rest } = episode;
+assert(!JSON.stringify(rest).includes("secret"), "no path or text besides the uri the host turns into a hash");
+h.exports.endStudyEpisode("dismissed", "none", null);
+assert.strictEqual(episodesSince(mark).length, 1, "a visit is reported once");
+assert.strictEqual(episode.startSource, "reveal");
+mark = postedMessages.length;
+onMessage({ data: { command: "studyVisitStart" } }); // shown by a tab click: no reveal gate runs
+h.exports.endStudyEpisode("switch_tab", "click", getData().files[0]);
+const [tabVisit] = episodesSince(mark);
+assert.strictEqual(tabVisit.startSource, "shown", "a tab-click visit is timed from the host's start");
+assert.strictEqual(typeof tabVisit.sinceRevealMs, "number");
+mark = postedMessages.length;
+h.exports.endStudyEpisode("jump", "keyboard", getData().files[0]);
+const [unseen] = episodesSince(mark);
+assert(unseen, "a choice with no visit in progress is still reported");
+assert.strictEqual(unseen.startSource, "interaction");
+assert.strictEqual(unseen.sinceRevealMs, null, "with no start time rather than a wrong one");
+// A brief hide during Zen/maximize steps is not a dismissal: only the host's studyVisitEnd ends it.
+mark = postedMessages.length;
+h.exports.beginStudyEpisode("reveal");
+onMessage({ data: { command: "panelHidden" } });
+assert.strictEqual(episodesSince(mark).length, 0, "panelHidden alone does not end the visit");
+onMessage({ data: { command: "studyVisitStart" } });
+h.exports.endStudyEpisode("jump", "click", getData().files[0]);
+const [afterFlicker] = episodesSince(mark);
+assert.strictEqual(afterFlicker.startSource, "reveal", "a visit that survives a flicker keeps its reveal start");
+mark = postedMessages.length;
+h.exports.beginStudyEpisode("reveal");
+onMessage({ data: { command: "studyVisitEnd" } });
+const [dismissed] = episodesSince(mark);
+assert.strictEqual(dismissed && dismissed.outcome, "dismissed", "studyVisitEnd ends a visit left without choosing");
+onMessage({ data: { command: "studyVisitEnd" } });
+assert.strictEqual(episodesSince(mark).length, 1, "and only once");
+console.log("✓ Test 3e passed");
+
 console.log("\n--- Test 7: webview page hardening ---");
 const { readHostSource } = require("./helpers/host_source");
 const hostSource = readHostSource();
@@ -176,3 +278,7 @@ console.log("✓ Test 7 passed");
 
 console.log("\nAll robustness & scale tests passed.");
 process.exit(0);
+})().catch(err => {
+    console.error(err);
+    process.exit(1);
+});

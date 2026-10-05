@@ -71,7 +71,7 @@ function doesCellCollapse(cellW, cellH, minW, minH) {
 }
 
 // Tile is 50x35 px
-// With default threshold (60x40): collapses
+// With the earlier 60x40 threshold: collapses
 assert.strictEqual(doesCellCollapse(50, 35, 60, 40), true, "50x35 should collapse with 60x40 threshold");
 
 // With custom threshold (45x30): does not collapse
@@ -93,10 +93,10 @@ assert.strictEqual(props["thumbview.compressionPercentage"].minimum, 0, "compres
 assert.strictEqual(props["thumbview.compressionPercentage"].maximum, 25, "compressionPercentage maximum must be 25");
 
 assert(props["thumbview.minCellWidth"], "thumbview.minCellWidth must be contributed");
-assert.strictEqual(props["thumbview.minCellWidth"].default, 60, "minCellWidth default must be 60");
+assert.strictEqual(props["thumbview.minCellWidth"].default, 40, "minCellWidth default must be 40 (lowered from 60 in 0.5.2 so views fall into folder cards less often)");
 
 assert(props["thumbview.minCellHeight"], "thumbview.minCellHeight must be contributed");
-assert.strictEqual(props["thumbview.minCellHeight"].default, 40, "minCellHeight default must be 40");
+assert.strictEqual(props["thumbview.minCellHeight"].default, 28, "minCellHeight default must be 28");
 
 assert(props["thumbview.autoIgnoreThreshold"], "thumbview.autoIgnoreThreshold must be contributed");
 assert.strictEqual(props["thumbview.autoIgnoreThreshold"].default, 30, "autoIgnoreThreshold default must be 30");

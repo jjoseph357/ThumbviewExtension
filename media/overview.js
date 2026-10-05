@@ -247,144 +247,180 @@ function reduceSpanningGridOrder(currentOrder, allocations, oldCols, oldRows, mi
     };
 }
 /**
- * Reorders items in a 2D spanning grid layout, placing sourceId at targetCol, targetRow.
- * Preserves empty holes in the column-major grid and respects capacity constraints.
+ * Moves `sourceId` in a spanning (column-major) order so its top lands at (targetCol, targetRow),
+ * both in flow cells. The source's cells and an equal-height block of cells at the target trade
+ * places, empty cells included: [1;1;0] onto [2;0;0] gives [2;0;0] and [1;1;0]; onto [2;3;0] gives
+ * [2;3;0] and [1;1;0]; dropped on the 3 of [2;3;0] gives [2;1;1] and [3;0;0]. A block never splits
+ * a tile: both blocks grow to whole tiles (so dragging either of two tiles onto the other swaps the
+ * same blocks). A move within one column shifts the tiles in between around it, in order. Nothing
+ * outside the two blocks moves. `rejected` is true when no such move exists (a tile would be split,
+ * or a block leaves the grid); the order is then returned unchanged.
  */
 function reorderSpanningItems(activeIds, currentOrder, allocations, sourceId, targetCol, targetRow, maxAllowedCols, maxAllowedRows, wrapRows) {
-    let maxColUsed = maxAllowedCols - 1;
-    let scanCol = 0;
-    let scanRow = 0;
+    const placements = [];
+    const placementById = new Map();
+    let col = 0;
+    let row = 0;
+    let maxColUsed = 0;
     for (const id of currentOrder) {
         const nCells = id ? (allocations[id] || 1) : 1;
-        if (scanRow > 0 && scanRow + nCells > wrapRows) {
-            scanCol++;
-            scanRow = 0;
+        if (row > 0 && row + nCells > wrapRows) {
+            col++;
+            row = 0;
         }
-        if (id && scanCol > maxColUsed) {
-            maxColUsed = scanCol;
+        if (id) {
+            const p = { id, col, row, nCells };
+            placements.push(p);
+            placementById.set(id, p);
+            maxColUsed = Math.max(maxColUsed, col);
         }
-        scanRow += nCells;
+        row += nCells;
     }
     const maxCol = Math.max(maxAllowedCols - 1, maxColUsed);
-    const sourceCells = allocations[sourceId] || 1;
     const gridRows = Math.max(maxAllowedRows, wrapRows);
-    let currCol = 0;
-    let currRow = 0;
-    const placements = [];
-    const placementBySlot = new Map();
-    const placementById = new Map();
-    for (const id of currentOrder) {
-        const nCells = id ? (allocations[id] || 1) : 1;
-        if (currRow > 0 && currRow + nCells > wrapRows) {
-            currCol++;
-            currRow = 0;
-        }
-        if (currCol > maxCol)
-            break;
-        if (!id) {
-            currRow += 1;
-            continue;
-        }
-        const p = { id, col: currCol, row: currRow, nCells };
-        placements.push(p);
-        placementById.set(id, p);
-        for (let i = 0; i < nCells; i++) {
-            if (currRow + i < gridRows) {
-                placementBySlot.set(`${currCol},${currRow + i}`, p);
-            }
-        }
-        currRow += nCells;
+    const unchanged = (rejected) => ({
+        newOrder: [...currentOrder],
+        rows: wrapRows,
+        cols: Math.max(maxAllowedCols, maxCol + 1),
+        finalTargetCol: source ? source.col : 0,
+        finalTargetRow: source ? source.row : 0,
+        sourceCol: source ? source.col : 0,
+        sourceRow: source ? source.row : 0,
+        targetPlacement: undefined,
+        safeSourceRow: source ? source.row : 0,
+        rejected
+    });
+    const source = placementById.get(sourceId);
+    if (!source) {
+        return unchanged(true);
     }
-    const sourcePlacement = placementById.get(sourceId);
-    const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
-    const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
-    let targetPlacement = placementBySlot.get(`${targetCol},${targetRow}`);
-    if (targetPlacement && targetPlacement.id === sourceId) {
-        targetPlacement = undefined;
+    const h = source.nCells;
+    const tc = Math.max(0, Math.min(maxCol, targetCol));
+    const tr = Math.max(0, Math.min(gridRows - h, targetRow));
+    if (tc === source.col && tr === source.row) {
+        return unchanged(false);
     }
-    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
-    const maxAllowedRow = Math.max(0, maxAllowedRows - sourceCells);
-    const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
-    const finalTargetRow = targetPlacement ? Math.min(targetPlacement.row, maxAllowedRow) : clamped.row;
-    const grid = [];
+    // occupant[c][r]: the placement covering that cell, if any.
+    const occupant = [];
     for (let c = 0; c <= maxCol; c++) {
-        grid.push(new Array(gridRows).fill(""));
+        occupant.push(new Array(gridRows).fill(undefined));
     }
     for (const p of placements) {
-        for (let i = 0; i < p.nCells; i++) {
-            if (p.row + i < gridRows && p.col <= maxCol) {
-                grid[p.col][p.row + i] = p.id;
-            }
+        for (let i = 0; i < p.nCells && p.row + i < gridRows; i++) {
+            occupant[p.col][p.row + i] = p;
         }
     }
+    const targetPlacement = occupant[tc][tr] && occupant[tc][tr] !== source ? occupant[tc][tr] : undefined;
+    // Grows [start, end) in column c until no tile crosses either edge.
+    const wholeSpan = (c, start, end) => {
+        for (;;) {
+            const top = start < gridRows ? occupant[c][start] : undefined;
+            const bottom = end - 1 >= 0 && end - 1 < gridRows ? occupant[c][end - 1] : undefined;
+            const newStart = top && top.row < start ? top.row : start;
+            const newEnd = bottom && bottom.row + bottom.nCells > end ? bottom.row + bottom.nCells : end;
+            if (newStart === start && newEnd === end) {
+                return { start, end };
+            }
+            start = newStart;
+            end = newEnd;
+        }
+    };
+    const tilesIn = (c, start, end) => {
+        const out = [];
+        for (let r = start; r < end && r < gridRows; r++) {
+            const p = occupant[c][r];
+            if (p && !out.includes(p))
+                out.push(p);
+        }
+        return out;
+    };
+    const moves = new Map();
+    const sameColumnOverlap = tc === source.col && tr < source.row + h && source.row < tr + h;
+    if (!sameColumnOverlap) {
+        // Two blocks of equal height, each made of whole tiles and empty cells, trade places.
+        let rStart = tr;
+        let height = h;
+        let target = { start: tr, end: tr + h };
+        let src = { start: source.row, end: source.row + h };
+        for (let guard = 0;; guard++) {
+            target = wholeSpan(tc, rStart, rStart + height);
+            src = wholeSpan(source.col, source.row, source.row + Math.max(height, target.end - target.start));
+            const next = Math.max(target.end - target.start, src.end - src.start);
+            if (target.end > gridRows || src.end > gridRows || guard > gridRows) {
+                return unchanged(true);
+            }
+            if (next === target.end - target.start && next === src.end - src.start) {
+                break;
+            }
+            rStart = target.start;
+            height = next;
+        }
+        // In one column, the blocks must not overlap after growing.
+        if (tc === source.col && target.start < src.end && src.start < target.end) {
+            return unchanged(true);
+        }
+        for (const p of tilesIn(tc, target.start, target.end)) {
+            moves.set(p, { col: source.col, row: p.row - target.start + src.start });
+        }
+        for (const p of tilesIn(source.col, src.start, src.end)) {
+            moves.set(p, { col: tc, row: p.row - src.start + target.start });
+        }
+    }
+    else {
+        // Within one column: the source takes [tr, tr + h); the other tiles of the span keep their
+        // order and fill the remaining cells, top to bottom, never split by the source.
+        const span = wholeSpan(tc, Math.min(source.row, tr), Math.max(source.row, tr) + h);
+        if (span.end > gridRows) {
+            return unchanged(true);
+        }
+        const others = [];
+        for (let r = span.start; r < span.end; r++) {
+            const p = occupant[tc][r];
+            if (p === source)
+                continue;
+            if (!p)
+                others.push(null);
+            else if (p.row === r)
+                others.push(p);
+        }
+        let r = span.start;
+        moves.set(source, { col: tc, row: tr });
+        for (const item of others) {
+            const n = item ? item.nCells : 1;
+            if (r < tr + h && r + n > tr) {
+                r = tr + h;
+            }
+            if (r + n > span.end) {
+                return unchanged(true);
+            }
+            if (item)
+                moves.set(item, { col: tc, row: r });
+            r += n;
+        }
+    }
+    const finalPlacements = placements.map(p => ({ ...p, ...(moves.get(p) || {}) }));
+    const movedSource = finalPlacements.find(p => p.id === sourceId);
+    let effectiveWrapRows = wrapRows;
+    for (const p of finalPlacements) {
+        effectiveWrapRows = Math.max(effectiveWrapRows, p.row + p.nCells);
+    }
+    // Serialize column-major, every column effectiveWrapRows tall, so every tile keeps its cell.
+    const cell = [];
     for (let c = 0; c <= maxCol; c++) {
-        for (let r = 0; r < gridRows; r++) {
-            if (grid[c][r] === sourceId) {
-                grid[c][r] = "";
-            }
-        }
+        cell.push(new Array(effectiveWrapRows).fill(""));
     }
-    // Identify all items overlapping the target span [finalTargetRow ... finalTargetRow + sourceCells - 1] in finalTargetCol
-    const displacedPlacements = [];
-    const seenDisplacedIds = new Set();
-    for (let i = 0; i < sourceCells; i++) {
-        const r = finalTargetRow + i;
-        if (r < gridRows && finalTargetCol <= maxCol) {
-            const cellId = grid[finalTargetCol][r];
-            if (cellId && cellId !== sourceId && !seenDisplacedIds.has(cellId)) {
-                seenDisplacedIds.add(cellId);
-                const p = placementById.get(cellId);
-                if (p)
-                    displacedPlacements.push(p);
-            }
-        }
+    const startsAt = new Map();
+    for (const p of finalPlacements) {
+        startsAt.set(`${p.col},${p.row}`, p);
     }
-    if (targetPlacement && targetPlacement.id !== sourceId && !seenDisplacedIds.has(targetPlacement.id)) {
-        seenDisplacedIds.add(targetPlacement.id);
-        displacedPlacements.push(targetPlacement);
-    }
-    // Clear sourceId and all displaced items from the grid
-    for (let c = 0; c <= maxCol; c++) {
-        for (let r = 0; r < gridRows; r++) {
-            if (grid[c][r] === sourceId || seenDisplacedIds.has(grid[c][r])) {
-                grid[c][r] = "";
-            }
-        }
-    }
-    // Place displaced items into sourceCol, preserving relative offsets and gaps
-    let safeSourceRow = sourceRow;
-    let curSourceR = sourceRow;
-    for (const p of displacedPlacements) {
-        const relOffset = p.row - finalTargetRow;
-        let destR = (sourceCells >= p.nCells && relOffset >= 0)
-            ? (sourceRow + relOffset)
-            : curSourceR;
-        destR = Math.min(destR, Math.max(0, gridRows - p.nCells));
-        for (let i = 0; i < p.nCells; i++) {
-            if (sourceCol <= maxCol && destR + i < gridRows) {
-                grid[sourceCol][destR + i] = p.id;
-            }
-        }
-        curSourceR = destR + p.nCells;
-    }
-    if (displacedPlacements.length > 0) {
-        safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - displacedPlacements[0].nCells));
-    }
-    for (let i = 0; i < sourceCells; i++) {
-        if (finalTargetCol <= maxCol && finalTargetRow + i < gridRows) {
-            grid[finalTargetCol][finalTargetRow + i] = sourceId;
-        }
-    }
-    const effectiveWrapRows = Math.max(wrapRows, finalTargetRow + sourceCells);
     const newOrder = [];
     for (let c = 0; c <= maxCol; c++) {
         let r = 0;
         while (r < effectiveWrapRows) {
-            const cell = grid[c][r];
-            if (cell) {
-                newOrder.push(cell);
-                const n = allocations[cell] || 1;
-                r += n;
+            const p = startsAt.get(`${c},${r}`);
+            if (p) {
+                newOrder.push(p.id);
+                r += p.nCells;
             }
             else {
                 newOrder.push("");
@@ -392,20 +428,52 @@ function reorderSpanningItems(activeIds, currentOrder, allocations, sourceId, ta
             }
         }
     }
-    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+    // Padding is trimmed, never below the order's original length: a shorter order can shrink
+    // the grid and move every tile (spatial stability).
+    while (newOrder.length > currentOrder.length && !newOrder[newOrder.length - 1]) {
         newOrder.pop();
     }
     return {
         newOrder,
         rows: effectiveWrapRows,
         cols: Math.max(maxAllowedCols, maxCol + 1),
-        finalTargetCol,
-        finalTargetRow,
-        sourceCol,
-        sourceRow,
+        finalTargetCol: movedSource.col,
+        finalTargetRow: movedSource.row,
+        sourceCol: source.col,
+        sourceRow: source.row,
         targetPlacement,
-        safeSourceRow
+        safeSourceRow: source.row,
+        rejected: false
     };
+}
+/**
+ * The flow row under a drawn (display) row in one column of a spanning order. Tiles are drawn at
+ * their current height, so below a file that grew or shrank the drawn rows no longer equal the flow
+ * rows a reorder works in; drops convert with this. Past a column's last entry, rows map one to one.
+ */
+function displayToFlowRow(order, flowCells, displayCells, wrapRows, col, displayRow) {
+    let c = 0;
+    let flow = 0;
+    let display = 0;
+    for (const id of order) {
+        const f = id ? (flowCells[id] || 1) : 1;
+        const g = id ? (displayCells[id] || f) : 1;
+        if (flow > 0 && flow + f > wrapRows) {
+            if (c === col)
+                break;
+            c++;
+            flow = 0;
+            display = 0;
+        }
+        if (c > col)
+            break;
+        if (c === col && displayRow < display + g) {
+            return flow + Math.min(Math.max(0, displayRow - display), f - 1);
+        }
+        flow += f;
+        display += g;
+    }
+    return c === col ? flow + Math.max(0, displayRow - display) : displayRow;
 }
 /**
  * Coarse per-line category from leading or contained keywords, not a real parser. Colors the
@@ -584,8 +652,22 @@ function refreshThemeTokens() {
 // Initial theme token resolution
 refreshThemeTokens();
 
-// Robust color -> rgba(...) parser supporting hex, rgb, rgba, and hsl
+// Robust color -> rgba(...) parser supporting hex, rgb, rgba, and hsl. Memoized: the renderer calls
+// it per tile with a handful of theme colors, and parsing showed up in first-frame profiles. Pure
+// function of its arguments, so theme changes need no invalidation (new colors are new keys).
+const withAlphaCache = new Map();
 function withAlpha(color, alpha) {
+    const key = `${color}|${alpha}`;
+    let result = withAlphaCache.get(key);
+    if (result === undefined) {
+        result = withAlphaUncached(color, alpha);
+        if (withAlphaCache.size > 512) withAlphaCache.clear();
+        withAlphaCache.set(key, result);
+    }
+    return result;
+}
+
+function withAlphaUncached(color, alpha) {
     if (!color) return `rgba(0, 0, 0, ${alpha})`;
     const s = String(color).trim();
     if (s.startsWith("#")) {
@@ -746,10 +828,23 @@ const mosaicCache = new CanvasLRU(MAX_MOSAIC_CACHE_ENTRIES, MAX_MOSAIC_CACHE_BYT
 let clipboardItem = null;
 
 let hoveredFile = null;
+const IS_MAC = typeof navigator !== "undefined" && (/Mac|iPod|iPhone|iPad/.test(navigator.platform || "") || /Mac/.test(navigator.userAgent || ""));
+// The pointer hover outline (updateHoverOutline): its element, the file it marks, and its last rect.
+const hoverOutline = document.getElementById("hover-outline");
+let hoverOutlineFile = null;
+let hoverOutlineKey = "";
+// The folder whose tokens are being prepared on hover (schedulePrewarm).
+let prewarmTimer = null;
+let prewarmPath = null;
 // Last pointer position in client coordinates (the Ctrl magnifier anchors to it) and whether
 // Ctrl is held. Previously implicit globals; declared so reads before the first event are safe.
 let lastMousePos = null;
 let isCtrlDown = false;
+let hoverSnappedTarget = null;
+let hoverScrollOffset = 0;
+let lastHoveredFileUri = null;
+let wheelMousePos = null;
+let lastWheelTime = 0;
 
 const slotOccupancy = new Map();
 const userReorderedFileSlots = new Map();
@@ -763,6 +858,11 @@ let rawSearchQuery = "";   // original case, trimmed
 let searchQuery = "";      // lowercase, trimmed. kept for the existing fast substring path
 let searchRegex = null;    // compiled only when useRegex or matchWholeWord is on
 let searchInvalid = false; // true when the user's regex fails to compile
+// Per-file search results are memoized per search state (fileMatchesSearch). narrowFromGeneration is
+// the previous state when the new plain query only extends it, so files that missed it are skipped.
+let searchGeneration = 0;
+let narrowFromGeneration = -1;
+let lastPlainSearch = null; // { query, matchCase } of the previous plain search, for narrowing
 
 /** Converts a mouse event's screen coordinates to coordinates local to the canvas element. */
 function getCanvasPos(event) {
@@ -904,7 +1004,18 @@ function updateDragTarget() {
 
     dragTargetFolder = null;
     dragTargetBreadcrumb = null;
-    dragTarget = findNearestSlot(cursorPos.px, cursorPos.py);
+    // The target is where the dragged tile's top-left cell would land (the cursor minus where the
+    // tile was grabbed, rounded to the nearest cell), not the cell under the cursor: a two-tall tile
+    // grabbed by its lower half and moved down one row moves one row, not two.
+    const probe = findNearestSlot(cursorPos.px, cursorPos.py);
+    if (dragGrabOffset && probe && probe.cellW > 0 && probe.cellH > 0) {
+        dragTarget = findNearestSlot(
+            cursorPos.px - dragGrabOffset.x + probe.cellW / 2,
+            cursorPos.py - dragGrabOffset.y + probe.cellH / 2
+        );
+    } else {
+        dragTarget = probe;
+    }
     dragTargetFile = dragTarget?.file ?? null;
 }
 
@@ -962,7 +1073,7 @@ function scheduleSearchAnnouncement() {
         } else if (searchInvalid) {
             announce("Invalid regular expression");
         } else {
-            const count = data.files.filter(f => textMatches(f._combinedTextOriginal, f._combinedText)).length;
+            const count = data.files.filter(f => fileMatchesSearch(f)).length;
             announce(count === 0 ? "No files match" : `${count} file${count === 1 ? "" : "s"} match`);
         }
     }, 500);
@@ -1010,6 +1121,18 @@ function rebuildSearchState(value) {
     searchInvalid = false;
     searchRegex = null;
 
+    const plain = !useRegex && !matchWholeWord && rawSearchQuery !== "";
+    const folded = matchCase ? rawSearchQuery : searchQuery;
+    narrowFromGeneration = plain && lastPlainSearch && lastPlainSearch.matchCase === matchCase && folded.includes(lastPlainSearch.query)
+        ? searchGeneration
+        : -1;
+    lastPlainSearch = plain ? { query: folded, matchCase } : null;
+    searchGeneration++;
+    hoverSnappedTarget = null;
+    hoverScrollOffset = 0;
+    wheelMousePos = null;
+    if (isCtrlDown) updateHoverTooltip();
+
     if (rawSearchQuery && (useRegex || matchWholeWord)) {
         let pattern = useRegex ? rawSearchQuery : escapeRegExp(rawSearchQuery);
         if (matchWholeWord) pattern = `\\b(?:${pattern})\\b`;
@@ -1034,6 +1157,42 @@ function textMatches(original, lowered) {
     return matchCase ? original.includes(rawSearchQuery) : lowered.includes(searchQuery);
 }
 
+/** Search matches over a cached folder mosaic: the tint and outline a match used to bake in, as one path. */
+let mosaicMatchFill = null;
+function drawMosaicSearchOverlay(tileRects, mosaicX, mosaicY) {
+    if (!tileRects) return;
+    let any = false;
+    ctx.beginPath();
+    for (const r of tileRects) {
+        // By id: a cached mosaic outlives payloads, and the current file object carries the search memo.
+        const file = fileById.get(r.id);
+        if (!file || !fileMatchesSearch(file)) continue;
+        ctx.rect(mosaicX + r.x, mosaicY + r.y, r.w, r.h);
+        any = true;
+    }
+    if (!any) return;
+    mosaicMatchFill ??= withAlpha(ACCENT_SEARCH, 0.45);
+    ctx.fillStyle = mosaicMatchFill;
+    ctx.fill();
+    ctx.strokeStyle = ACCENT_SEARCH;
+    ctx.lineWidth = 2.0;
+    ctx.stroke();
+}
+
+/**
+ * textMatches over a whole file, memoized per search state. Payload files are fresh objects, so a
+ * content change can never reuse a stale result.
+ */
+function fileMatchesSearch(file) {
+    if (file._searchGen === searchGeneration) return file._searchHit;
+    const hit = file._searchGen === narrowFromGeneration && !file._searchHit
+        ? false
+        : textMatches(matchCase || searchRegex ? combinedOriginalText(file) : "", file._combinedText);
+    file._searchGen = searchGeneration;
+    file._searchHit = hit;
+    return hit;
+}
+
 // Setup search inputs
 const searchInputFld = document.getElementById("search-input");
 const matchCaseBtn = document.getElementById("search-match-case");
@@ -1041,7 +1200,25 @@ const matchWordBtn = document.getElementById("search-match-word");
 const useRegexBtn = document.getElementById("search-use-regex");
 const clearSearchBtn = document.getElementById("clear-search");
 
+// From the search box: Enter opens the first match, ArrowDown moves to it so the arrows (limited to
+// matches, navigationTargets) and Enter take over. Reading order, like Home.
+searchInputFld.addEventListener("keydown", event => {
+    if ((event.key !== "Enter" && event.key !== "ArrowDown") || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (!data || !rawSearchQuery || searchInvalid) return;
+    // A folder card first opens the folder (Enter), where the matching files are then reachable.
+    const first = readingOrder(searchMatchTargets())[0];
+    event.preventDefault();
+    if (!first) {
+        announce("No matching files on screen");
+        return;
+    }
+    canvas.focus();
+    focusKeyboardTarget(first);
+    if (event.key === "Enter") activateKeyboardTarget(first);
+});
+
 searchInputFld.addEventListener("input", e => {
+    studyNote("searchEdit");
     rebuildSearchState(e.target.value);
     clearSearchBtn.style.display = searchQuery ? "block" : "none";
     triggerSearchRender(false);
@@ -1066,6 +1243,7 @@ clearSearchBtn.addEventListener("click", () => clearSearch());
 
 /** Toggles case-sensitive search and re-renders with the new search state. */
 function toggleMatchCase() {
+    studyNote("searchToggle");
     matchCase = !matchCase;
     rebuildSearchState(searchInputFld.value);
     matchCaseBtn.classList.toggle('active');
@@ -1075,6 +1253,7 @@ function toggleMatchCase() {
 
 /** Toggles regex search mode and re-renders with the new search state. */
 function toggleRegex() {
+    studyNote("searchToggle");
     useRegex = !useRegex;
     rebuildSearchState(searchInputFld.value);
     useRegexBtn.classList.toggle('active');
@@ -1084,6 +1263,7 @@ function toggleRegex() {
 
 /** Toggles whole-word search matching and re-renders with the new search state. */
 function toggleMatchWord() {
+    studyNote("searchToggle");
     matchWholeWord = !matchWholeWord;
     rebuildSearchState(searchInputFld.value);
     matchWordBtn.classList.toggle('active');
@@ -1127,10 +1307,22 @@ window.addEventListener("keydown", event => {
         }
     }
 
+    // Keys typed in the context menu operate the menu (its own keydown listener), never search.
+    if (contextMenuHasFocus()) {
+        return;
+    }
+
     if ((event.ctrlKey || event.metaKey) && !event.altKey) {
         if (event.key === 'Backspace') {
             event.preventDefault();
             clearSearch();
+            return;
+        }
+        // Ctrl+F / ⌘F: Thumbview's search box, where VS Code users look for find.
+        if ((event.key === 'f' || event.key === 'F') && !event.shiftKey) {
+            event.preventDefault();
+            searchInputFld.focus();
+            if (typeof searchInputFld.select === "function") searchInputFld.select();
             return;
         }
     }
@@ -1275,6 +1467,18 @@ const INITIAL_REVEAL_STATUS_DELAY_MS = 400;
 const INITIAL_REVEAL_MAX_DELAY_MS = 2500;
 const TRANSITION_REVEAL_MAX_DELAY_MS = 1500;
 let revealPending = true;
+// Tile rasters drawn per frame are bounded once the page has been revealed (the reveal itself shows
+// complete tiles); the rest show drawTilePlaceholder and render() schedules another frame.
+const RASTER_FRAME_BUDGET_MS = 12;
+let rasterBudgetEndsAt = Infinity;
+let rasterDeferred = false;
+// Each file's most recent tile raster ({ canvas, sig }), drawn scaled while its raster at a new size
+// waits for a later frame. The canvases belong to tileRasterCache; one it evicted is 0x0 and skipped.
+const lastTileRaster = new Map();
+// Optional pdf.js loading (requestPdfJs, near drawThumbnail) waits for the first reveal.
+let hasRevealedOnce = false;
+let pdfJsState = "idle"; // "idle" | "wanted" | "scheduled" | "loading" | "ready" | "failed"
+let pdfJsUrgent = false;
 // Set while the host is mid-transition (after hideForTransition), so a render during a Zen step
 // cannot count as "stable". Cleared only by the host's showAfterTransition for the latest
 // transition id, which it sends once its layout commands and settle delays have finished.
@@ -1287,6 +1491,9 @@ document.body.style.opacity = "0";
 function completeReveal() {
     if (!revealPending) return;
     revealPending = false;
+    beginStudyEpisode("reveal");
+    hasRevealedOnce = true;
+    maybeStartPdfJs();
     revealBlockedByTransition = false;
     revealNeedsSettleTime = false;
     hiddenSinceArm = false;
@@ -1371,7 +1578,116 @@ function endSwitchFreeze() {
 }
 
 /** Posts a message that opens a file over Thumbview (extension.ts "jump" / "switchTab"), freezing drawing first. */
+// Usage study (STUDY.md): one summary per visit ("studyEpisode"), collected only while the host says
+// the user joined (payload studyActive). Counts interactions and times; never records text (the
+// search query only as its length). Ends with a jump or tab switch, or as dismissed when hidden.
+let studyActive = false;
+let studyEpisode = null;
+/**
+ * Starts a visit's clock. source "reveal": the page just appeared (completeReveal); "shown": the host
+ * showed the panel (studyVisitStart), which starts the clock at once unless a reveal is still pending
+ * (the reveal then sets it); "interaction": the fallback, when neither was seen.
+ */
+function beginStudyEpisode(source) {
+    if (!studyActive) return;
+    const now = performance.now();
+    if (studyEpisode) {
+        // A reveal after the host's start marks the moment the page actually became visible.
+        if (source === "reveal" && studyEpisode.revealedAt === null && studyEpisode.firstActionAt === null) {
+            studyEpisode.revealedAt = now;
+            studyEpisode.revealedAtEpoch = Date.now();
+            studyEpisode.startSource = "reveal";
+        }
+        return;
+    }
+    const waitsForReveal = source === "shown" && revealPending;
+    studyEpisode = {
+        revealedAt: source === "interaction" || waitsForReveal ? null : now,
+        // Wall clock of the reveal, for the host's F4-to-reveal latency (study.ts reveal_latency_ms).
+        revealedAtEpoch: source === "reveal" ? Date.now() : null,
+        startSource: waitsForReveal ? "reveal" : source,
+        startedAt: now, firstActionAt: null,
+        focusedMs: 0, focusSince: typeof document.hasFocus === "function" && document.hasFocus() ? now : null,
+        searchEdits: 0, searchToggles: 0, hovered: new Set(), magnifierUses: 0,
+        folderDrillIns: 0, folderBackOuts: 0, keyboardMoves: 0
+    };
+}
+// Focused time: a panel left open beside the code is visible but idle.
+window.addEventListener("focus", () => {
+    if (studyEpisode && studyEpisode.focusSince === null) studyEpisode.focusSince = performance.now();
+});
+window.addEventListener("blur", () => {
+    if (studyEpisode && studyEpisode.focusSince !== null) {
+        studyEpisode.focusedMs += performance.now() - studyEpisode.focusSince;
+        studyEpisode.focusSince = null;
+    }
+});
+function studyNote(kind, id) {
+    if (!studyActive) return;
+    if (!studyEpisode) beginStudyEpisode("interaction"); // no reveal or host start was seen
+    const e = studyEpisode;
+    if (kind === "hover") {
+        e.hovered.add(id);
+        return;
+    }
+    if (e.firstActionAt === null) e.firstActionAt = performance.now();
+    if (kind === "searchEdit") e.searchEdits++;
+    else if (kind === "searchToggle") e.searchToggles++;
+    else if (kind === "magnifier") e.magnifierUses++;
+    else if (kind === "drillIn") e.folderDrillIns++;
+    else if (kind === "backOut") e.folderBackOuts++;
+    else if (kind === "keyboard") e.keyboardMoves++;
+}
+function endStudyEpisode(outcome, method, file) {
+    if (studyActive && !studyEpisode && outcome !== "dismissed") {
+        // A choice with no visit in progress (e.g. Enter before anything else was seen) still counts.
+        beginStudyEpisode("interaction");
+    }
+    const e = studyEpisode;
+    studyEpisode = null;
+    if (!studyActive || !e) return;
+    const now = performance.now();
+    const focusedMs = e.focusedMs + (e.focusSince !== null ? now - e.focusSince : 0);
+    const slot = file && (file.slot || (file.slots && file.slots[0]));
+    const queryActive = !!rawSearchQuery && !searchInvalid;
+    vscode.postMessage({
+        command: "studyEpisode",
+        outcome,
+        method,
+        uri: file ? file.uri : undefined,
+        sinceRevealMs: e.revealedAt === null ? null : now - e.revealedAt,
+        revealedAtEpochMs: e.revealedAtEpoch,
+        focusedMs,
+        startSource: e.startSource,
+        firstActionMs: e.firstActionAt === null ? null : e.firstActionAt - e.startedAt,
+        searchUsed: e.searchEdits > 0 || queryActive,
+        searchEdits: e.searchEdits,
+        queryLength: rawSearchQuery.length,
+        searchToggles: e.searchToggles,
+        searchMatchCount: queryActive && data && data.files ? data.files.filter(fileMatchesSearch).length : 0,
+        targetMatchedSearch: !!(file && queryActive && fileMatchesSearch(file)),
+        tilesHovered: e.hovered.size,
+        magnifierUses: e.magnifierUses,
+        folderDrillIns: e.folderDrillIns,
+        folderBackOuts: e.folderBackOuts,
+        keyboardMoves: e.keyboardMoves,
+        targetCol: slot ? slot[0] : null,
+        targetRow: slot ? slot[1] : null,
+        gridCols: data && data.layout ? data.layout.cols : null,
+        gridRows: data && data.layout ? data.layout.rows : null,
+        folderCardsView: !!(typeof activeRenderGrid !== "undefined" && activeRenderGrid && activeRenderGrid.isFolderCards),
+        // Where the choice was made: the root grid, an opened folder, or a view of folder cards.
+        viewKind: (typeof activeRenderGrid !== "undefined" && activeRenderGrid && activeRenderGrid.isFolderCards) ? "cards" : (focusedFolder ? "folder" : "root"),
+        focusedFolderDepth: focusedFolder ? focusedFolder.split("/").filter(Boolean).length : 0,
+        fileCount: data && data.files ? data.files.length : 0
+    });
+}
+
 function postSwitchAway(msg) {
+    // studyMethod: how the target was chosen ("keyboard", "view_band"; default a click).
+    const { studyMethod, ...hostMsg } = msg;
+    endStudyEpisode(msg.command === "jump" ? "jump" : "switch_tab", studyMethod || "click", fileByUri.get(msg.uri) || null);
+    msg = hostMsg;
     switchingAway = true;
     if (switchFreezeTimer) clearTimeout(switchFreezeTimer);
     switchFreezeTimer = setTimeout(endSwitchFreeze, SWITCH_FREEZE_MAX_MS);
@@ -1504,7 +1820,7 @@ function hashString(str) {
 function groupMosaicSignature(group) {
     let members = "";
     for (const f of group.files) {
-        members += `${f.id}|${f.contentVersion}|${f._decoSig}\n`;
+        members += `${f.id}|${f.contentVersion}${f._linesPending ? "p" : ""}|${f._decoSig}\n`;
     }
     const p = group.path;
     const scopeState = data ? JSON.stringify([
@@ -1543,6 +1859,111 @@ function lowerLineText(line) {
     return line._lowerText;
 }
 
+/**
+ * Original-case search text, needed only by Match Case, Whole Word, and regex searches, so it is built
+ * on first use instead of for every file (it was a full extra copy of the workspace's text). Only the
+ * lowercase index (_combinedText) is built eagerly, because plain search is the common case.
+ */
+function combinedOriginalText(f) {
+    if (f._combinedTextOriginal === undefined) {
+        const parts = (f.lines || []).map(line => line.text || "");
+        if (f.fullLines) parts.push(...f.fullLines);
+        f._combinedTextOriginal = parts.join("\n");
+    }
+    return f._combinedTextOriginal;
+}
+
+/** Lowercase copies of a long file's full lines, built on the first search that needs them. */
+function lowerFullLines(f) {
+    if (!f._lowerFullLines) f._lowerFullLines = f.fullLines.map(str => str.toLowerCase());
+    return f._lowerFullLines;
+}
+
+/**
+ * Builds a file's search text (_combinedText, lowercase and original) and line statistics, reusing the
+ * cached index while contentVersion is unchanged. A file whose text is still streaming is indexed by
+ * path only and never cached, so its real text is indexed when it arrives.
+ */
+function indexFileText(f) {
+    const cachedEntry = fileTokenCache.get(f.id);
+    const cached = cachedEntry && f.contentVersion !== undefined && cachedEntry.contentVersion === f.contentVersion
+        ? cachedEntry
+        : null;
+
+    if (cached) {
+        f._combinedText = cached.combinedText;
+        f._avgLineChars = cached.avgLineChars;
+    } else {
+        // One lowercase pass over the joined text instead of one per line: per-line
+        // lowercase copies (_lowerText) are made lazily, only for lines drawn or hovered
+        // while a search is active (see lowerLineText).
+        const textArrOriginal = [];
+        if (f.lines) {
+            for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
+                textArrOriginal.push(f.lines[lIdx].text || "");
+            }
+            let totalChars = 0;
+            let validCount = 0;
+            for (let k = 0; k < Math.min(f.lines.length, 50); k++) {
+                const len = f.lines[k]?.text?.length || 0;
+                if (len > 0) {
+                    totalChars += len;
+                    validCount++;
+                }
+            }
+            f._avgLineChars = validCount > 0 ? Math.min(100, Math.max(10, Math.round(totalChars / validCount))) : 50;
+        }
+        if (f.fullLines) {
+            textArrOriginal.push(...f.fullLines);
+        }
+        const combinedOriginal = textArrOriginal.join("\n");
+        // Same string as lowercasing each part and joining: the path, then every line.
+        const lowerParts = [];
+        if (f.path) lowerParts.push(f.path.toLowerCase());
+        if (textArrOriginal.length > 0) lowerParts.push(combinedOriginal.toLowerCase());
+        f._combinedText = lowerParts.join("\n");
+
+        if (f._linesPending) return;
+        fileTokenCache.set(f.id, {
+            contentVersion: f.contentVersion,
+            combinedText: f._combinedText,
+            avgLineChars: f._avgLineChars
+        });
+    }
+}
+
+/**
+ * Text for files a "data" payload marked pending (see withDeltaLines/streamPendingLines in
+ * extension.ts). Fields: { files: { id, contentVersion, lines: string[], fullLines? }[] }. Applied to
+ * the current data and to a payload deferred by a drag; stale versions are ignored.
+ */
+function applyFileLinesMessage(msg) {
+    if (!Array.isArray(msg.files)) return;
+    let changed = false;
+    const deferred = pendingDataMsg && pendingDataMsg.files ? new Map(pendingDataMsg.files.map(f => [f.id, f])) : null;
+    for (const entry of msg.files) {
+        const f = fileById.get(entry.id);
+        if (f && f._linesPending && f.contentVersion === entry.contentVersion) {
+            f.lines = entry.lines.map(text => ({ text }));
+            f.fullLines = entry.fullLines;
+            delete f._linesPending;
+            indexFileText(f);
+            // Search memos were computed without this text.
+            f._searchGen = -1;
+            f._matchedLinesGen = -1;
+            changed = true;
+        }
+        const d = deferred && deferred.get(entry.id);
+        if (d && d.linesPending && d.contentVersion === entry.contentVersion) {
+            d.lines = entry.lines;
+            d.fullLines = entry.fullLines;
+            delete d.linesPending;
+        }
+    }
+    if (changed) scheduleRender();
+    maybeStartPdfJs();
+}
+
 function applyDataMessage(msg) {
     if (msg.isReflow) {
         userReorderedFileSlots.clear();
@@ -1563,8 +1984,12 @@ function applyDataMessage(msg) {
                 f.slots = saved.slots ? saved.slots.map(s => [...s]) : [[...saved.slot]];
             }
         }
+        // A pin only bridges the payload that may already be in flight when a tile is dropped; the
+        // host's own layout of the new order follows, and must never be overridden for longer.
+        userReorderedFileSlots.clear();
     }
     currentIgnorePatterns = msg.ignorePatterns || [];
+    studyActive = msg.studyActive === true;
     for (const k of Object.keys(optimisticPatternCounts)) {
         if (data.ignorePatternCounts && typeof data.ignorePatternCounts[k] === "number") {
             delete optimisticPatternCounts[k];
@@ -1578,14 +2003,19 @@ function applyDataMessage(msg) {
     if (data && data.files) {
         for (let fIdx = 0; fIdx < data.files.length; fIdx++) {
             const f = data.files[fIdx];
-            if (f.linesOmitted) {
+            if (f.linesOmitted || f.linesPending) {
                 const prev = previousById.get(f.id);
-                if (prev && prev.contentVersion === f.contentVersion && prev.lines) {
+                if (prev && prev.contentVersion === f.contentVersion && prev.lines && !prev._linesPending) {
                     f.lines = prev.lines;
                     f.fullLines = prev.fullLines;
+                } else if (f.linesPending) {
+                    // Text follows in "fileLines" chunks (applyFileLinesMessage); the tile is placed now.
+                    f.lines = [];
+                    f._linesPending = true;
                 } else {
                     missingLines.push(f.id);
                 }
+                delete f.linesPending;
             } else if (f.lines && f.lines.length > 0 && typeof f.lines[0] === "string") {
                 // The host sends lines as plain strings (a fraction of the size and clone time of
                 // objects); line objects carry the per-line render caches (_tokens, _htmlCache).
@@ -1599,57 +2029,7 @@ function applyDataMessage(msg) {
             fileById.set(f.id, f);
             fileByUri.set(f.uri, f);
             f._lowerPath = f.path ? f.path.toLowerCase() : "";
-            const lang = detectLang(f.path);
-
-            const cachedEntry = fileTokenCache.get(f.id);
-            const cached = cachedEntry && f.contentVersion !== undefined && cachedEntry.contentVersion === f.contentVersion
-                ? cachedEntry
-                : null;
-
-            if (cached) {
-                f._combinedText = cached.combinedText;
-                f._combinedTextOriginal = cached.combinedTextOriginal;
-                f._avgLineChars = cached.avgLineChars;
-                f._lowerFullLines = cached.lowerFullLines;
-            } else {
-                // One lowercase pass over the joined text instead of one per line: per-line
-                // lowercase copies (_lowerText) are made lazily, only for lines drawn or hovered
-                // while a search is active (see lowerLineText).
-                const textArrOriginal = [];
-                if (f.lines) {
-                    for (let lIdx = 0; lIdx < f.lines.length; lIdx++) {
-                        textArrOriginal.push(f.lines[lIdx].text || "");
-                    }
-                    let totalChars = 0;
-                    let validCount = 0;
-                    for (let k = 0; k < Math.min(f.lines.length, 50); k++) {
-                        const len = f.lines[k]?.text?.length || 0;
-                        if (len > 0) {
-                            totalChars += len;
-                            validCount++;
-                        }
-                    }
-                    f._avgLineChars = validCount > 0 ? Math.min(100, Math.max(45, Math.round(totalChars / validCount))) : 65;
-                }
-                if (f.fullLines) {
-                    f._lowerFullLines = f.fullLines.map(str => str.toLowerCase());
-                    textArrOriginal.push(...f.fullLines);
-                }
-                f._combinedTextOriginal = textArrOriginal.join("\n");
-                // Same string as lowercasing each part and joining: the path, then every line.
-                const lowerParts = [];
-                if (f.path) lowerParts.push(f.path.toLowerCase());
-                if (textArrOriginal.length > 0) lowerParts.push(f._combinedTextOriginal.toLowerCase());
-                f._combinedText = lowerParts.join("\n");
-
-                fileTokenCache.set(f.id, {
-                    contentVersion: f.contentVersion,
-                    combinedText: f._combinedText,
-                    combinedTextOriginal: f._combinedTextOriginal,
-                    avgLineChars: f._avgLineChars,
-                    lowerFullLines: f._lowerFullLines
-                });
-            }
+            indexFileText(f);
 
             if (f.slots) {
                 for (const [col, row] of f.slots) {
@@ -1680,6 +2060,7 @@ function applyDataMessage(msg) {
         }
     }
     syncShortcutLegend();
+    syncAutoHiddenChip();
     if (actionsModal && actionsModal.style.display === "block") {
         updateSettingsModalState();
     }
@@ -1687,7 +2068,30 @@ function applyDataMessage(msg) {
         updateIgnoresPopover();
         updateFoldersPopover();
     }
+    keepPendingRootOrder(msg);
     scheduleRender();
+}
+
+// The root order of the last drop, until a payload shows the host has processed it: each drop
+// carries reorderSeq, and the host echoes the last one it processed in every payload (data
+// reorderSeq). An older payload (built before the drop, or before a second quick drop) must not put
+// tiles back where they were. The time limit only guards against a host that never answers.
+const PENDING_REORDER_MAX_MS = 3000;
+let reorderSeq = 0;
+let pendingRootOrder = null;
+let pendingRootWrap = null;
+let pendingRootSince = 0;
+let pendingRootSeq = 0;
+function keepPendingRootOrder(msg) {
+    if (!pendingRootOrder || !data || !data.files) return;
+    const isSpanning = data.mode === "spanning_grid" || data.layoutMode === "spanning_grid";
+    const caughtUp = typeof msg.reorderSeq === "number" && msg.reorderSeq >= pendingRootSeq;
+    if (!isSpanning || msg.isReflow || caughtUp || performance.now() - pendingRootSince > PENDING_REORDER_MAX_MS) {
+        pendingRootOrder = null;
+        return;
+    }
+    data.fileOrder = [...pendingRootOrder];
+    relayoutRootSpanning(pendingRootWrap);
 }
 
 window.addEventListener("message", event => {
@@ -1738,6 +2142,8 @@ window.addEventListener("message", event => {
         // Host signal (onDidChangeViewState): the panel was backgrounded. Retained webviews may be
         // hidden without document.visibilityState changing, so the fast reopen path relies on this.
         panelHiddenByHost = true;
+        // The study visit does not end here: Zen and maximize steps hide the panel briefly. The host
+        // sends "studyVisitEnd" once it stays hidden.
         // The hidden-panel freeze takes over from the click's switch freeze.
         endSwitchFreeze();
         // The one-time banner does not come back with the retained page.
@@ -1748,6 +2154,21 @@ window.addEventListener("message", event => {
         markPanelShown();
         endRevealTransitionBlock();
         ensureVisibleOpacity();
+    }
+
+    if (msg.command === "studyVisitEnd") {
+        // extension.ts: the panel stayed hidden past the flicker window (no fields). A jump already
+        // ended its visit in postSwitchAway, so this only ends visits left without choosing.
+        endStudyEpisode("dismissed", "none", null);
+    }
+
+    if (msg.command === "studyVisitStart") {
+        // extension.ts studyShown: the host showed the panel (no fields).
+        beginStudyEpisode("shown");
+    }
+
+    if (msg.command === "fileLines") {
+        applyFileLinesMessage(msg);
     }
 
     if (msg.command === "data") {
@@ -1880,18 +2301,9 @@ function buildSpanningGridLocal(files, targetAspect = 1.777, folderOrder = null,
     const filesById = new Map(files.map(f => [f.id, f]));
     let orderToIterate = [];
     if (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0) {
-        orderToIterate = [...folderOrder];
-        const seenIds = new Set(folderOrder.filter(Boolean));
-        const newFiles = files.filter(f => !seenIds.has(f.id));
-        let newIdx = 0;
-        for (let i = 0; i < orderToIterate.length && newIdx < newFiles.length; i++) {
-            if (!orderToIterate[i]) {
-                orderToIterate[i] = newFiles[newIdx++].id;
-            }
-        }
-        while (newIdx < newFiles.length) {
-            orderToIterate.push(newFiles[newIdx++].id);
-        }
+        // Files missing from the order fill holes left by removed files, never "" gaps the user left
+        // (fillLayoutHoles, the one stability rule shared with the host).
+        orderToIterate = fillLayoutHoles(folderOrder, files.map(f => f.id), id => allocations[id] || 1, id => spanningHoleCells(id, footprints, flowCells)).order;
     } else {
         orderToIterate = files.map(f => f.id);
     }
@@ -1983,6 +2395,8 @@ let breadcrumbHistoryIndex = 0;
 
 /** Sets focusedFolder, tracks history stack, and triggers breadcrumbs & render update. */
 function setFocusedFolderWithHistory(folder, recordHistory = true) {
+    studyNote(folder ? "drillIn" : "backOut");
+    if (pdfJsState === "wanted" || pdfJsState === "idle") pdfJsUrgent = true;
     const target = folder || "";
     if (recordHistory && target !== breadcrumbHistory[breadcrumbHistoryIndex]) {
         breadcrumbHistory.splice(breadcrumbHistoryIndex + 1);
@@ -2163,24 +2577,17 @@ function doesFolderCollapse(files, folderPath, isSpanning, activeW, activeH) {
         : (getViewportH() - GRID_TOP_MARGIN - GRID_BOTTOM_MARGIN);
     const availW = Math.max(50, canvasW);
     const availH = Math.max(50, canvasH);
-    const minW = (typeof data !== "undefined" && data && typeof data.minCellWidth === "number") ? data.minCellWidth : 60;
-    const minH = (typeof data !== "undefined" && data && typeof data.minCellHeight === "number") ? data.minCellHeight : 40;
+    const minW = (typeof data !== "undefined" && data && typeof data.minCellWidth === "number") ? data.minCellWidth : 40;
+    const minH = (typeof data !== "undefined" && data && typeof data.minCellHeight === "number") ? data.minCellHeight : 28;
     const spanningMode = typeof isSpanning === "boolean"
         ? isSpanning
         : (typeof data !== "undefined" && data && (data.mode === "spanning_grid" || data.layoutMode === "spanning_grid"));
     if (spanningMode) {
         const layout = buildSpanningGridLocal(files, BASE_GRID_ASPECT, null, 0, 0, 60, getCompressionPct(), null, scopeFootprints(`folder:${folderPath}`), scopeFlowCells(`folder:${folderPath}`));
+        // Flow size only: a file growing (drawn taller) never makes a folder collapse into cards.
         const cW = availW / Math.max(1, layout.flowCols || layout.cols);
-        const cH = availH / Math.max(1, layout.rows);
         const flowCH = availH / Math.max(1, layout.flowRows || layout.rows);
-        let hasOverflow = false;
-        for (const p of layout.placements) {
-            if (p.nCells * cH > availH + 1) {
-                hasOverflow = true;
-                break;
-            }
-        }
-        return cW < minW || flowCH < minH || hasOverflow;
+        return cW < minW || flowCH < minH;
     } else {
         const grid = buildStableGrid(files.length, BASE_GRID_ASPECT);
         const cW = availW / Math.max(1, grid.cols);
@@ -2218,12 +2625,44 @@ function drawStatus() {
 }
 
 /** Infers a coarse language id from a file path's extension, used to pick a tokenizer. */
+// File extensions and names per tokenizer family (tokenizeLine). Unknown extensions fall back to js.
+const LANG_BY_EXT = (() => {
+    const map = {};
+    const add = (lang, exts) => exts.split(" ").forEach(e => { map[e] = lang; });
+    add("clike", "go rs java cs c h cpp cc cxx hpp hh hxx kt kts swift scala sc dart m mm zig groovy gradle proto sol cu glsl hlsl frag vert");
+    add("php", "php phtml");
+    add("hash", "yml yaml sh bash zsh fish ksh rb rake gemspec toml r pl pm ps1 psm1 ex exs nix cmake tf tfvars hcl mk dockerfile containerfile jl cr nim coffee");
+    add("dash", "sql lua hs lhs elm purs ada adb ads vhd vhdl");
+    add("ml", "ml mli fs fsi fsx");
+    add("lisp", "clj cljs cljc edn el lisp lsp scm ss rkt fnl");
+    add("percent", "erl hrl tex sty cls bib pro");
+    add("vb", "vb vbs bas frm");
+    return map;
+})();
+const JS_EXTS = new Set(["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"]);
+const JSON_RC_FILES = new Set([".babelrc", ".eslintrc", ".prettierrc", ".stylelintrc", ".swcrc", ".jshintrc", ".lintstagedrc", ".nycrc", ".mocharc"]);
+const HASH_FILES = new Set(["dockerfile", "containerfile", "makefile", "gnumakefile", "gemfile", "rakefile", "procfile", "vagrantfile", "brewfile", ".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"]);
+
+/** detectLang for a file, cached on it (detection per drawn line cost several ms per folder). */
+function fileLang(file) {
+    if (file._langPath !== file.path) {
+        file._lang = detectLang(file.path);
+        file._langPath = file.path;
+    }
+    return file._lang;
+}
+
+/** Picks a tokenizer family for a path by file name, then extension. */
 function detectLang(path) {
     if (!path) return 'plaintext';
     const filename = path.split('/').pop().toLowerCase();
     if (filename === '.gitignore' || filename === 'license' || filename.startsWith('license.')) {
         return 'plaintext';
     }
+    if (JSON_RC_FILES.has(filename)) return 'json';
+    if (HASH_FILES.has(filename) || filename.startsWith('dockerfile.') || filename.endsWith('.dockerfile')) return 'hash';
+    // Other dotfiles named *rc (.npmrc, .vimrc, .yarnrc) are ini or their own formats, not JSON.
+    if (filename.startsWith('.') && filename.endsWith('rc') && !filename.slice(1).includes('.')) return 'plaintext';
     const ext = filename.includes('.') ? filename.split('.').pop() : '';
     if (ext === 'md' || ext === 'markdown' || ext === 'mdx') return 'markdown';
     if (!ext || ext === 'txt' || ext === 'log' || ext === 'conf' || ext === 'ini' || ext === 'env') {
@@ -2231,12 +2670,16 @@ function detectLang(path) {
     }
     if (ext === 'css' || ext === 'scss' || ext === 'less') return 'css';
     if (ext === 'html' || ext === 'htm' || ext === 'xml' || ext === 'svg' || ext === 'vue') return 'html';
-    if (ext === 'json' || ext === 'jsonc' || ext === 'json5' || filename.endsWith('rc') || filename.includes('json')) return 'json';
-    if (ext === 'py') return 'python';
+    if (ext === 'json' || ext === 'jsonc' || ext === 'json5' || ext === 'map') return 'json';
+    if (ext === 'py' || ext === 'pyi') return 'python';
+    if (LANG_BY_EXT[ext]) return LANG_BY_EXT[ext];
+    // Names like package.json.bak or composer.json.tmpl hold JSON; source files that merely mention
+    // json in their name (json_utils.py, jsonParser.ts) never get here.
+    if (!JS_EXTS.has(ext) && filename.includes('json')) return 'json';
     return 'js';
 }
 
-/** Dispatches to one of five small regex-based tokenizers by detected language. */
+/** Dispatches to a small regex-based tokenizer by detected language family. */
 function tokenizeLine(text, lang) {
     if (!text) return [];
     if (lang === 'plaintext') return [{ text, category: 'normal', isKey: false }];
@@ -2244,20 +2687,21 @@ function tokenizeLine(text, lang) {
     if (lang === 'css') return tokenizeCSS(text);
     if (lang === 'html') return tokenizeHTML(text);
     if (lang === 'json') return tokenizeJSON(text);
+    if (FAMILY_TOKENIZERS[lang]) return tokenizeFamily(text, FAMILY_TOKENIZERS[lang]);
     return tokenizeJS(text, lang);
 }
 
 /** Tokenizes a line of JSON into colorable spans, marking string tokens that precede a ':' as object keys. */
 function tokenizeJSON(text) {
     const tokens = [];
-    const regex = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}()\[\]:,]|\s+|.)/g;
+    const regex = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*(?:"|$)|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}()\[\]:,]|\s+|.)/g;
     let match;
     while ((match = regex.exec(text)) !== null) {
         const val = match[0];
         let cat = "normal";
         if (val.startsWith("//") || val.startsWith("/*")) {
             cat = "comment";
-        } else if (val.startsWith('"') && val.endsWith('"') && val.length > 1) {
+        } else if (val.startsWith('"')) {
             cat = "string";
         } else if (/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(val)) {
             cat = "number";
@@ -2437,8 +2881,8 @@ function tokenizeJS(text, lang) {
     const isJson = lang === 'json';
     const isPy = lang === 'python';
     const regex = isPy
-        ? /(#.*|\/\*[\s\S]*?\*\/|"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:class|def|lambda|import|from|as|if|elif|else|for|while|return|try|except|finally|raise|with|yield|pass|break|continue|and|or|not|in|is|True|False|None|self|async|await|global|nonlocal)\b|\b\d+\b|[+\-*\/%=<>!&|^~:@]+|\w+|\s+|.)/g
-        : /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|this|self|import|export|from|using|require|if|else|elif|for|while|return|switch|case|break|continue|try|catch|finally|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace|new|null|undefined|true|false|typeof|instanceof)\b|\b\d+\b|[+\-*\/%=<>!&|^~:]+|\w+|\s+|.)/g;
+        ? /(#.*|\/\*[\s\S]*?\*\/|"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|\b(?:class|def|lambda|import|from|as|if|elif|else|for|while|return|try|except|finally|raise|with|yield|pass|break|continue|and|or|not|in|is|True|False|None|self|async|await|global|nonlocal)\b|\b\d+\b|[+\-*\/%=<>!&|^~:@]+|\w+|\s+|.)/g
+        : /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|`(?:\\.|[^`\\])*(?:`|$)|\b(?:class|interface|struct|impl|type|enum|function|def|fn|func|const|let|var|this|self|import|export|from|using|require|if|else|elif|for|while|return|switch|case|break|continue|try|catch|finally|public|private|protected|async|await|void|int|float|double|char|string|boolean|bool|any|number|package|module|namespace|new|null|undefined|true|false|typeof|instanceof)\b|\b\d+\b|[+\-*\/%=<>!&|^~:]+|\w+|\s+|.)/g;
 
     let match;
     const tokens = [];
@@ -2446,9 +2890,7 @@ function tokenizeJS(text, lang) {
         const val = match[0];
         let cat = "normal";
         if (val.startsWith("//") || (isPy && val.startsWith("#")) || val.startsWith("/*")) { cat = "comment"; }
-        else if ((val.startsWith('"') && val.endsWith('"') && val.length > 1) ||
-            (val.startsWith("'") && val.endsWith("'") && val.length > 1) ||
-            (val.startsWith("`") && val.endsWith("`") && val.length > 1) ||
+        else if (val.startsWith('"') || val.startsWith("'") || val.startsWith("`") ||
             val.startsWith('"""') || val.startsWith("'''")) { cat = "string"; }
         else if (/^\d+$/.test(val)) { cat = "number"; }
         else if (/^(if|else|elif|for|while|return|switch|case|break|continue|try|catch|except|finally|raise|with|yield|pass|and|or|not|in|is)$/.test(val)) { cat = "control-flow"; }
@@ -2467,6 +2909,11 @@ function tokenizeJS(text, lang) {
         }
     }
 
+    return annotateTokens(tokens, isJson);
+}
+
+/** Second pass shared by the code tokenizers: property access, calls and declarations, object keys. */
+function annotateTokens(tokens, isJson) {
     for (let i = 0; i < tokens.length; i++) {
         // Property access: word after .
         if (tokens[i].text === "." && i + 1 < tokens.length &&
@@ -2500,6 +2947,94 @@ function tokenizeJS(text, lang) {
         }
     }
     return tokens;
+}
+
+const words = list => new Set(list.split(" "));
+/**
+ * Tokenizer families beyond JS/Python: one regex per family (comments and strings first, so their
+ * contents never color as code) plus keyword sets. Comments are `#` (hash), `--` (dash), or C-style.
+ */
+const FAMILY_TOKENIZERS = {
+    clike: {
+        regex: /(\/\/.*|\/\*[\s\S]*?(?:\*\/|$)|^\s*#\s*[a-z]+\b.*|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\]){1,2}'|`(?:\\.|[^`\\])*(?:`|$)|\b0[xX][0-9a-fA-F]+\b|\b\d+(?:\.\d+)?[a-zA-Z]*\b|[+\-*\/%=<>!&|^~:?]+|\w+|\s+|.)/g,
+        comment: v => v.startsWith("//") || v.startsWith("/*"),
+        directive: v => /^\s*#/.test(v),
+        control: words("if else for foreach while do return switch case default break continue goto try catch finally throw throws match loop when guard defer select go yield await"),
+        keywords: words("class interface struct impl trait enum union type typedef fn func fun function def val var let const mut static final abstract virtual override sealed readonly volatile extern inline unsafe pub public private protected internal package import use using namespace module mod crate extends implements where new delete this self super null nil none true false void int long short float double char bool boolean string byte auto unsigned signed sizeof async chan map range object companion data operator constexpr template typename"),
+    },
+    php: {
+        regex: /(\/\/.*|#(?!\[).*|\/\*[\s\S]*?(?:\*\/|$)|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|<\?php|\?>|\$\w+|\b\d+(?:\.\d+)?\b|[+\-*\/%=<>!&|^~:?.]+|\w+|\s+|.)/g,
+        comment: v => v.startsWith("//") || v.startsWith("#") || v.startsWith("/*"),
+        directive: v => v === "<?php" || v === "?>",
+        variable: v => v.startsWith("$"),
+        control: words("if else elseif for foreach while do return switch case default break continue try catch finally throw match yield"),
+        keywords: words("class interface trait enum function fn const var public private protected static abstract final readonly namespace use extends implements new echo print require require_once include include_once null true false self parent array callable"),
+    },
+    hash: {
+        regex: /(#.*|"(?:\\.|[^"\\])*(?:"|$)|(?<![\w])'[^']*(?:'|$)|\$\{[^}]*\}?|\$\w+|\b\d+(?:\.\d+)?\b|[+\-*\/%=<>!&|^~:]+|[\w-]+|\s+|.)/g,
+        comment: v => v.startsWith("#"),
+        variable: v => v.startsWith("$"),
+        control: words("if then else elif fi for in do done while until case esac return unless begin rescue ensure yield break next continue and or not when"),
+        keywords: words("function local export source alias declare readonly def class module end require require_relative include extend self nil true false yes no null lambda proc attr_reader attr_accessor"),
+    },
+    ml: {
+        regex: /(\(\*[\s\S]*?(?:\*\)|$)|\/\/.*|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\]){1,2}'|\b\d+(?:\.\d+)?\b|[+\-*\/%=<>!&|^~:?.@]+|\w+'*|\s+|.)/g,
+        comment: v => v.startsWith("(*") || v.startsWith("//"),
+        control: words("if then else elif match with when for while do done to downto try finally raise yield return begin end"),
+        keywords: words("let rec in fun function type of module struct sig open val mutable and or not new member static abstract override interface namespace true false null unit"),
+    },
+    lisp: {
+        regex: /(;.*|"(?:\\.|[^"\\])*(?:"|$)|#?\(|\)|\b-?\d+(?:\.\d+)?\b|:[\w\-*?!<>=\/.+]+|[\w\-*?!<>=\/.+]+|\s+|.)/g,
+        comment: v => v.startsWith(";"),
+        variable: v => v.startsWith(":"),
+        control: words("if when unless cond case and or not loop recur do let let* try catch finally throw"),
+        keywords: words("defn defn- def defmacro defun defvar defparameter define lambda fn ns require import use quote nil true false t"),
+    },
+    percent: {
+        regex: /(%.*|"(?:\\.|[^"\\])*(?:"|$)|\\[a-zA-Z]+|\b\d+(?:\.\d+)?\b|[+\-*\/=<>!|^~:.]+|\w+|\s+|.)/g,
+        comment: v => v.startsWith("%"),
+        directive: v => v.startsWith("\\"),
+        control: words("if case of receive after when end try catch throw begin"),
+        keywords: words("fun module export import record define include spec type true false"),
+    },
+    vb: {
+        regex: /('.*|\bREM\b.*|"(?:""|[^"])*(?:"|$)|\b\d+(?:\.\d+)?\b|[+\-*\/=<>&^\\.]+|\w+|\s+|.)/gi,
+        comment: v => v.startsWith("'") || /^rem\b/i.test(v),
+        caseInsensitive: true,
+        control: words("if then else elseif end for each next while wend do loop until select case return exit try catch finally throw and or not"),
+        keywords: words("dim as sub function class module public private protected friend shared static const new set get let property byval byref nothing true false integer string boolean double object imports namespace"),
+    },
+    dash: {
+        regex: /(--.*|\/\*[\s\S]*?(?:\*\/|$)|'(?:''|\\.|[^'\\])*(?:'|$)|"(?:\\.|[^"\\])*(?:"|$)|\b\d+(?:\.\d+)?\b|[+\-*\/%=<>!|~^.]+|\w+|\s+|.)/g,
+        comment: v => v.startsWith("--") || v.startsWith("/*"),
+        caseInsensitive: true,
+        control: words("if then else elseif end for while repeat until return break case when and or not in is exists"),
+        keywords: words("select from where join left right inner outer full cross on group by order having limit offset insert into values update set delete create alter drop table view index primary key foreign references unique default constraint as distinct union all with begin commit rollback grant revoke null true false local function nil"),
+    },
+};
+
+/** Tokenizes one line with a FAMILY_TOKENIZERS entry, then runs the shared annotateTokens pass. */
+function tokenizeFamily(text, family) {
+    const tokens = [];
+    family.regex.lastIndex = 0;
+    let match;
+    while ((match = family.regex.exec(text)) !== null) {
+        const val = match[0];
+        const word = family.caseInsensitive ? val.toLowerCase() : val;
+        let cat = "normal";
+        if (family.comment(val)) cat = "comment";
+        else if (family.directive && family.directive(val)) cat = "keyword";
+        // A lone quote (a Rust lifetime, an apostrophe in YAML or shell text) is not a string.
+        else if ((val[0] === '"' || val[0] === "'" || val[0] === "`") && val.length > 1) cat = "string";
+        else if (family.variable && family.variable(val)) cat = "variable";
+        else if (/^\d/.test(val)) cat = "number";
+        else if (family.control.has(word)) cat = "control-flow";
+        else if (family.keywords.has(word)) cat = "keyword";
+        else if (/^[+\-*\/%=<>!&|^~:?.]+$/.test(val)) cat = "operator";
+        else if (/^[\w-]+$/.test(val)) cat = /^[A-Z]/.test(val) ? "type" : "variable";
+        tokens.push({ text: val, category: cat, isKey: false });
+    }
+    return annotateTokens(tokens, false);
 }
 
 /** Maps a token's syntax category (and isKey flag) to the hex color used to draw it. */
@@ -2543,17 +3078,19 @@ function drawAspectFit(ctx, img, x, y, w, h, bgStyle = null) {
 
 const THUMBNAIL_MAX_LINE_PITCH = 16;
 const THUMBNAIL_MAX_LINE_CHARS = 100;
-const THUMBNAIL_MIN_AVG_CHARS = 45;
-const THUMBNAIL_DEFAULT_AVG_CHARS = 65;
+const THUMBNAIL_TARGET_READABLE_CHARS = 80;
+const THUMBNAIL_MIN_TARGET_CHARS = 20;
+const THUMBNAIL_DEFAULT_TARGET_CHARS = 50;
 const THUMBNAIL_SAMPLE_LINE_LIMIT = 50;
-const THUMBNAIL_WIDTH_BUDGET_FACTOR = 0.92;
+const THUMBNAIL_WIDTH_BUDGET_FACTOR = 0.95;
 const THUMBNAIL_CHAR_ASPECT_RATIO = 0.58;
 const THUMBNAIL_LINE_HEIGHT_RATIO = 0.88;
 const THUMBNAIL_MAX_FONT_SIZE = 13;
 const THUMBNAIL_MIN_FONT_SIZE = 3.2;
 const THUMBNAIL_MIN_TEXT_PITCH = 1.5;
-const THUMBNAIL_MIN_READABLE_FONT_SIZE = 6.0;
-const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 5.0;
+const THUMBNAIL_MIN_READABLE_FONT_SIZE = 8.0;
+const THUMBNAIL_MIN_READABLE_TEXT_PITCH = 8.0;
+const THUMBNAIL_MIN_READABLE_WIDTH = 45;
 
 const monospaceCharWidthCache = new Map();
 function getMonospaceCharWidth(fontSize) {
@@ -2573,12 +3110,16 @@ const THUMBNAIL_LINE_WIDTH_RATIO = 0.7;
 const THUMBNAIL_TEXT_VERTICAL_RATIO = 0.85;
 const THUMBNAIL_TEXT_FONT_RATIO = 0.95;
 const THUMBNAIL_BLOCK_MIN_HEIGHT = 0.7;
-const THUMBNAIL_SEARCH_MATCH_HEIGHT = 2.0;
+const THUMBNAIL_SEARCH_MATCH_HEIGHT = 3.5;
+const THUMBNAIL_SEARCH_GUTTER_WIDTH = 3.5;
+const THUMBNAIL_SEARCH_RULER_WIDTH = 4.0;
 const THUMBNAIL_GIT_LINE_MIN_HEIGHT = 1.5;
 const THUMBNAIL_GIT_GUTTER_WIDTH = 2.5;
 const THUMBNAIL_GIT_DELETED_HEIGHT = 2.0;
 const THUMBNAIL_VIEWPORT_MIN_HEIGHT = 4.0;
 
+// Filled from the theme by applyDecorationThemeColors (the editor's own gutter and error colors, so
+// tiles match the editor, light, and high-contrast themes); these literals are only fallbacks.
 const GIT_STYLES = {
     modifiedBg: "rgba(59, 130, 246, 0.14)",
     modifiedGutter: "rgba(59, 130, 246, 0.75)",
@@ -2595,6 +3136,28 @@ const ERROR_STYLES = {
     badgeError: "#ef4444",
 };
 
+/** Re-reads git and error decoration colors from the theme into GIT_STYLES and ERROR_STYLES (in place). */
+function applyDecorationThemeColors() {
+    const modified = getThemeColor("--vscode-editorGutter-modifiedBackground", "#3b82f6");
+    const added = getThemeColor("--vscode-editorGutter-addedBackground", "#22c55e");
+    const deleted = getThemeColor("--vscode-editorGutter-deletedBackground", "#ef4444");
+    const error = getThemeColor("--vscode-editorError-foreground", "#ef4444");
+    Object.assign(GIT_STYLES, {
+        modifiedBg: withAlpha(modified, 0.14),
+        modifiedGutter: withAlpha(modified, 0.75),
+        addedBg: withAlpha(added, 0.14),
+        addedGutter: withAlpha(added, 0.75),
+        deletedLine: withAlpha(deleted, 0.85),
+        badgeModified: modified,
+        badgeAdded: added
+    });
+    Object.assign(ERROR_STYLES, {
+        errorBg: withAlpha(error, 0.22),
+        errorGutter: withAlpha(error, 0.85),
+        badgeError: error
+    });
+}
+
 const THEME_COLORS = {
     tileBackground: getThemeColor("--vscode-editor-background", "#1e1e24"),
     imageTileBackground: getThemeColor("--vscode-editorWidget-background", "#252526"),
@@ -2602,10 +3165,12 @@ const THEME_COLORS = {
     pdfHeaderBar: getThemeColor("--vscode-badge-background", "#4d4d4d"),
     pdfHeaderForeground: getThemeColor("--vscode-badge-foreground", "#ffffff"),
     pdfPlaceholderLine: getThemeColor("--vscode-widget-border", "rgba(255, 255, 255, 0.25)"),
-    searchMatchHighlight: withAlpha(ACCENT_SEARCH, 0.28),
+    searchMatchHighlight: withAlpha(ACCENT_SEARCH, 0.48),
     activeFocusHighlight: getThemeColor("--vscode-focusBorder", "#007fd4"),
     viewportBandOverlay: "rgba(255, 255, 255, 0.08)",
 };
+
+applyDecorationThemeColors();
 
 const PDF_PREVIEW = {
     barHeight: 14,
@@ -2621,6 +3186,250 @@ const PDF_PREVIEW = {
 };
 
 // MARK: drawThumbnail
+// pdf.js is optional and about 1.7 MB with its worker, so it never runs on the first-open path. It
+// loads after the first reveal, once streamed text has arrived, when the page is idle; hovering a
+// PDF or drilling into a folder may start it sooner, still after the reveal. Until then PDF tiles
+// show their placeholder. Both files are ES modules (media/pdfjs/, pdf.js 6), loaded as nonce'd
+// module scripts.
+function textStreamPending() {
+    return !!pendingDataMsg || !!(data && data.files && data.files.some(f => f._linesPending));
+}
+/** A PDF tile was drawn (urgent: the user hovered a PDF or drilled into a folder). */
+function requestPdfJs(urgent) {
+    if (!window.PDF_JS_URI || pdfJsState === "ready" || pdfJsState === "failed") return;
+    if (urgent) pdfJsUrgent = true;
+    if (pdfJsState === "idle") pdfJsState = "wanted";
+    maybeStartPdfJs();
+}
+/** Called whenever a condition may have cleared: a PDF was drawn, the first reveal, a text chunk. */
+const PDF_STREAM_WAIT_MAX_MS = 3000;
+let pdfStreamWaitTimer = null;
+function maybeStartPdfJs() {
+    if (pdfJsState !== "wanted" || !hasRevealedOnce) return;
+    if (!pdfJsUrgent && textStreamPending()) {
+        // The text stream normally ends within a second or two; a file whose text never arrives
+        // must not keep PDF previews from ever loading.
+        if (!pdfStreamWaitTimer) {
+            pdfStreamWaitTimer = setTimeout(() => {
+                pdfJsUrgent = true;
+                maybeStartPdfJs();
+            }, PDF_STREAM_WAIT_MAX_MS);
+        }
+        return;
+    }
+    pdfJsState = "scheduled";
+    whenIdle(loadPdfJs);
+}
+/** The idle callback loadPdfJs and the PDF page queue use, with a timer fallback. */
+function whenIdle(callback) {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(callback, { timeout: 2000 });
+    else setTimeout(callback, 200);
+}
+// First pages render one at a time, each in an idle slot: the page's own share (loading, drawing the
+// canvas, encoding the snapshot) stays small, and so does parsing when the worker fell back to this thread.
+let pdfPageQueue = Promise.resolve();
+function queuePdfFirstPage(mediaUri) {
+    pdfPageQueue = pdfPageQueue.then(() => new Promise(resolve => whenIdle(resolve))).then(() => {
+        // pdf.js 6 never compiles code at runtime (the webview CSP has no 'unsafe-eval' either). No
+        // wasmUrl: WebAssembly would need 'wasm-unsafe-eval', so JPEG 2000 images inside a PDF are skipped.
+        const loadingTask = pdfjsLib.getDocument({ url: mediaUri, withCredentials: false });
+        return loadingTask.promise.then(pdf => pdf.getPage(1)).then(page => {
+            const viewport = page.getViewport({ scale: 0.5 });
+            const pdfCanvas = document.createElement("canvas");
+            pdfCanvas.width = viewport.width;
+            pdfCanvas.height = viewport.height;
+            return page.render({ canvasContext: pdfCanvas.getContext("2d"), viewport }).promise.then(() => {
+                const img = new Image();
+                img.onload = () => {
+                    imageCache[mediaUri] = img;
+                    scheduleRender();
+                };
+                img.onerror = () => {
+                    imageCache[mediaUri] = "error";
+                };
+                img.src = pdfCanvas.toDataURL("image/jpeg", 0.7);
+            });
+        });
+    }).catch(err => {
+        console.error("PDF RENDER ERROR:", err);
+        reportPdf("warn", `page 1 could not be rendered: ${err && err.message ? err.message : err}`);
+        imageCache[mediaUri] = "error";
+    });
+}
+
+const PDF_WORKER_START_TIMEOUT_MS = 3000;
+/**
+ * Reports a PDF preview stage to the Thumbview output channel (extension.ts "pdfStatus"
+ * { level: "info" | "warn", text }), so a missing preview comes with its reason in user reports.
+ */
+function reportPdf(level, text) {
+    const message = text instanceof Error ? text.message : (text && text.type ? `${text.type} event` : String(text));
+    vscode.postMessage({ command: "pdfStatus", level, text: message.slice(0, 300) });
+}
+/**
+ * Starts pdf.js's worker off this thread. A webview cannot start a Worker from a resource URL (another
+ * origin), but it can from a blob: URL (CSP worker-src blob:) holding the fetched source. pdf.js does
+ * not check that a supplied port works, so this waits for the worker's own "ready" message; it
+ * rejects on an error or silence, and loadPdfJs falls back to running the worker on this thread.
+ */
+function startPdfWorker() {
+    return fetch(window.PDF_WORKER_URI).then(response => {
+        if (!response.ok) throw new Error(`pdf.js worker: HTTP ${response.status}`);
+        return response.text();
+    }).then(source => new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+        const worker = new Worker(url, { type: "module" });
+        const fail = err => {
+            clearTimeout(timer);
+            worker.terminate();
+            URL.revokeObjectURL(url);
+            reject(err);
+        };
+        const timer = setTimeout(() => fail(new Error("pdf.js worker did not start")), PDF_WORKER_START_TIMEOUT_MS);
+        worker.addEventListener("error", fail, { once: true });
+        worker.addEventListener("message", () => {
+            clearTimeout(timer);
+            worker.removeEventListener("error", fail);
+            resolve(worker);
+        }, { once: true });
+    }));
+}
+function loadPdfJs() {
+    pdfJsState = "loading";
+    const loadModule = src => new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.type = "module";
+        // The CSP allows only nonce'd scripts (no script-src host), so this one needs it too.
+        if (window.PDF_JS_NONCE) script.nonce = window.PDF_JS_NONCE;
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+    });
+    loadModule(window.PDF_JS_URI)
+        .then(() => startPdfWorker().catch(err => {
+            console.warn("Thumbview: PDF previews render on the page's thread:", err);
+            reportPdf("warn", `worker did not start (${err && err.message ? err.message : err && err.type ? `${err.type} event` : err}); rendering on the page's thread`);
+            return null;
+        }))
+        .then(worker => {
+            if (worker) {
+                pdfjsLib.GlobalWorkerOptions.workerPort = worker;
+                return;
+            }
+            // Fallback: the worker module defines globalThis.pdfjsWorker, which pdf.js then runs on
+            // this thread (its own fallback imports the worker without the nonce, which the CSP blocks).
+            pdfjsLib.GlobalWorkerOptions.workerSrc = window.PDF_WORKER_URI;
+            return window.pdfjsWorker ? undefined : loadModule(window.PDF_WORKER_URI);
+        })
+        .then(() => {
+            pdfJsState = "ready";
+            reportPdf("info", `pdf.js ${pdfjsLib.version || ""} loaded (${pdfjsLib.GlobalWorkerOptions.workerPort ? "worker thread" : "page thread"})`);
+            scheduleRender();
+        })
+        .catch(err => {
+            pdfJsState = "failed";
+            reportPdf("warn", `pdf.js could not load: ${err && err.message ? err.message : err && err.type ? `${err.type} event (script blocked or missing)` : err}`);
+        });
+}
+
+/** True when sampled line i of the file (or any full line it stands for) matches the current search. */
+function sampledLineMatches(file, lines, i) {
+    const line = lines[i];
+    const lineText = line?.text || "";
+    if (!rawSearchQuery || searchInvalid || !lineText) return false;
+    if (file.fullLines && file.lineCount > lines.length) {
+        const step = file.lineCount / lines.length;
+        const startLineIdx = Math.floor(i * step);
+        const endLineIdx = Math.min(Math.floor((i + 1) * step), file.fullLines.length);
+        for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
+            const orig = file.fullLines[fullI];
+            const lower = lowerFullLines(file)[fullI];
+            if (textMatches(orig, lower)) return true;
+        }
+        return false;
+    }
+    return textMatches(lineText, lowerLineText(line));
+}
+
+/** Indices of the file's sampled lines that match the current search, memoized per search state. */
+function matchedLineIndices(file) {
+    if (file._matchedLinesGen === searchGeneration) return file._matchedLines;
+    const lines = file.lines || [];
+    const result = [];
+    if (fileMatchesSearch(file)) {
+        for (let i = 0; i < lines.length; i++) {
+            if (sampledLineMatches(file, lines, i)) result.push(i);
+        }
+    }
+    file._matchedLinesGen = searchGeneration;
+    file._matchedLines = result;
+    return result;
+}
+
+/**
+ * Resolves search match targets for a file as exact real line numbers and sampled visual line indices.
+ * Memoized per search generation and fullLines state.
+ */
+function getSearchTargetsForFile(file) {
+    if (!rawSearchQuery || searchInvalid || !file || !fileMatchesSearch(file)) return [];
+    const hasFullLines = !!(file.fullLines && file.fullLines.length > 0);
+    if (file._searchTargetsGen === searchGeneration && file._searchTargets && file._searchTargetsHasFullLines === hasFullLines) {
+        return file._searchTargets;
+    }
+    const lines = file.lines || [];
+    if (lines.length === 0) return [];
+    const sampledIndices = matchedLineIndices(file);
+    if (sampledIndices.length === 0) return [];
+
+    const isSampled = !!(file.lineCount && file.lineCount > lines.length);
+    const targets = [];
+    const seenLines = new Set();
+
+    if (isSampled && hasFullLines) {
+        const step = file.lineCount / lines.length;
+        const lower = lowerFullLines(file);
+        for (const s of sampledIndices) {
+            const startLineIdx = Math.floor(s * step);
+            const endLineIdx = Math.min(Math.floor((s + 1) * step), file.fullLines.length);
+            for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
+                const orig = file.fullLines[fullI];
+                const low = lower ? lower[fullI] : (orig ? orig.toLowerCase() : "");
+                if (textMatches(orig, low)) {
+                    if (!seenLines.has(fullI)) {
+                        seenLines.add(fullI);
+                        targets.push({
+                            fileUri: file.uri,
+                            sampledIdx: s,
+                            realLineIdx: fullI
+                        });
+                    }
+                }
+            }
+        }
+    } else {
+        const stride = isSampled ? file.lineCount / lines.length : 1;
+        for (const s of sampledIndices) {
+            const realLineIdx = isSampled
+                ? Math.max(0, Math.min(file.lineCount - 1, Math.floor(s * stride)))
+                : s;
+            if (!seenLines.has(realLineIdx)) {
+                seenLines.add(realLineIdx);
+                targets.push({
+                    fileUri: file.uri,
+                    sampledIdx: s,
+                    realLineIdx
+                });
+            }
+        }
+    }
+
+    file._searchTargetsGen = searchGeneration;
+    file._searchTargetsHasFullLines = hasFullLines;
+    file._searchTargets = targets;
+    return targets;
+}
+
 /**
  * Draws one file's thumbnail into the given cell rect, one row per source line scaled to
  * fit the cell height (stepY).
@@ -2663,57 +3472,9 @@ function drawThumbnail(file, x, y, w, h) {
             if (!imageCache[file.mediaUri]) {
                 if (typeof pdfjsLib !== "undefined") {
                     imageCache[file.mediaUri] = "loading";
-                    if (window.PDF_WORKER_URI) {
-                        pdfjsLib.GlobalWorkerOptions.workerSrc = window.PDF_WORKER_URI;
-                    }
-                    const loadingTask = pdfjsLib.getDocument({
-                        url: file.mediaUri,
-                        withCredentials: false,
-                        // The webview CSP has no 'unsafe-eval'; pdf.js must not compile font
-                        // programs with new Function (it falls back to its interpreter).
-                        isEvalSupported: false
-                    });
-                    loadingTask.promise.then(pdf => {
-                        return pdf.getPage(1);
-                    }).then(page => {
-                        const viewport = page.getViewport({ scale: 0.5 });
-                        const pdfCanvas = document.createElement("canvas");
-                        const pdfCtx = pdfCanvas.getContext("2d");
-                        pdfCanvas.width = viewport.width;
-                        pdfCanvas.height = viewport.height;
-                        const renderContext = {
-                            canvasContext: pdfCtx,
-                            viewport: viewport
-                        };
-                        return page.render(renderContext).promise.then(() => {
-                            const img = new Image();
-                            img.onload = () => {
-                                imageCache[file.mediaUri] = img;
-                                render();
-                            };
-                            img.onerror = () => {
-                                imageCache[file.mediaUri] = "error";
-                            };
-                            img.src = pdfCanvas.toDataURL("image/jpeg", 0.7);
-                        });
-                    }).catch(err => {
-                        console.error("PDF RENDER ERROR:", err);
-                        imageCache[file.mediaUri] = "error";
-                    });
-                } else if (window.PDF_JS_URI && !window._pdfJsLoading) {
-                    window._pdfJsLoading = true;
-                    const script = document.createElement("script");
-                    // The CSP allows only nonce'd scripts (no script-src host), so this one needs it too.
-                    if (window.PDF_JS_NONCE) script.nonce = window.PDF_JS_NONCE;
-                    script.src = window.PDF_JS_URI;
-                    script.onload = () => {
-                        window._pdfJsLoading = false;
-                        render();
-                    };
-                    script.onerror = () => {
-                        window._pdfJsLoading = false;
-                    };
-                    document.head.appendChild(script);
+                    queuePdfFirstPage(file.mediaUri);
+                } else {
+                    requestPdfJs(false);
                 }
             }
             const cachedPdfImg = imageCache[file.mediaUri];
@@ -2745,182 +3506,214 @@ function drawThumbnail(file, x, y, w, h) {
         return;
     }
 
-function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, useText, fontSize, stepY) {
-    const lines = file.lines || [];
-    const maxLineChars = THUMBNAIL_MAX_LINE_CHARS;
+    /**
+     * Search highlights drawn on the main canvas over a cached tile raster, so rasters stay valid while
+     * the query changes (one keystroke used to re-rasterize every visible tile). The translucent band goes
+     * over the raster, so a match still reads as a match on a line that also has a git or error
+     * background (drawn under it, it was blended into those), then the solid gutter mark.
+     */
+    function drawSearchLineBands(file, x, y, w, h, stepY) {
+        const indices = matchedLineIndices(file);
+        if (indices.length === 0) return;
+        const bandH = Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT);
+        const rightX = x + w - THUMBNAIL_SEARCH_RULER_WIDTH;
 
-    if (useText) {
-        targetCtx.font = `${fontSize}px Consolas, "Courier New", monospace`;
+        // Translucent highlight band across the code thumbnail
+        ctx.fillStyle = THEME_COLORS.searchMatchHighlight;
+        for (const i of indices) {
+            const top = y + i * stepY;
+            if (top >= y + h) break;
+            ctx.fillRect(x, top, w, Math.min(bandH, y + h - top));
+        }
+
+        // High-contrast solid markers: left gutter mark and right-edge overview ruler tick
+        ctx.fillStyle = ACCENT_SEARCH;
+        for (const i of indices) {
+            const top = y + i * stepY;
+            if (top >= y + h) break;
+            const curH = Math.min(bandH, y + h - top);
+            ctx.fillRect(x, top, THUMBNAIL_SEARCH_GUTTER_WIDTH, curH);
+            ctx.fillRect(rightX, top, THUMBNAIL_SEARCH_RULER_WIDTH, curH);
+        }
     }
 
-    const charWidth = useText ? getMonospaceCharWidth(fontSize) : 0;
+    function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, useText, fontSize, stepY, bakeSearch = true) {
+        const lines = file.lines || [];
+        const maxLineChars = THUMBNAIL_MAX_LINE_CHARS;
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const lineText = line?.text || "";
+        if (useText) {
+            targetCtx.font = `${fontSize}px Consolas, "Courier New", monospace`;
+        }
 
-        let isMatchedLine = false;
-        if (rawSearchQuery && !searchInvalid && lineText) {
-            if (file.fullLines && file.lineCount > lines.length) {
-                const step = file.lineCount / lines.length;
-                const startLineIdx = Math.floor(i * step);
-                const endLineIdx = Math.min(Math.floor((i + 1) * step), file.fullLines.length);
-                for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
-                    const orig = file.fullLines[fullI];
-                    const lower = file._lowerFullLines ? file._lowerFullLines[fullI] : orig.toLowerCase();
-                    if (textMatches(orig, lower)) {
-                        isMatchedLine = true;
-                        break;
+        const charWidth = useText ? getMonospaceCharWidth(fontSize) : 0;
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const lineText = line?.text || "";
+
+            const isMatchedLine = bakeSearch && sampledLineMatches(file, lines, i);
+
+            let isErrorLine = false;
+            if (file.errorLines) {
+                if (file.lineCount && file.lineCount > lines.length) {
+                    const step = file.lineCount / lines.length;
+                    const startLineIdx = Math.floor(i * step);
+                    const endLineIdx = Math.max(startLineIdx + 1, Math.min(Math.floor((i + 1) * step), file.lineCount));
+                    for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
+                        if (file.errorLines[fullI]) {
+                            isErrorLine = true;
+                            break;
+                        }
                     }
+                } else {
+                    isErrorLine = !!file.errorLines[i];
                 }
-            } else {
-                isMatchedLine = textMatches(lineText, lowerLineText(line));
             }
-        }
 
-        let isErrorLine = false;
-        if (file.errorLines) {
-            if (file.lineCount && file.lineCount > lines.length) {
-                const step = file.lineCount / lines.length;
-                const startLineIdx = Math.floor(i * step);
-                const endLineIdx = Math.max(startLineIdx + 1, Math.min(Math.floor((i + 1) * step), file.lineCount));
-                for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
-                    if (file.errorLines[fullI]) {
-                        isErrorLine = true;
-                        break;
+            let gitType = (file.gitStatus === "untracked" || file.gitStatus === "added")
+                ? "added"
+                : undefined;
+            if (!gitType && file.gitChanges) {
+                if (file.lineCount && file.lineCount > lines.length) {
+                    const step = file.lineCount / lines.length;
+                    const startLineIdx = Math.floor(i * step);
+                    const endLineIdx = Math.max(startLineIdx + 1, Math.min(Math.floor((i + 1) * step), file.lineCount));
+                    for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
+                        if (file.gitChanges[fullI]) {
+                            gitType = file.gitChanges[fullI];
+                            break;
+                        }
                     }
+                } else {
+                    gitType = file.gitChanges[i];
                 }
-            } else {
-                isErrorLine = !!file.errorLines[i];
             }
-        }
 
-        let gitType = (file.gitStatus === "untracked" || file.gitStatus === "added")
-            ? "added"
-            : undefined;
-        if (!gitType && file.gitChanges) {
-            if (file.lineCount && file.lineCount > lines.length) {
-                const step = file.lineCount / lines.length;
-                const startLineIdx = Math.floor(i * step);
-                const endLineIdx = Math.max(startLineIdx + 1, Math.min(Math.floor((i + 1) * step), file.lineCount));
-                for (let fullI = startLineIdx; fullI < endLineIdx; fullI++) {
-                    if (file.gitChanges[fullI]) {
-                        gitType = file.gitChanges[fullI];
-                        break;
-                    }
-                }
-            } else {
-                gitType = file.gitChanges[i];
-            }
-        }
-
-        if (isMatchedLine) {
-            targetCtx.fillStyle = THEME_COLORS.searchMatchHighlight;
-            targetCtx.fillRect(
-                originX,
-                originY + i * stepY,
-                w,
-                Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
-            );
-            targetCtx.fillStyle = ACCENT_SEARCH;
-            targetCtx.fillRect(
-                originX,
-                originY + i * stepY,
-                THUMBNAIL_GIT_GUTTER_WIDTH,
-                Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
-            );
-        } else if (isErrorLine) {
-            targetCtx.fillStyle = ERROR_STYLES.errorBg;
-            targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-            targetCtx.fillStyle = ERROR_STYLES.errorGutter;
-            targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-        } else if (gitType === "modified") {
-            targetCtx.fillStyle = GIT_STYLES.modifiedBg;
-            targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-            targetCtx.fillStyle = GIT_STYLES.modifiedGutter;
-            targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-        } else if (gitType === "added") {
-            targetCtx.fillStyle = GIT_STYLES.addedBg;
-            targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-            targetCtx.fillStyle = GIT_STYLES.addedGutter;
-            targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
-        } else if (gitType === "removed") {
-            targetCtx.fillStyle = GIT_STYLES.deletedLine;
-            const triY = originY + i * stepY;
-            const triH = Math.max(stepY, 3);
-            const triW = THUMBNAIL_GIT_GUTTER_WIDTH + 1.5;
-            targetCtx.beginPath();
-            targetCtx.moveTo(originX, triY);
-            targetCtx.lineTo(originX + triW, triY + triH / 2);
-            targetCtx.lineTo(originX, triY + triH);
-            targetCtx.closePath();
-            targetCtx.fill();
-        }
-
-        if (!line || !lineText) {
-            continue;
-        }
-
-        const indent = lineShape(line).indent || 0;
-        const startX = originX + Math.min(indent / maxLineChars, THUMBNAIL_INDENT_MAX_RATIO) * w;
-        const trimmedText = lineText.trimStart();
-        const lineTextLength = trimmedText.length;
-        if (lineTextLength === 0) {
-            continue;
-        }
-
-        const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * THUMBNAIL_LINE_WIDTH_RATIO;
-        const tokens = line._tokens || (line._tokens = tokenizeLine(trimmedText, detectLang(file.path)));
-        const totalTextChars = Math.max(lineTextLength, 1);
-
-        let currentX = startX;
-        for (const tok of tokens) {
-            if (currentX >= originX + w) break;
-
-            targetCtx.fillStyle = colorForCategory(tok.category, tok.isKey);
-            if (useText) {
-                targetCtx.fillText(tok.text, currentX, originY + i * stepY + Math.min(stepY * THUMBNAIL_TEXT_VERTICAL_RATIO, fontSize * THUMBNAIL_TEXT_FONT_RATIO));
-                currentX += tok.text.length * charWidth;
-            } else {
-                const tokLen = tok.text.length;
-                const tokW = (tokLen / totalTextChars) * lineW;
-
+            if (isMatchedLine) {
+                targetCtx.fillStyle = THEME_COLORS.searchMatchHighlight;
                 targetCtx.fillRect(
-                    currentX,
+                    originX,
                     originY + i * stepY,
-                    Math.min(tokW, originX + w - currentX),
-                    Math.max(stepY, THUMBNAIL_BLOCK_MIN_HEIGHT)
+                    w,
+                    Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
                 );
-                currentX += tokW;
+                targetCtx.fillStyle = ACCENT_SEARCH;
+                targetCtx.fillRect(
+                    originX,
+                    originY + i * stepY,
+                    THUMBNAIL_SEARCH_GUTTER_WIDTH,
+                    Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
+                );
+                targetCtx.fillRect(
+                    originX + w - THUMBNAIL_SEARCH_RULER_WIDTH,
+                    originY + i * stepY,
+                    THUMBNAIL_SEARCH_RULER_WIDTH,
+                    Math.max(stepY, THUMBNAIL_SEARCH_MATCH_HEIGHT)
+                );
+            } else if (isErrorLine) {
+                targetCtx.fillStyle = ERROR_STYLES.errorBg;
+                targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+                targetCtx.fillStyle = ERROR_STYLES.errorGutter;
+                targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            } else if (gitType === "modified") {
+                targetCtx.fillStyle = GIT_STYLES.modifiedBg;
+                targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+                targetCtx.fillStyle = GIT_STYLES.modifiedGutter;
+                targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            } else if (gitType === "added") {
+                targetCtx.fillStyle = GIT_STYLES.addedBg;
+                targetCtx.fillRect(originX, originY + i * stepY, w, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+                targetCtx.fillStyle = GIT_STYLES.addedGutter;
+                targetCtx.fillRect(originX, originY + i * stepY, THUMBNAIL_GIT_GUTTER_WIDTH, Math.max(stepY, THUMBNAIL_GIT_LINE_MIN_HEIGHT));
+            } else if (gitType === "removed") {
+                targetCtx.fillStyle = GIT_STYLES.deletedLine;
+                const triY = originY + i * stepY;
+                const triH = Math.max(stepY, 3);
+                const triW = THUMBNAIL_GIT_GUTTER_WIDTH + 1.5;
+                targetCtx.beginPath();
+                targetCtx.moveTo(originX, triY);
+                targetCtx.lineTo(originX + triW, triY + triH / 2);
+                targetCtx.lineTo(originX, triY + triH);
+                targetCtx.closePath();
+                targetCtx.fill();
+            }
+
+            if (!line || !lineText) {
+                continue;
+            }
+
+            const indent = lineShape(line).indent || 0;
+            const startX = originX + (useText ? Math.min(indent * charWidth, w * THUMBNAIL_INDENT_MAX_RATIO) : Math.min(indent / maxLineChars, THUMBNAIL_INDENT_MAX_RATIO) * w);
+            const trimmedText = lineText.trimStart();
+            const lineTextLength = trimmedText.length;
+            if (lineTextLength === 0) {
+                continue;
+            }
+
+            const lineW = Math.min(lineTextLength / maxLineChars, 1.0) * w * THUMBNAIL_LINE_WIDTH_RATIO;
+            const tokens = line._tokens || (line._tokens = tokenizeLine(trimmedText, fileLang(file)));
+            const totalTextChars = Math.max(lineTextLength, 1);
+
+            let currentX = startX;
+            for (const tok of tokens) {
+                if (currentX >= originX + w) break;
+
+                targetCtx.fillStyle = colorForCategory(tok.category, tok.isKey);
+                if (useText) {
+                    targetCtx.fillText(tok.text, currentX, originY + i * stepY + Math.min(stepY * THUMBNAIL_TEXT_VERTICAL_RATIO, fontSize * THUMBNAIL_TEXT_FONT_RATIO));
+                    currentX += tok.text.length * charWidth;
+                } else {
+                    const tokLen = tok.text.length;
+                    const tokW = (tokLen / totalTextChars) * lineW;
+
+                    targetCtx.fillRect(
+                        currentX,
+                        originY + i * stepY,
+                        Math.min(tokW, originX + w - currentX),
+                        Math.max(stepY, THUMBNAIL_BLOCK_MIN_HEIGHT)
+                    );
+                    currentX += tokW;
+                }
             }
         }
     }
-}
 
     const lines = file.lines || [];
     const lineCount = Math.max(lines.length, 1);
     const stepY = Math.min(h / lineCount, THUMBNAIL_MAX_LINE_PITCH);
-    const maxLineChars = THUMBNAIL_MAX_LINE_CHARS;
 
-    const targetLineChars = Math.min(maxLineChars, Math.max(THUMBNAIL_MIN_AVG_CHARS, file._avgLineChars || THUMBNAIL_DEFAULT_AVG_CHARS));
+    const targetLineChars = Math.min(THUMBNAIL_TARGET_READABLE_CHARS, Math.max(THUMBNAIL_MIN_TARGET_CHARS, file._avgLineChars || THUMBNAIL_DEFAULT_TARGET_CHARS));
     const fontForWidth = (w * THUMBNAIL_WIDTH_BUDGET_FACTOR) / (targetLineChars * THUMBNAIL_CHAR_ASPECT_RATIO);
     const fontForHeight = stepY * THUMBNAIL_LINE_HEIGHT_RATIO;
     const rawFontSize = Math.min(fontForHeight, fontForWidth, THUMBNAIL_MAX_FONT_SIZE);
     const fontSize = Math.max(THUMBNAIL_MIN_FONT_SIZE, Math.floor(rawFontSize * 10) / 10);
-    const useText = fontSize >= THUMBNAIL_MIN_READABLE_FONT_SIZE && stepY >= THUMBNAIL_MIN_READABLE_TEXT_PITCH;
+    const useText = fontSize >= THUMBNAIL_MIN_READABLE_FONT_SIZE && stepY >= THUMBNAIL_MIN_READABLE_TEXT_PITCH && w >= THUMBNAIL_MIN_READABLE_WIDTH;
 
     const intW = Math.round(w);
     const intH = Math.round(h);
     const useRasterCache = intW >= 30 && intH >= 30;
     // Rasterize at device pixels so tiles stay sharp on HiDPI screens; CanvasLRU budgets real pixels.
     const rasterDpr = Math.min(window.devicePixelRatio || 1, 2);
-    const tileKey = useRasterCache
-        ? `${file.id}:${intW}:${intH}:${rasterDpr}:${rawSearchQuery && !searchInvalid ? `${rawSearchQuery}:${matchCase ? 1 : 0}${matchWholeWord ? 1 : 0}${useRegex ? 1 : 0}` : ""}:${file.contentVersion}:${file._decoSig}`
-        : null;
+    // Content and decorations, without size: lastTileRaster stands in across sizes for the same content.
+    const tileContentSig = `${file.contentVersion}${file._linesPending ? "p" : ""}:${file._decoSig}`;
+    const tileKey = useRasterCache ? `${file.id}:${intW}:${intH}:${rasterDpr}:${tileContentSig}` : null;
+    // Rasters never include search highlights (see drawSearchLineBands); the query is not in the key.
+    const searchBands = useRasterCache && rawSearchQuery && !searchInvalid;
 
     let cached = tileKey ? tileRasterCache.get(tileKey) : null;
     if (cached) {
         ctx.drawImage(cached, x, y, intW, intH);
+    } else if (useRasterCache && performance.now() > rasterBudgetEndsAt) {
+        // Over this frame's budget (render): the file's last raster of the same content scaled to
+        // the new size (a resize), else a cheap outline of its code (a folder never drawn at this
+        // size); the real raster follows on a later frame, so nothing waits for every tile.
+        const previous = lastTileRaster.get(file.id);
+        if (previous && previous.sig === tileContentSig && previous.canvas.width > 0) {
+            ctx.drawImage(previous.canvas, x, y, intW, intH);
+        } else {
+            drawTilePlaceholder(file, x, y, w, h, stepY);
+        }
+        rasterDeferred = true;
     } else {
         let offscreen = null;
         let offCtx = null;
@@ -2941,13 +3734,17 @@ function renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, use
         const originX = offCtx ? 0 : x;
         const originY = offCtx ? 0 : y;
 
-        renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, useText, fontSize, stepY);
+        // With bands drawn over it, highlights are never baked in (also when the raster allocation
+        // failed and lines go straight to the main canvas).
+        renderFileThumbnailContent(targetCtx, file, originX, originY, w, h, useText, fontSize, stepY, !searchBands);
 
         if (offscreen && offCtx) {
             tileRasterCache.set(tileKey, offscreen);
+            lastTileRaster.set(file.id, { canvas: offscreen, sig: tileContentSig });
             ctx.drawImage(offscreen, x, y, intW, intH);
         }
     }
+    if (searchBands) drawSearchLineBands(file, x, y, w, h, stepY);
 
     // Highlight editor visible viewport range in transparent gray overlay if file is open
     const isFileOpen = openFilesSet.has(file.uri);
@@ -3083,7 +3880,7 @@ function drawFileTile(file, x, y, w, h, dimForFocus) {
     file._cell = { x, y, w, h };
 
     const queryActive = !!searchQuery && !searchInvalid;
-    const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+    const isSearchMatch = queryActive && fileMatchesSearch(file);
     const isActive = file.uri === activeFileUri;
     const isOpen = openFilesSet.has(file.uri);
 
@@ -3277,8 +4074,31 @@ function reconcileFolderFileOrder(folder, files, spanning) {
 // MARK: render
 /** Redraws the whole canvas for the current data/filter/search/drag state — clears, computes grid geometry, then dispatches to one of three per-tile rendering modes (subfolder cards, folder drill-down, or the normal root grid). */
 function render() {
+    rasterDeferred = false;
+    rasterBudgetEndsAt = revealPending ? Infinity : performance.now() + RASTER_FRAME_BUDGET_MS;
     renderScene();
+    rasterBudgetEndsAt = Infinity;
     drawKeyboardFocus();
+    updateHoverOutline(true);
+    if (rasterDeferred) scheduleRender();
+}
+
+/** A tile whose raster waits for a later frame: one bar per visible line (indent and length), no text. */
+function drawTilePlaceholder(file, x, y, w, h, stepY) {
+    const lines = file.lines || [];
+    const pitch = Math.max(2, stepY || 4);
+    const count = Math.min(lines.length, Math.floor(h / pitch));
+    const charW = w / 100;
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    for (let i = 0; i < count; i++) {
+        const shape = lineShape(lines[i]);
+        if (!shape.length) continue;
+        const indent = Math.min(shape.indent || 0, 40);
+        ctx.fillStyle = colorForCategory(shape.category || "normal", false);
+        ctx.fillRect(x + 2 + indent * charW, y + i * pitch + pitch * 0.25, Math.max(1, Math.min(w - 4, (shape.length - indent) * charW)), Math.max(1, pitch * 0.5));
+    }
+    ctx.restore();
 }
 
 function renderScene() {
@@ -3372,8 +4192,8 @@ function renderScene() {
     const rootCellW = availableW / gridCols;
     const rootCellH = availableH / gridRows;
 
-    const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 60;
-    const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 40;
+    const MIN_CELL_W = data && typeof data.minCellWidth === "number" ? data.minCellWidth : 40;
+    const MIN_CELL_H = data && typeof data.minCellHeight === "number" ? data.minCellHeight : 28;
 
     // Evaluate rootCellsTooSmall against stable reference canvas bounds (REF_CANVAS_W x REF_CANVAS_H)
     // so resizing the window, sidebars, or terminal never flips the mode or reflows tiles into cards.
@@ -3382,32 +4202,18 @@ function renderScene() {
     const refCellW = refAvailableW / gridCols;
     const refCellH = refAvailableH / gridRows;
 
-    let hasTallFileOverflow = false;
-    if (data && data.files) {
-        for (let i = 0; i < data.files.length; i++) {
-            const f = data.files[i];
-            const slot = f.slot;
-            const nCells = f.nCells || 1;
-            const fileH = refCellH * nCells;
-            if (fileH > refAvailableH + 1) {
-                hasTallFileOverflow = true;
-                break;
-            }
-            if (slot && typeof slot[1] === "number") {
-                const y = GRID_TOP_MARGIN + slot[1] * refCellH;
-                if (y + fileH > REF_CANVAS_H + 1 || y > REF_CANVAS_H) {
-                    hasTallFileOverflow = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Readability uses the pre-overflow size: rows/columns added only because a file grew must
-    // never flip the whole root into folder cards (the largest possible layout change).
-    const refFlowCellW = refAvailableW / Math.max(1, data.layout.flowCols || gridCols);
-    const refFlowCellH = refAvailableH / Math.max(1, data.layout.flowRows || gridRows);
-    const rootCellsTooSmall = refFlowCellW < MIN_CELL_W || refFlowCellH < MIN_CELL_H || hasTallFileOverflow;
+    // Only adding files or lowering the minimum tile size may turn the root into folder cards (the
+    // largest possible layout change). The check therefore uses the pre-overflow flow size (a file
+    // growing adds rows only past it) without Expand Grid Space's extra columns and rows, and the
+    // fixed reference canvas, so resizing the window never flips it either.
+    const rootExtraCols = (data.folderExtraCols && typeof data.folderExtraCols[""] === "number") ? data.folderExtraCols[""] : (data.extraCols || 0);
+    const rootExtraRows = (data.folderExtraRows && typeof data.folderExtraRows[""] === "number") ? data.folderExtraRows[""] : (data.extraRows || 0);
+    // The host's size without extras (baseFlowCols/Rows). Subtracting the webview's extra counts from
+    // the host's totals broke on Reduce Grid Space: the webview lowers its counts at once while the
+    // totals still include the old extras, so the grid looked a column wider and flipped into cards.
+    const refFlowCellW = refAvailableW / Math.max(1, data.layout.baseFlowCols || ((data.layout.flowCols || gridCols) - rootExtraCols));
+    const refFlowCellH = refAvailableH / Math.max(1, data.layout.baseFlowRows || ((data.layout.flowRows || gridRows) - rootExtraRows));
+    const rootCellsTooSmall = refFlowCellW < MIN_CELL_W || refFlowCellH < MIN_CELL_H;
 
     // Opening/focusing a directory drills down into that folder so its files span the canvas.
     const shouldOpenFolder = !!focusedFolder;
@@ -3455,8 +4261,9 @@ function renderScene() {
             folderCellH = availableH / Math.max(1, folderRows);
         }
         // Pre-overflow size, so growth never flips a folder into card mode (see rootCellsTooSmall).
-        const refFolderCols = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.flowCols : 1) : (localFolderGrid ? localFolderGrid.cols + extraCols : 1);
-        const refFolderRows = isSpanningMode ? (localSpanningLayout ? localSpanningLayout.flowRows : 1) : (localFolderGrid ? localFolderGrid.rows + extraRows : 1);
+        // Without Expand Grid Space's extra columns and rows: expanding never flips a folder into cards.
+        const refFolderCols = isSpanningMode ? (localSpanningLayout ? Math.max(1, localSpanningLayout.flowCols - extraCols) : 1) : (localFolderGrid ? localFolderGrid.cols : 1);
+        const refFolderRows = isSpanningMode ? (localSpanningLayout ? Math.max(1, localSpanningLayout.flowRows - extraRows) : 1) : (localFolderGrid ? localFolderGrid.rows : 1);
         const refFolderCellW = refAvailableW / Math.max(1, refFolderCols);
         const refFolderCellH = refAvailableH / Math.max(1, refFolderRows);
         cellsTooSmall = hasSubfolders && (doesFolderCollapse(scopedFiles, effectiveBasePath, isSpanningMode) || refFolderCellW < MIN_CELL_W || refFolderCellH < MIN_CELL_H);
@@ -3684,12 +4491,16 @@ function renderScene() {
                     const mosaicWInt = Math.round(mosaicW);
                     const mosaicHInt = Math.round(mosaicH);
                     const mosaicDpr = Math.min(window.devicePixelRatio || 1, 2);
-                    const mosaicCacheKey = `${group.path}:${mosaicWInt}:${mosaicHInt}:${mosaicDpr}:${isSpanningMode}:${queryActive ? `${rawSearchQuery}:${matchCase ? 1 : 0}${matchWholeWord ? 1 : 0}${useRegex ? 1 : 0}` : ""}:${activeFileUri}:${openFilesVersion}:${light ? 1 : 0}:${groupMosaicSignature(group)}`;
+                    // No search state in the key: matches are drawn over the cached mosaic from its
+                    // recorded mini-tile rects (drawMosaicSearchOverlay), so typing reuses every mosaic.
+                    const mosaicCacheKey = `${group.path}:${mosaicWInt}:${mosaicHInt}:${mosaicDpr}:${isSpanningMode}:${activeFileUri}:${openFilesVersion}:${light ? 1 : 0}:${groupMosaicSignature(group)}`;
 
                     const cachedMosaic = mosaicCache.get(mosaicCacheKey);
                     if (cachedMosaic) {
                         ctx.drawImage(cachedMosaic, mosaicX, mosaicY, mosaicWInt, mosaicHInt);
+                        if (queryActive) drawMosaicSearchOverlay(cachedMosaic._tileRects, mosaicX, mosaicY);
                     } else {
+                        const tileRects = [];
                         let miniOffscreen = null;
                         let miniCtx = null;
                         try {
@@ -3774,10 +4585,12 @@ function renderScene() {
                                 if (!pf) continue;
                                 const isOpen = openFilesSet.has(pf.uri);
                                 const isActive = pf.uri === activeFileUri;
-                                const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
+                                // Baked in only when drawing straight to the screen (no mosaic raster).
+                                const isSearchMatch = !miniCtx && queryActive && fileMatchesSearch(pf);
+                                if (miniCtx) tileRects.push({ id: pf.id, x: miniX, y: miniY, w: miniCellW, h: miniFileH });
 
                                 targetMiniCtx.fillStyle = isSearchMatch
-                                    ? withAlpha(ACCENT_SEARCH, 0.35)
+                                    ? withAlpha(ACCENT_SEARCH, 0.45)
                                     : (light ? "#eaeaf0" : "#141418");
                                 targetMiniCtx.fillRect(miniX, miniY, miniCellW, miniFileH);
 
@@ -3788,7 +4601,7 @@ function renderScene() {
                                         : (isOpen
                                             ? ACCENT_RECENCY
                                             : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
-                                targetMiniCtx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
+                                targetMiniCtx.lineWidth = isSearchMatch ? 2.0 : (isActive ? 1.5 : 1);
                                 targetMiniCtx.strokeRect(miniX, miniY, miniCellW, miniFileH);
 
                                 if (pf.lines && pf.lines.length > 0 && miniFileH >= 10 && miniCellW >= 8) {
@@ -3873,10 +4686,12 @@ function renderScene() {
                                 if (!pf) continue;
                                 const isOpen = openFilesSet.has(pf.uri);
                                 const isActive = pf.uri === activeFileUri;
-                                const isSearchMatch = queryActive && textMatches(pf._combinedTextOriginal, pf._combinedText);
+                                // Baked in only when drawing straight to the screen (no mosaic raster).
+                                const isSearchMatch = !miniCtx && queryActive && fileMatchesSearch(pf);
+                                if (miniCtx) tileRects.push({ id: pf.id, x: miniX, y: miniY, w: miniCellW, h: miniCellH });
 
                                 targetMiniCtx.fillStyle = isSearchMatch
-                                    ? withAlpha(ACCENT_SEARCH, 0.35)
+                                    ? withAlpha(ACCENT_SEARCH, 0.45)
                                     : (light ? "#eaeaf0" : "#141418");
                                 targetMiniCtx.fillRect(miniX, miniY, miniCellW, miniCellH);
 
@@ -3887,7 +4702,7 @@ function renderScene() {
                                         : (isOpen
                                             ? ACCENT_RECENCY
                                             : (light ? "rgba(0, 0, 0, 0.1)" : "rgba(255, 255, 255, 0.08)")));
-                                targetMiniCtx.lineWidth = (isActive || isSearchMatch) ? 1.5 : 1;
+                                targetMiniCtx.lineWidth = isSearchMatch ? 2.0 : (isActive ? 1.5 : 1);
                                 targetMiniCtx.strokeRect(miniX, miniY, miniCellW, miniCellH);
 
                                 if (pf.lines && pf.lines.length > 0 && miniCellH >= 10 && miniCellW >= 8) {
@@ -3910,8 +4725,10 @@ function renderScene() {
                         }
 
                         if (miniOffscreen && miniCtx) {
+                            miniOffscreen._tileRects = tileRects;
                             mosaicCache.set(mosaicCacheKey, miniOffscreen);
                             ctx.drawImage(miniOffscreen, mosaicX, mosaicY, mosaicWInt, mosaicHInt);
+                            if (queryActive) drawMosaicSearchOverlay(tileRects, mosaicX, mosaicY);
                         }
                     }
                 }
@@ -3937,7 +4754,7 @@ function renderScene() {
                 if (y + fileH < -50 || y > rectH + 50) continue;
 
                 const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
-                const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                const isSearchMatch = queryActive && fileMatchesSearch(file);
 
                 drawFileTile(file, x, y, localCellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
             }
@@ -3975,24 +4792,15 @@ function renderScene() {
 
                 if (y + fileH < -50 || y > rectH + 50) continue;
 
-                const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                const isSearchMatch = queryActive && fileMatchesSearch(file);
                 drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
             }
         } else {
             let orderToIterate = [];
             if (folderOrder && Array.isArray(folderOrder) && folderOrder.length > 0) {
-                orderToIterate = [...folderOrder];
-                const seenIds = new Set(folderOrder.filter(Boolean));
-                const newFiles = scopedFiles.filter(f => !seenIds.has(f.id));
-                let newIdx = 0;
-                for (let i = 0; i < orderToIterate.length && newIdx < newFiles.length; i++) {
-                    if (!orderToIterate[i]) {
-                        orderToIterate[i] = newFiles[newIdx++].id;
-                    }
-                }
-                while (newIdx < newFiles.length) {
-                    orderToIterate.push(newFiles[newIdx++].id);
-                }
+                // Files missing from the order fill holes left by removed files, never "" gaps the user left
+                // (fillLayoutHoles, the one stability rule shared with the host).
+                orderToIterate = fillLayoutHoles(folderOrder, scopedFiles.map(f => f.id)).order;
             } else {
                 orderToIterate = scopedFiles.map(f => f.id);
             }
@@ -4051,7 +4859,7 @@ function renderScene() {
 
                 if (y + fileH < -50 || y > rectH + 50) continue;
 
-                const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+                const isSearchMatch = queryActive && fileMatchesSearch(file);
                 drawFileTile(file, x, y, cellW, fileH, queryActive && !isSearchMatch);
             }
         }
@@ -4096,7 +4904,7 @@ function renderScene() {
             }
 
             const isFolderMatch = !focusedFolder || (focusedFolder === "(root files)/" ? !file.path.includes("/") : file.path.startsWith(focusedFolder));
-            const isSearchMatch = queryActive && textMatches(file._combinedTextOriginal, file._combinedText);
+            const isSearchMatch = queryActive && fileMatchesSearch(file);
 
             drawFileTile(file, x, y, cellW, fileH, !isFolderMatch || (queryActive && !isSearchMatch));
         }
@@ -4276,7 +5084,7 @@ window.addEventListener("keydown", event => {
         const foldersPopoverEl = document.getElementById("folders-popover");
         const actionsModalEl = document.getElementById("actions-modal");
         const isPopoverOpen = (foldersPopoverEl && foldersPopoverEl.style.display !== "none" && foldersPopoverEl.style.display !== "") ||
-                              (actionsModalEl && actionsModalEl.style.display !== "none" && actionsModalEl.style.display !== "");
+            (actionsModalEl && actionsModalEl.style.display !== "none" && actionsModalEl.style.display !== "");
         if (isPopoverOpen) {
             closeAllPopovers();
             return;
@@ -4293,6 +5101,10 @@ window.addEventListener("keydown", event => {
 
         // 5. Exit Thumbview
         isCtrlDown = false;
+        hoverSnappedTarget = null;
+        hoverScrollOffset = 0;
+        lastHoveredFileUri = null;
+        wheelMousePos = null;
         if (typeof tooltip !== "undefined" && tooltip) {
             tooltip.style.display = "none";
         }
@@ -4305,8 +5117,11 @@ window.addEventListener("keydown", event => {
         document.activeElement.tagName === "TEXTAREA"
     );
 
-    if (!isInputFocused) {
+    if (!isInputFocused && !contextMenuHasFocus()) {
         const isModifier = event.ctrlKey || event.metaKey;
+        // Copy, cut, and delete act only on a tile the user can see is targeted: the keyboard focus
+        // ring, or the pointer's hover outline (updateHoverOutline).
+        const shownTarget = shownActionTarget();
         if (isModifier && (event.key === "v" || event.key === "V")) {
             event.preventDefault();
             const currentTargetFolder = focusedFolder === "(root files)/" ? "" : (focusedFolder || "");
@@ -4314,31 +5129,48 @@ window.addEventListener("keydown", event => {
             return;
         }
         if (isModifier && (event.key === "c" || event.key === "C")) {
-            if (hoveredFile) {
+            if (shownTarget) {
                 event.preventDefault();
-                clipboardItem = { uri: hoveredFile.uri, path: hoveredFile.path, isFolder: false, isCut: false };
-                vscode.postMessage({ command: "copyFile", uri: hoveredFile.uri });
+                clipboardItem = { uri: shownTarget.uri, path: shownTarget.path, isFolder: false, isCut: false };
+                vscode.postMessage({ command: "copyFile", uri: shownTarget.uri });
                 return;
             }
         }
         if (isModifier && (event.key === "x" || event.key === "X")) {
-            if (hoveredFile) {
+            if (shownTarget) {
                 event.preventDefault();
-                clipboardItem = { uri: hoveredFile.uri, path: hoveredFile.path, isFolder: false, isCut: true };
-                vscode.postMessage({ command: "cutFile", uri: hoveredFile.uri });
+                clipboardItem = { uri: shownTarget.uri, path: shownTarget.path, isFolder: false, isCut: true };
+                vscode.postMessage({ command: "cutFile", uri: shownTarget.uri });
                 return;
             }
         }
-        if (event.key === "Delete" || (event.metaKey && event.key === "Backspace")) {
-            if (hoveredFile) {
+        // Not ⌘⌫ on macOS: that clears the search (the toolbar's Clear Search), and a delete prompt
+        // for whatever tile the pointer rests on would be a surprise. Mac users have fn+Delete (⌦).
+        // The context menu's Rename (F2) and Open to the Side (Ctrl+Enter, ⌘Enter on macOS, as in the
+        // Explorer). Stops propagation so the grid's Enter does not also open the file.
+        if (event.key === "F2" && !isModifier && !event.altKey && shownTarget) {
+            event.preventDefault();
+            event.stopPropagation();
+            vscode.postMessage({ command: "renameFile", uri: shownTarget.uri, path: shownTarget.path });
+            return;
+        }
+        if (event.key === "Enter" && (IS_MAC ? event.metaKey : event.ctrlKey) && !event.altKey && !event.shiftKey && shownTarget) {
+            event.preventDefault();
+            event.stopPropagation();
+            vscode.postMessage({ command: "openToSide", uri: shownTarget.uri });
+            return;
+        }
+        if (event.key === "Delete") {
+            if (shownTarget) {
                 event.preventDefault();
-                vscode.postMessage({ command: "deleteFile", uri: hoveredFile.uri });
+                vscode.postMessage({ command: "deleteFile", uri: shownTarget.uri });
                 return;
             }
         }
     }
 
     if (isControlModifier(event)) {
+        if (!isCtrlDown && hoveredFile) studyNote("magnifier");
         isCtrlDown = true;
         updateHoverTooltip();
     }
@@ -4354,13 +5186,62 @@ window.addEventListener("keyup", event => {
     if (!event.ctrlKey && !event.metaKey) {
         isCtrlDown = false;
         tooltip.style.display = "none";
+        hoverSnappedTarget = null;
+        hoverScrollOffset = 0;
+        lastHoveredFileUri = null;
+        wheelMousePos = null;
     }
 }, true);
 
 window.addEventListener("blur", () => {
     isCtrlDown = false;
     tooltip.style.display = "none";
+    hoverSnappedTarget = null;
+    hoverScrollOffset = 0;
+    lastHoveredFileUri = null;
+    wheelMousePos = null;
 });
+
+window.addEventListener("wheel", event => {
+    if (!isCtrlDown || !hoveredFile) return;
+    if (tooltip && tooltip.style.display !== "none") {
+        event.preventDefault();
+        event.stopPropagation();
+        const delta = Math.sign(event.deltaY);
+        if (delta === 0) return;
+
+        lastWheelTime = Date.now();
+        wheelMousePos = cursorPos ? { px: cursorPos.px, py: cursorPos.py } : null;
+
+        const searchTargets = getSearchTargetsForFile(hoveredFile);
+        if (searchTargets.length > 1 && !event.shiftKey) {
+            // When multiple search results exist, wheel steps directly between results!
+            let curIdx = hoverSnappedTarget ? searchTargets.indexOf(hoverSnappedTarget) : -1;
+            if (curIdx === -1) {
+                curIdx = delta > 0 ? 0 : searchTargets.length - 1;
+                hoverSnappedTarget = searchTargets[curIdx];
+                hoverScrollOffset = 0;
+            } else if (delta > 0 && curIdx < searchTargets.length - 1 && hoverScrollOffset >= 0) {
+                // Step to next match
+                hoverSnappedTarget = searchTargets[curIdx + 1];
+                hoverScrollOffset = 0;
+            } else if (delta < 0 && curIdx > 0 && hoverScrollOffset <= 0) {
+                // Step to previous match
+                hoverSnappedTarget = searchTargets[curIdx - 1];
+                hoverScrollOffset = 0;
+            } else {
+                // Past the end, before the beginning, or returning to match: scroll surroundings!
+                hoverScrollOffset += delta * 2;
+            }
+            updateHoverTooltip();
+        } else {
+            // Single target, no search target, or Shift+wheel: scroll surrounding lines
+            const step = event.shiftKey ? 5 : 2;
+            hoverScrollOffset += delta * step;
+            updateHoverTooltip();
+        }
+    }
+}, { passive: false });
 
 const TOOLTIP_CONFIG = {
     minWidth: 220,
@@ -4590,7 +5471,17 @@ function updateHoverTooltip() {
 
     if (!hoveredFile || !hoveredFile._cell || hoveredFile.isImage || hoveredFile.isPdf) {
         tooltip.style.display = "none";
+        hoverSnappedTarget = null;
+        hoverScrollOffset = 0;
+        wheelMousePos = null;
         return;
+    }
+
+    if (lastHoveredFileUri !== hoveredFile.uri) {
+        lastHoveredFileUri = hoveredFile.uri;
+        hoverSnappedTarget = null;
+        hoverScrollOffset = 0;
+        wheelMousePos = null;
     }
 
     const c = hoveredFile._cell;
@@ -4599,6 +5490,7 @@ function updateHoverTooltip() {
     const lines = hoveredFile.lines || [];
     const lineCount = Math.max(lines.length, 1);
     const stepY = Math.min(thumbnailHeight / lineCount, THUMBNAIL_MAX_LINE_PITCH);
+    const codeHeight = Math.min(thumbnailHeight, lineCount * stepY);
     const cursorOffsetY = Math.max(0, cursorPos.py - thumbnailTop);
     const visualLinesCount = lines.length;
     const visualLineIdx = Math.max(0, Math.min(visualLinesCount - 1, Math.floor(cursorOffsetY / stepY)));
@@ -4606,16 +5498,97 @@ function updateHoverTooltip() {
     const isSampled = !!(hoveredFile.lineCount && hoveredFile.lineCount > lines.length);
     const totalLines = Math.max(hoveredFile.lineCount || lines.length, 1);
     let hoveredLineIdx;
-    if (isSampled) {
-        const stride = hoveredFile.lineCount / lines.length;
-        hoveredLineIdx = Math.max(0, Math.min(hoveredFile.lineCount - 1, Math.floor(visualLineIdx * stride)));
+
+    const searchTargets = getSearchTargetsForFile(hoveredFile);
+    if (searchTargets.length > 0) {
+        if (searchTargets.length === 1) {
+            hoverSnappedTarget = searchTargets[0];
+        } else {
+            const numTargets = searchTargets.length;
+            const effectiveYs = new Array(numTargets);
+            // Group targets sharing the same sampled visual line so each gets a distinct, reachable vertical band
+            let groupStart = 0;
+            while (groupStart < numTargets) {
+                let groupEnd = groupStart + 1;
+                while (groupEnd < numTargets && searchTargets[groupEnd].sampledIdx === searchTargets[groupStart].sampledIdx) {
+                    groupEnd++;
+                }
+                const groupCount = groupEnd - groupStart;
+                const s = searchTargets[groupStart].sampledIdx;
+                const bandTop = thumbnailTop + s * stepY;
+                const bandHeight = stepY;
+                for (let k = 0; k < groupCount; k++) {
+                    effectiveYs[groupStart + k] = bandTop + ((k + 0.5) / groupCount) * bandHeight;
+                }
+                groupStart = groupEnd;
+            }
+
+            const minGap = Math.min(4, Math.max(0.1, (codeHeight - 1) / Math.max(1, numTargets - 1)));
+            // Forward pass: ensure monotonic progression with minGap
+            effectiveYs[0] = Math.max(thumbnailTop, effectiveYs[0]);
+            for (let t = 1; t < numTargets; t++) {
+                effectiveYs[t] = Math.max(effectiveYs[t - 1] + minGap, effectiveYs[t]);
+            }
+            // Backward pass: squeeze from thumbnail bottom so matches never overflow the file
+            effectiveYs[numTargets - 1] = Math.min(thumbnailTop + codeHeight, effectiveYs[numTargets - 1]);
+            for (let t = numTargets - 2; t >= 0; t--) {
+                effectiveYs[t] = Math.min(effectiveYs[t], effectiveYs[t + 1] - minGap);
+            }
+            for (let t = 0; t < numTargets; t++) {
+                effectiveYs[t] = Math.max(thumbnailTop, effectiveYs[t]);
+            }
+
+            let closestTarget = searchTargets[0];
+            let closestDist = Math.abs(cursorPos.py - effectiveYs[0]);
+            for (let t = 1; t < numTargets; t++) {
+                const dist = Math.abs(cursorPos.py - effectiveYs[t]);
+                if (dist < closestDist) {
+                    closestDist = dist;
+                    closestTarget = searchTargets[t];
+                }
+            }
+
+            const HYSTERESIS_PX = Math.min(3, minGap * 0.75);
+            const isActivelyWheeling = (Date.now() - lastWheelTime < 400) && wheelMousePos && Math.hypot(cursorPos.px - wheelMousePos.px, cursorPos.py - wheelMousePos.py) < 20;
+            if (isActivelyWheeling) {
+                // Keep wheel-selected target while user is rolling the wheel
+            } else {
+                wheelMousePos = null;
+                if (hoverSnappedTarget && hoverSnappedTarget.fileUri === hoveredFile.uri) {
+                    const curIdx = searchTargets.indexOf(hoverSnappedTarget);
+                    if (curIdx !== -1) {
+                        const curDist = Math.abs(cursorPos.py - effectiveYs[curIdx]);
+                        if (closestDist < curDist - HYSTERESIS_PX) {
+                            hoverSnappedTarget = closestTarget;
+                            hoverScrollOffset = 0;
+                        }
+                    } else {
+                        hoverSnappedTarget = closestTarget;
+                        hoverScrollOffset = 0;
+                    }
+                } else {
+                    hoverSnappedTarget = closestTarget;
+                    hoverScrollOffset = 0;
+                }
+            }
+        }
+        hoveredLineIdx = hoverSnappedTarget.realLineIdx;
     } else {
-        hoveredLineIdx = Math.max(0, Math.min(totalLines - 1, visualLineIdx));
+        hoverSnappedTarget = null;
+        if (isSampled) {
+            const stride = hoveredFile.lineCount / lines.length;
+            hoveredLineIdx = Math.max(0, Math.min(hoveredFile.lineCount - 1, Math.floor(visualLineIdx * stride)));
+        } else {
+            hoveredLineIdx = Math.max(0, Math.min(totalLines - 1, visualLineIdx));
+        }
     }
 
+    const centerLineIdx = Math.max(0, Math.min(totalLines - 1, hoveredLineIdx + hoverScrollOffset));
+    hoverScrollOffset = centerLineIdx - hoveredLineIdx;
+
     const radius = TOOLTIP_CONFIG.lineRadius;
-    let start = Math.max(0, hoveredLineIdx - radius);
-    let end = Math.min(totalLines - 1, hoveredLineIdx + radius);
+    let start = Math.max(0, centerLineIdx - radius);
+    let end = Math.min(totalLines - 1, centerLineIdx + radius);
 
     if (start === 0) {
         end = Math.min(totalLines - 1, start + radius * 2);
@@ -4659,7 +5632,22 @@ function updateHoverTooltip() {
 
     const isOpen = openFilesSet.has(hoveredFile.uri);
     const closeHint = isOpen ? `<span style="float: right; color: #a0a0a5; font-weight: normal; font-size: 10px;">    Middle-click to close tab</span>` : "";
-    let tooltipHtml = `<div class="tooltip-filename">${escapeHtml(hoveredFile.path)} (Line ${hoveredLineIdx + 1})${closeHint}</div>`;
+    let targetBadge = "";
+    if (hoverSnappedTarget) {
+        const totalTargets = searchTargets.length;
+        const curIdx = searchTargets.indexOf(hoverSnappedTarget);
+        const matchLabel = totalTargets > 1 ? `MATCH ${curIdx >= 0 ? curIdx + 1 : 1} of ${totalTargets}` : "MATCH";
+        if (hoverScrollOffset === 0) {
+            targetBadge = ` <span style="background: ${withAlpha(ACCENT_SEARCH, 0.28)}; color: ${ACCENT_SEARCH}; border: 1px solid ${withAlpha(ACCENT_SEARCH, 0.6)}; border-radius: 3px; padding: 1px 5px; font-size: 10px; font-weight: 600; margin-left: 6px;">${matchLabel}</span>`;
+        } else {
+            const sign = hoverScrollOffset > 0 ? "+" : "";
+            targetBadge = ` <span style="background: ${withAlpha(ACCENT_SEARCH, 0.28)}; color: ${ACCENT_SEARCH}; border: 1px solid ${withAlpha(ACCENT_SEARCH, 0.6)}; border-radius: 3px; padding: 1px 5px; font-size: 10px; font-weight: 600; margin-left: 6px;">${matchLabel}: L${hoveredLineIdx + 1} (${sign}${hoverScrollOffset})</span>`;
+        }
+    } else if (hoverScrollOffset !== 0) {
+        const sign = hoverScrollOffset > 0 ? "+" : "";
+        targetBadge = ` <span style="color: #a0a0a5; font-size: 10px; margin-left: 6px;">(${sign}${hoverScrollOffset})</span>`;
+    }
+    let tooltipHtml = `<div class="tooltip-filename">${escapeHtml(hoveredFile.path)} (Line ${centerLineIdx + 1})${targetBadge}${closeHint}</div>`;
 
     for (let i = start; i <= end; i++) {
         let line = null;
@@ -4674,9 +5662,9 @@ function updateHoverTooltip() {
             line = hoveredFile.lines[i];
         }
 
-        const isHoveredLine = i === hoveredLineIdx;
+        const isHoveredLine = i === centerLineIdx;
         const lineText = line ? (typeof line.text === "string" ? line.text : String(line)) : "Loading line...";
-        const lang = detectLang(hoveredFile.path);
+        const lang = fileLang(hoveredFile);
 
         if (line && !line._htmlCache) {
             const tokens = line._tokens || tokenizeLine(lineText.trimStart(), lang);
@@ -4694,8 +5682,9 @@ function updateHoverTooltip() {
             lineHtml = (line && line._htmlCache) ? line._htmlCache : lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         }
 
-        const isMatchLine = rawSearchQuery && !searchInvalid &&
-            textMatches(lineText, line && typeof line === "object" ? lowerLineText(line) : lineText.toLowerCase());
+        const isMatchLine = (rawSearchQuery && !searchInvalid &&
+            textMatches(lineText, line && typeof line === "object" ? lowerLineText(line) : lineText.toLowerCase())) ||
+            (hoverSnappedTarget && i === hoverSnappedTarget.realLineIdx);
 
         const isErrorLine = hoveredFile.errorLines ? !!hoveredFile.errorLines[i] : false;
 
@@ -4845,6 +5834,21 @@ function keyboardTargets() {
     return out;
 }
 
+/** Matching tiles on screen, and folder cards holding a match (large workspaces show cards). */
+function searchMatchTargets(all = keyboardTargets()) {
+    if (!rawSearchQuery || searchInvalid) return [];
+    return all.filter(t => t.kind === "file"
+        ? fileMatchesSearch(t.file)
+        : !!(t.card && t.card.group && t.card.group.files && t.card.group.files.some(fileMatchesSearch)));
+}
+
+/** While a search has matches on screen, arrow keys move only between them. */
+function navigationTargets() {
+    const all = keyboardTargets();
+    const matches = searchMatchTargets(all);
+    return matches.length > 0 ? matches : all;
+}
+
 function currentKeyboardTarget() {
     if (!kbFocusKey) return null;
     return keyboardTargets().find(t => t.key === kbFocusKey) || null;
@@ -4855,11 +5859,27 @@ function targetCenterClient(t) {
     return { x: rect.left + t.rect.x + t.rect.w / 2, y: rect.top + t.rect.y + Math.min(t.rect.h / 2, 40) };
 }
 
+/**
+ * Where a target sits on screen, for screen readers: its column, and its place within that column.
+ * Columns are fixed in both layout modes (tall files only lengthen a column), so this stays true
+ * where a row number would not.
+ */
+function describePosition(t) {
+    const targets = keyboardTargets();
+    const columns = [...new Set(targets.map(o => Math.round(o.rect.x)))].sort((a, b) => a - b);
+    const x = Math.round(t.rect.x);
+    const inColumn = targets.filter(o => Math.round(o.rect.x) === x).sort((a, b) => a.rect.y - b.rect.y);
+    const col = columns.indexOf(x) + 1;
+    const pos = inColumn.findIndex(o => o.key === t.key) + 1;
+    return col > 0 && pos > 0 ? `column ${col} of ${columns.length}, ${pos} of ${inColumn.length} in the column` : "";
+}
+
 function describeTarget(t) {
     if (t.kind === "folder") {
         const g = t.card.group;
         const count = g && typeof g.fileCount === "number" ? `, ${g.fileCount} file${g.fileCount === 1 ? "" : "s"}` : "";
-        return `Folder ${t.card.folderPath}${count}. Press Enter to open.`;
+        const where = describePosition(t);
+        return `Folder ${t.card.folderPath}${count}${where ? `, ${where}` : ""}. Press Enter to open.`;
     }
     const f = t.file;
     const parts = [f.path, `${f.lineCount || 0} lines`];
@@ -4867,11 +5887,14 @@ function describeTarget(t) {
     if (statusWord) parts.push(statusWord);
     if (f.errorCount > 0) parts.push(`${f.errorCount} error${f.errorCount === 1 ? "" : "s"}`);
     if (openFilesSet.has(f.uri)) parts.push("open in editor");
-    if (searchQuery && !searchInvalid && textMatches(f._combinedTextOriginal, f._combinedText)) parts.push("matches search");
+    if (searchQuery && !searchInvalid && fileMatchesSearch(f)) parts.push("matches search");
+    const where = describePosition(t);
+    if (where) parts.push(where);
     return parts.join(", ");
 }
 
 function focusKeyboardTarget(t, announceIt = true) {
+    studyNote("keyboard");
     if (!t) return;
     kbMode = true;
     kbFocusKey = t.key;
@@ -4943,6 +5966,7 @@ function activateKeyboardTarget(t) {
     }
     postSwitchAway({
         command: "jump",
+        studyMethod: "keyboard",
         uri: t.file.uri,
         line: 0,
         query: rawSearchQuery,
@@ -4959,7 +5983,7 @@ window.addEventListener("keydown", event => {
     if (activeEl && activeEl !== document.body && activeEl !== canvas) return;
     if (!data) return;
     const arrows = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-    const targets = keyboardTargets();
+    const targets = navigationTargets();
     if (targets.length === 0) return;
     let current = currentKeyboardTarget();
 
@@ -5007,6 +6031,90 @@ function drawKeyboardFocus() {
     ctx.setLineDash([]);
     ctx.strokeRect(t.rect.x + 1, t.rect.y + 1, t.rect.w - 2, t.rect.h - 2);
     ctx.restore();
+}
+
+// Pointer hover feedback: an outline over the hovered tile or folder card, drawn as a positioned
+// element so moving the pointer never repaints the canvas. Keyboard use shows the focus ring instead.
+function hoveredFolderCardAt(pos) {
+    if (!pos || !data || !data._folderCards) return null;
+    for (const card of data._folderCards) {
+        if (pointInRect(card, pos.px, pos.py)) return card;
+    }
+    return null;
+}
+/** Shows the outline for what the pointer is over; `resolve` re-runs the hit test after a render moved tiles. */
+function updateHoverOutline(resolve) {
+    if (!hoverOutline) return;
+    const active = !kbMode && !draggingFile && !draggingFolder && cursorPos && data && !isFrameFrozen();
+    if (active && resolve) hoveredFile = findFileAt(cursorPos.px, cursorPos.py);
+    const card = active && !hoveredFile ? hoveredFolderCardAt(cursorPos) : null;
+    schedulePrewarm(card);
+    const rect = !active ? null : (hoveredFile && hoveredFile._cell) || card;
+    hoverOutlineFile = rect && hoveredFile ? hoveredFile : null;
+    canvas.style.cursor = rect ? "pointer" : "";
+    const key = rect ? `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.w)},${Math.round(rect.h)}` : "";
+    if (key === hoverOutlineKey) return;
+    hoverOutlineKey = key;
+    if (!rect) {
+        hoverOutline.style.display = "none";
+        return;
+    }
+    hoverOutline.style.borderColor = BORDER_STYLES.dragging.color;
+    hoverOutline.style.left = `${rect.x}px`;
+    hoverOutline.style.top = `${rect.y}px`;
+    hoverOutline.style.width = `${rect.w}px`;
+    hoverOutline.style.height = `${rect.h}px`;
+    hoverOutline.style.display = "block";
+}
+// Resting on a folder card prepares its files' syntax tokens in idle time, so a click that opens it
+// spends its frames drawing rather than tokenizing. Only lines a tile can show are tokenized.
+const PREWARM_DELAY_MS = 150;
+const PREWARM_SLICE_MS = 6;
+const PREWARM_MAX_FILES = 300;
+const PREWARM_LINES_PER_FILE = 120;
+function schedulePrewarm(card) {
+    const path = card && card.group ? card.folderPath : null;
+    if (path === prewarmPath) return;
+    prewarmPath = path;
+    if (prewarmTimer) clearTimeout(prewarmTimer);
+    prewarmTimer = null;
+    if (!path) return;
+    prewarmTimer = setTimeout(() => {
+        prewarmTimer = null;
+        const files = (card.group.files || []).slice(0, PREWARM_MAX_FILES);
+        let fileIdx = 0;
+        let lineIdx = 0;
+        const step = () => {
+            if (prewarmPath !== path) return;
+            const until = performance.now() + PREWARM_SLICE_MS;
+            while (fileIdx < files.length && performance.now() < until) {
+                const f = files[fileIdx];
+                const lines = f && !f._linesPending && f.lines ? f.lines : [];
+                const end = Math.min(lines.length, PREWARM_LINES_PER_FILE);
+                for (let n = 0; lineIdx < end && n < 40; lineIdx++, n++) {
+                    const line = lines[lineIdx];
+                    // Same text and cache as renderFileThumbnailContent.
+                    const trimmed = line && typeof line.text === "string" ? line.text.trimStart() : "";
+                    if (trimmed && !line._tokens) line._tokens = tokenizeLine(trimmed, fileLang(f));
+                }
+                if (lineIdx >= end) {
+                    fileIdx++;
+                    lineIdx = 0;
+                }
+            }
+            if (fileIdx < files.length) whenIdle(step);
+        };
+        whenIdle(step);
+    }, PREWARM_DELAY_MS);
+}
+
+/** The file copy, cut, and delete keys act on: the keyboard-focused tile, or the outlined hovered tile. */
+function shownActionTarget() {
+    if (kbMode) {
+        const t = currentKeyboardTarget();
+        return t && t.file ? t.file : null;
+    }
+    return hoverOutlineFile && hoverOutlineFile === hoveredFile ? hoveredFile : null;
 }
 
 // MARK: mousedown
@@ -5060,6 +6168,9 @@ canvas.addEventListener("mousemove", event => {
             });
         }
         isCtrlDown = false;
+        hoverSnappedTarget = null;
+        hoverScrollOffset = 0;
+        lastHoveredFileUri = null;
         tooltip.style.display = "none";
         return;
     }
@@ -5073,6 +6184,9 @@ canvas.addEventListener("mousemove", event => {
     lastMousePos = { x: event.clientX, y: event.clientY };
     cursorPos = getCanvasPos(event);
     hoveredFile = findFileAt(cursorPos.px, cursorPos.py);
+    updateHoverOutline(false);
+    if (hoveredFile && studyActive) studyNote("hover", hoveredFile.id);
+    if (hoveredFile && hoveredFile.isPdf) requestPdfJs(true);
 
     if (candidateFolder && !draggingFolder && !draggingFile) {
         const dx = Math.abs(candidateFolder.startX - cursorPos.px);
@@ -5154,8 +6268,55 @@ canvas.addEventListener("mousemove", event => {
     } else {
         isCtrlDown = false;
         tooltip.style.display = "none";
+        hoverSnappedTarget = null;
+        hoverScrollOffset = 0;
+        lastHoveredFileUri = null;
+        wheelMousePos = null;
     }
 });
+
+/** The drop row of a folder-card drag in flow rows (cards are drawn at their current heights). */
+function cardFlowTargetRow(order, allocations, wrapRows) {
+    const displayCellsById = {};
+    if (activeRenderGrid && activeRenderGrid.layout && activeRenderGrid.layout.placements) {
+        for (const p of activeRenderGrid.layout.placements) {
+            const id = p.item && p.item.id;
+            if (id) displayCellsById[id] = p.nCells;
+        }
+    }
+    return displayToFlowRow(order, allocations, displayCellsById, wrapRows, dragTarget.col, dragTarget.row);
+}
+
+/**
+ * Lays every root tile out again from data.fileOrder (after a drop), as the host's buildSpanningGrid
+ * will: flow cells decide columns, current heights decide drawn rows. Updates slots and slotOccupancy.
+ */
+function relayoutRootSpanning(wrapRows) {
+    if (!data || !data.files) return;
+    const layout = buildSpanningGridLocal(data.files, BASE_GRID_ASPECT, data.fileOrder, 0, 0, 60, getCompressionPct(), wrapRows, scopeFootprints("root"), scopeFlowCells("root"));
+    slotOccupancy.clear();
+    for (const p of layout.placements) {
+        const f = p.file;
+        f.slot = [p.col, p.row];
+        f.slots = p.slots.map(s => [...s]);
+        f.nCells = p.nCells;
+        for (const s of f.slots) slotOccupancy.set(`${s[0]},${s[1]}`, f);
+    }
+    if (data.layout) {
+        // The grid keeps the host's size and grows only where a tile now reaches past it. The local
+        // builder's own rows/cols come from its folder sizing (an aspect formula unlike the host's),
+        // which right after a reflow added an empty row until the host's next payload.
+        let right = 0;
+        let bottom = 0;
+        for (const p of layout.placements) {
+            right = Math.max(right, p.col + 1);
+            bottom = Math.max(bottom, p.row + p.nCells);
+        }
+        data.layout.wrapRows = wrapRows;
+        data.layout.cols = Math.max(data.layout.cols || 1, right);
+        data.layout.rows = Math.max(data.layout.rows || 1, bottom);
+    }
+}
 
 // MARK: mouseup
 canvas.addEventListener("mouseup", event => {
@@ -5194,11 +6355,19 @@ canvas.addEventListener("mouseup", event => {
                     allocations,
                     sourceCardId,
                     dragTarget.col,
-                    dragTarget.row,
+                    cardFlowTargetRow(currentCardIds, allocations, wrapRows),
                     maxAllowedCols,
                     maxAllowedRows,
                     wrapRows
                 );
+
+                if (res.rejected) {
+                    // No swap exists without splitting a card: it goes back where it was.
+                    announce("Not enough room to move the folder there");
+                    clearDragState();
+                    render();
+                    return;
+                }
 
                 if (targetFocusedFolder) {
                     if (!data.folderCardOrders) data.folderCardOrders = {};
@@ -5250,12 +6419,15 @@ canvas.addEventListener("mouseup", event => {
                         : -1;
                     const targetSlot = slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col;
                     if (targetSlot >= 0) {
+                        const cardOrderLengthBefore = updatedCardOrder.length;
                         if (fromIdx !== -1) updatedCardOrder[fromIdx] = "";
                         while (updatedCardOrder.length <= targetSlot) {
                             updatedCardOrder.push("");
                         }
                         updatedCardOrder[targetSlot] = sourceCardId;
-                        while (updatedCardOrder.length > 0 && !updatedCardOrder[updatedCardOrder.length - 1]) {
+                        // Padding is trimmed, never below the original length: a shorter order can shrink
+                        // the card grid and move every card (spatial stability). Only Reflow Layout compacts.
+                        while (updatedCardOrder.length > cardOrderLengthBefore && !updatedCardOrder[updatedCardOrder.length - 1]) {
                             updatedCardOrder.pop();
                         }
                     }
@@ -5324,11 +6496,19 @@ canvas.addEventListener("mouseup", event => {
                     allocations,
                     sourceCardId,
                     dragTarget.col,
-                    dragTarget.row,
+                    cardFlowTargetRow(currentCardIds, allocations, wrapRows),
                     maxAllowedCols,
                     maxAllowedRows,
                     wrapRows
                 );
+
+                if (res.rejected) {
+                    // No swap exists without splitting a card: it goes back where it was.
+                    announce("Not enough room to move the folder there");
+                    clearDragState();
+                    render();
+                    return;
+                }
 
                 if (targetFocusedFolder) {
                     if (!data.folderCardOrders) data.folderCardOrders = {};
@@ -5380,12 +6560,15 @@ canvas.addEventListener("mouseup", event => {
                         : -1;
                     const targetSlot = slotIdx !== -1 ? slotIdx : dragTarget.row * activeRenderGrid.cols + dragTarget.col;
                     if (targetSlot >= 0) {
+                        const cardOrderLengthBefore = updatedCardOrder.length;
                         if (fromIdx !== -1) updatedCardOrder[fromIdx] = "";
                         while (updatedCardOrder.length <= targetSlot) {
                             updatedCardOrder.push("");
                         }
                         updatedCardOrder[targetSlot] = sourceCardId;
-                        while (updatedCardOrder.length > 0 && !updatedCardOrder[updatedCardOrder.length - 1]) {
+                        // Padding is trimmed, never below the original length: a shorter order can shrink
+                        // the card grid and move every card (spatial stability). Only Reflow Layout compacts.
+                        while (updatedCardOrder.length > cardOrderLengthBefore && !updatedCardOrder[updatedCardOrder.length - 1]) {
                             updatedCardOrder.pop();
                         }
                     }
@@ -5408,7 +6591,15 @@ canvas.addEventListener("mouseup", event => {
                 }
             }
         } else if (dragTarget) {
-            if (dragTarget.file && dragTarget.file.id === draggingFile.id) {
+            // Dropped where it already is: nothing to do. Only the top cell counts; a tall tile moved
+            // down by one row still covers its old cells, and that move must happen.
+            const srcCell = draggingFile._cell;
+            const srcTopCol = srcCell && dragTarget.cellW ? Math.round((srcCell.x - GRID_SIDE_MARGIN) / dragTarget.cellW) : null;
+            const srcTopRow = srcCell && dragTarget.cellH ? Math.round((srcCell.y - GRID_TOP_MARGIN) / dragTarget.cellH) : null;
+            const droppedInPlace = srcTopCol !== null
+                ? dragTarget.col === srcTopCol && dragTarget.row === srcTopRow
+                : !!(dragTarget.file && dragTarget.file.id === draggingFile.id);
+            if (droppedInPlace) {
                 clearDragState();
                 render();
                 return;
@@ -5439,17 +6630,37 @@ canvas.addEventListener("mouseup", event => {
                 const maxAllowedCols = (activeRenderGrid && activeRenderGrid.cols) || (data.layout && data.layout.cols) || 2;
                 const maxAllowedRows = (activeRenderGrid && activeRenderGrid.rows) || (data.layout && data.layout.rows) || 2;
 
+                // The drop row is drawn (display) rows; files that grew or shrank make those differ
+                // from the flow rows the reorder works in, so convert in the target column.
+                const displayCellsById = {};
+                if (activeRenderGrid && activeRenderGrid.layout && activeRenderGrid.layout.placements) {
+                    for (const p of activeRenderGrid.layout.placements) {
+                        if (p.file) displayCellsById[p.file.id] = p.nCells;
+                    }
+                } else {
+                    for (const f of scopedFiles) displayCellsById[f.id] = f.nCells || allocations[f.id] || 1;
+                }
+                const flowTargetRow = displayToFlowRow(currentOrder, allocations, displayCellsById, wrapRows, dragTarget.col, dragTarget.row);
+
                 spanningRes = reorderSpanningItems(
                     scopedIds,
                     currentOrder,
                     allocations,
                     draggingFile.id,
                     dragTarget.col,
-                    dragTarget.row,
+                    flowTargetRow,
                     maxAllowedCols,
                     maxAllowedRows,
                     wrapRows
                 );
+
+                if (spanningRes.rejected) {
+                    // No swap exists without splitting a tile: the tile goes back where it was.
+                    announce("Not enough room to move the file there");
+                    clearDragState();
+                    render();
+                    return;
+                }
 
                 if (focusedFolder) {
                     if (!data.folderOrders) data.folderOrders = {};
@@ -5458,50 +6669,14 @@ canvas.addEventListener("mouseup", event => {
                     data.folderWrapRows[focusedFolder] = spanningRes.rows;
                 } else {
                     data.fileOrder = spanningRes.newOrder;
-                    const srcFile = data.files ? data.files.find(f => f.id === draggingFile.id) : null;
-                    const tgtFile = (spanningRes.targetPlacement && spanningRes.targetPlacement.id)
-                        ? (data.files ? data.files.find(f => f.id === spanningRes.targetPlacement.id) : null)
-                        : null;
-
-                    if (srcFile) {
-                        const oldSlots = srcFile.slots || (srcFile.slot ? [srcFile.slot] : []);
-                        for (const s of oldSlots) {
-                            if (slotOccupancy.get(`${s[0]},${s[1]}`) === srcFile) {
-                                slotOccupancy.delete(`${s[0]},${s[1]}`);
-                            }
-                        }
-                    }
-                    if (tgtFile) {
-                        const oldSlots = tgtFile.slots || (tgtFile.slot ? [tgtFile.slot] : []);
-                        for (const s of oldSlots) {
-                            if (slotOccupancy.get(`${s[0]},${s[1]}`) === tgtFile) {
-                                slotOccupancy.delete(`${s[0]},${s[1]}`);
-                            }
-                        }
-                    }
-
-                    if (srcFile) {
-                        srcFile.slot = [spanningRes.finalTargetCol, spanningRes.finalTargetRow];
-                        const nCells = allocations[srcFile.id] || srcFile.nCells || 1;
-                        srcFile.slots = [];
-                        for (let i = 0; i < nCells; i++) {
-                            const s = [spanningRes.finalTargetCol, spanningRes.finalTargetRow + i];
-                            srcFile.slots.push(s);
-                            slotOccupancy.set(`${s[0]},${s[1]}`, srcFile);
-                        }
-                        userReorderedFileSlots.set(srcFile.id, { slot: [...srcFile.slot], slots: srcFile.slots.map(s => [...s]) });
-                    }
-                    if (tgtFile) {
-                        tgtFile.slot = [spanningRes.sourceCol, spanningRes.safeSourceRow];
-                        const nCells = allocations[tgtFile.id] || tgtFile.nCells || 1;
-                        tgtFile.slots = [];
-                        for (let i = 0; i < nCells; i++) {
-                            const s = [spanningRes.sourceCol, spanningRes.safeSourceRow + i];
-                            tgtFile.slots.push(s);
-                            slotOccupancy.set(`${s[0]},${s[1]}`, tgtFile);
-                        }
-                        userReorderedFileSlots.set(tgtFile.id, { slot: [...tgtFile.slot], slots: tgtFile.slots.map(s => [...s]) });
-                    }
+                    // Every tile from the new order, laid out as the host will (buildSpanningGridLocal is
+                    // the twin of its buildSpanningGrid). Moving only the two swapped tiles, and pinning
+                    // them over later payloads, drew them over tiles the host had placed elsewhere.
+                    relayoutRootSpanning(spanningRes.rows);
+                    pendingRootOrder = [...spanningRes.newOrder];
+                    pendingRootWrap = spanningRes.rows;
+                    pendingRootSince = performance.now();
+                    pendingRootSeq = reorderSeq + 1; // the seq of the reorderFile posted below
                 }
             } else if (focusedFolder) {
                 if (!data.folderOrders) data.folderOrders = {};
@@ -5601,6 +6776,8 @@ canvas.addEventListener("mouseup", event => {
                 targetWrapRows: (activeRenderGrid && activeRenderGrid.wrapRows) || undefined,
                 currentOrder: spanningRes ? spanningRes.newOrder : undefined,
                 wrapRows: spanningRes ? spanningRes.rows : undefined,
+                // Echoed by the host in later payloads (data reorderSeq), see keepPendingRootOrder.
+                reorderSeq: ++reorderSeq,
                 focusedFolder: focusedFolder || ""
             });
         }
@@ -5665,6 +6842,7 @@ canvas.addEventListener("mouseup", event => {
         if (c._viewBand && cursorPos.py >= c._viewBand.y && cursorPos.py <= c._viewBand.y + c._viewBand.h) {
             postSwitchAway({
                 command: "switchTab",
+                studyMethod: "view_band",
                 uri: file.uri
             });
             return;
@@ -5698,6 +6876,14 @@ canvas.addEventListener("mouseup", event => {
             line = Math.max(0, Math.min(totalLines - 1, visualLineIdx));
         }
 
+        if (isCtrlDown && hoverSnappedTarget && hoverSnappedTarget.fileUri === file.uri) {
+            const totalLines = Math.max(file.lineCount || lines.length, 1);
+            line = Math.max(0, Math.min(totalLines - 1, hoverSnappedTarget.realLineIdx + hoverScrollOffset));
+        } else if (isCtrlDown && hoverScrollOffset !== 0 && lastHoveredFileUri === file.uri) {
+            const totalLines = Math.max(file.lineCount || lines.length, 1);
+            line = Math.max(0, Math.min(totalLines - 1, line + hoverScrollOffset));
+        }
+
         // query/matchCase/matchWholeWord/useRegex/searchInvalid mirror the search state
         // above so extension.ts's "jump" handler can flash the same lines this webview
         // considers matches — see its handler for the mirrored pattern-building logic.
@@ -5723,6 +6909,11 @@ window.addEventListener("mouseup", () => {
 canvas.addEventListener("mouseleave", () => {
     clearDragState();
     hoveredFile = null;
+    cursorPos = null;
+    hoverSnappedTarget = null;
+    hoverScrollOffset = 0;
+    lastHoveredFileUri = null;
+    wheelMousePos = null;
     render();
 });
 
@@ -5730,15 +6921,57 @@ document.addEventListener("mouseleave", () => {
     isCtrlDown = false;
     cursorPos = null;
     tooltip.style.display = "none";
+    hoverSnappedTarget = null;
+    hoverScrollOffset = 0;
+    lastHoveredFileUri = null;
+    wheelMousePos = null;
 });
 
 const contextMenu = document.getElementById("context-menu");
 
-/** Hides the custom right-click context menu. */
+/** Hides the custom right-click context menu, returning keyboard focus to the grid if it was in the menu. */
 function hideContextMenu() {
     if (contextMenu) {
+        const hadFocus = contextMenu.contains(document.activeElement);
         contextMenu.style.display = "none";
+        if (hadFocus) canvas.focus();
     }
+}
+
+/** True while keyboard focus is inside the context menu (search typing and file keys stand aside). */
+function contextMenuHasFocus() {
+    return !!(contextMenu && document.activeElement && contextMenu.contains(document.activeElement));
+}
+
+// Keyboard use of the context menu: Up/Down/Home/End move between items, Enter or Space runs one,
+// Escape or Tab closes it and returns to the grid.
+if (contextMenu) {
+    contextMenu.addEventListener("keydown", event => {
+        const items = [...contextMenu.querySelectorAll('[role="menuitem"]')];
+        if (items.length === 0) return;
+        const index = items.indexOf(document.activeElement);
+        let next = null;
+        if (event.key === "ArrowDown") next = items[(index + 1) % items.length];
+        else if (event.key === "ArrowUp") next = items[(index - 1 + items.length) % items.length];
+        else if (event.key === "Home") next = items[0];
+        else if (event.key === "End") next = items[items.length - 1];
+        else if ((event.key === "Enter" || event.key === " ") && index !== -1) {
+            event.preventDefault();
+            event.stopPropagation();
+            items[index].click();
+            return;
+        } else if (event.key === "Escape" || event.key === "Tab") {
+            event.preventDefault();
+            event.stopPropagation();
+            hideContextMenu();
+            return;
+        } else {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        next.focus();
+    });
 }
 
 document.addEventListener("click", event => {
@@ -5788,36 +7021,36 @@ canvas.addEventListener("contextmenu", event => {
     const isMacPlatform = /Mac|iPod|iPhone|iPad/.test(navigator.platform || "") || /Mac/.test(navigator.userAgent || "");
 
     function renderMenuItem(id, label, shortcut = "", danger = false) {
-        return `<div class="menu-item${danger ? " danger" : ""}" id="${id}"><span class="menu-item-label">${escapeHtml(label)}</span>${shortcut ? `<span class="menu-item-key">${escapeHtml(shortcut)}</span>` : ""}</div>`;
+        return `<div class="menu-item${danger ? " danger" : ""}" id="${id}" role="menuitem" tabindex="-1"><span class="menu-item-label">${escapeHtml(label)}</span>${shortcut ? `<span class="menu-item-key" aria-hidden="true">${escapeHtml(shortcut)}</span>` : ""}</div>`;
     }
 
     if (targetFile) {
         contextMenu.innerHTML = `
             ${renderMenuItem("menu-open", "Open")}
-            ${renderMenuItem("menu-open-side", "Open to the Side", isMacPlatform ? "⌥Enter" : "Ctrl+Enter")}
-            ${renderMenuItem("menu-reveal", "Reveal in Explorer", isMacPlatform ? "⇧⌥R" : "Shift+Alt+R")}
-            ${renderMenuItem("menu-open-containing-folder", "Open Containing Folder", isMacPlatform ? "⌥⌘R" : "Ctrl+Alt+R")}
+            ${renderMenuItem("menu-open-side", "Open to the Side", isMacPlatform ? "⌘Enter" : "Ctrl+Enter")}
+            ${renderMenuItem("menu-reveal", "Reveal in Explorer")}
+            ${renderMenuItem("menu-open-containing-folder", "Open Containing Folder")}
             ${renderMenuItem("menu-open-with", "Open With...")}
             ${renderMenuItem("menu-open-terminal", "Open in Integrated Terminal")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-select-compare", "Select for Compare")}
             ${renderMenuItem("menu-compare-selected", "Compare with Selected")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-open-timeline", "Open Timeline")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-cut", "Cut", isMacPlatform ? "⌘X" : "Ctrl+X")}
             ${renderMenuItem("menu-copy", "Copy", isMacPlatform ? "⌘C" : "Ctrl+C")}
-            <div class="menu-separator"></div>
-            ${renderMenuItem("menu-copy-path", "Copy Path", isMacPlatform ? "⌥⌘C" : "Ctrl+Alt+C")}
-            ${renderMenuItem("menu-copy-rel-path", "Copy Relative Path", isMacPlatform ? "⇧⌥⌘C" : "Ctrl+Shift+Alt+C")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
+            ${renderMenuItem("menu-copy-path", "Copy Path")}
+            ${renderMenuItem("menu-copy-rel-path", "Copy Relative Path")}
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-run-tests", "Run Tests")}
             ${renderMenuItem("menu-debug-tests", "Debug Tests")}
             ${renderMenuItem("menu-coverage-tests", "Run Tests with Coverage")}
-            <div class="menu-separator"></div>
-            ${renderMenuItem("menu-rename", "Rename...", isMacPlatform ? "Enter" : "F2")}
-            ${renderMenuItem("menu-delete", "Delete", isMacPlatform ? "⌘⌫" : "Delete", true)}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
+            ${renderMenuItem("menu-rename", "Rename...", "F2")}
+            ${renderMenuItem("menu-delete", "Delete", isMacPlatform ? "⌦" : "Delete", true)}
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-ignore", "Ignore in Thumbview")}
         `;
 
@@ -5910,22 +7143,22 @@ canvas.addEventListener("contextmenu", event => {
     } else if (targetFolderCard) {
         contextMenu.innerHTML = `
             ${renderMenuItem("menu-open-folder", "Open Folder")}
-            ${renderMenuItem("menu-reveal-folder", "Reveal in Explorer", isMacPlatform ? "⇧⌥R" : "Shift+Alt+R")}
+            ${renderMenuItem("menu-reveal-folder", "Reveal in Explorer")}
             ${renderMenuItem("menu-terminal-folder", "Open in Integrated Terminal")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-new-file-folder", "New File...")}
             ${renderMenuItem("menu-new-subfolder", "New Folder...")}
-            <div class="menu-separator"></div>
-            ${renderMenuItem("menu-cut-folder", "Cut Folder", isMacPlatform ? "⌘X" : "Ctrl+X")}
-            ${renderMenuItem("menu-copy-folder", "Copy Folder", isMacPlatform ? "⌘C" : "Ctrl+C")}
-            ${renderMenuItem("menu-paste-folder", "Paste", isMacPlatform ? "⌘V" : "Ctrl+V")}
-            <div class="menu-separator"></div>
-            ${renderMenuItem("menu-copy-folder-path", "Copy Path", isMacPlatform ? "⌥⌘C" : "Ctrl+Alt+C")}
-            ${renderMenuItem("menu-copy-folder-rel-path", "Copy Relative Path", isMacPlatform ? "⇧⌥⌘C" : "Ctrl+Shift+Alt+C")}
-            <div class="menu-separator"></div>
-            ${renderMenuItem("menu-rename-folder", "Rename...", isMacPlatform ? "Enter" : "F2")}
-            ${renderMenuItem("menu-delete-folder", "Delete Folder", isMacPlatform ? "⌘⌫" : "Delete", true)}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
+            ${renderMenuItem("menu-cut-folder", "Cut Folder")}
+            ${renderMenuItem("menu-copy-folder", "Copy Folder")}
+            ${renderMenuItem("menu-paste-folder", "Paste")}
+            <div class="menu-separator" role="separator"></div>
+            ${renderMenuItem("menu-copy-folder-path", "Copy Path")}
+            ${renderMenuItem("menu-copy-folder-rel-path", "Copy Relative Path")}
+            <div class="menu-separator" role="separator"></div>
+            ${renderMenuItem("menu-rename-folder", "Rename...")}
+            ${renderMenuItem("menu-delete-folder", "Delete Folder", "", true)}
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-ignore-folder", "Ignore Folder in Thumbview")}
         `;
 
@@ -5999,12 +7232,12 @@ canvas.addEventListener("contextmenu", event => {
         contextMenu.innerHTML = `
             ${renderMenuItem("menu-space-new-file", "New File...")}
             ${renderMenuItem("menu-space-new-folder", "New Folder...")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-space-paste", "Paste", isMacPlatform ? "⌘V" : "Ctrl+V")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-space-expand", "Expand Grid Space")}
             ${renderMenuItem("menu-space-reduce", "Reduce Grid Space")}
-            <div class="menu-separator"></div>
+            <div class="menu-separator" role="separator"></div>
             ${renderMenuItem("menu-space-reflow", "Reflow Layout")}
             ${focusedFolder ? renderMenuItem("menu-space-root", "Show All Files (Root)") : renderMenuItem("menu-space-refresh", "Refresh View")}
         `;
@@ -6082,12 +7315,26 @@ canvas.addEventListener("contextmenu", event => {
 
     contextMenu.style.left = `${cx}px`;
     contextMenu.style.top = `${cy}px`;
+    // Opened from the keyboard (Shift+F10, the Menu key): focus the first item. From the mouse the
+    // menu itself takes focus, so the arrow keys still reach it and typing does not go to search.
+    const firstItem = contextMenu.querySelector('[role="menuitem"]');
+    if (syntheticPointer && firstItem) firstItem.focus();
+    else contextMenu.focus();
 });
 
-// Re-render canvas automatically when user switches VS Code color theme
+// Re-render canvas automatically when user switches VS Code color theme. VS Code signals a theme
+// change through body's class and its style attribute (the --vscode-* variables), but the reveal gate
+// also writes body.style.opacity on every hide and reveal; reacting to that cleared every tile and
+// mosaic raster on each reopen. Only a change to the class or to the style minus opacity counts.
+const themeSignature = () => `${document.body.className}|${(document.body.getAttribute?.("style") || "").replace(/opacity\s*:[^;]*;?/g, "")}`;
+let lastThemeSignature = themeSignature();
 const themeObserver = new MutationObserver(() => {
+    const signature = themeSignature();
+    if (signature === lastThemeSignature) return;
+    lastThemeSignature = signature;
     themeTokensDirty = true;
     refreshThemeTokens();
+    applyDecorationThemeColors();
     tileRasterCache.clear();
     mosaicCache.clear();
     render();
@@ -6136,12 +7383,12 @@ function updateSettingsModalState() {
 
     const minWInput = document.getElementById("min-cell-width-input");
     if (minWInput && document.activeElement !== minWInput) {
-        minWInput.value = (typeof data.minCellWidth === "number") ? data.minCellWidth : 60;
+        minWInput.value = (typeof data.minCellWidth === "number") ? data.minCellWidth : 40;
     }
 
     const minHInput = document.getElementById("min-cell-height-input");
     if (minHInput && document.activeElement !== minHInput) {
-        minHInput.value = (typeof data.minCellHeight === "number") ? data.minCellHeight : 40;
+        minHInput.value = (typeof data.minCellHeight === "number") ? data.minCellHeight : 28;
     }
 
     const autoIgnoreInput = document.getElementById("auto-ignore-threshold-input");
@@ -6634,6 +7881,44 @@ if (shortcutLegendClose) {
     };
 }
 
+// "N folders auto-hidden" (extension.ts autoHiddenFolders): auto-ignore can hide a real folder on the
+// first open, and Zen mode silences the notification that says so. Opens Folders & Ignored; the
+// close button hides it until the set of auto-hidden folders changes.
+const autoHiddenChip = document.getElementById("auto-hidden-chip");
+const autoHiddenOpen = document.getElementById("auto-hidden-open");
+const autoHiddenSignature = folders => [...folders].sort().join("\n");
+let autoHiddenDismissedLocally = null;
+
+function syncAutoHiddenChip() {
+    if (!autoHiddenChip || !autoHiddenOpen || !data) return;
+    const folders = Array.isArray(data.autoHiddenFolders) ? data.autoHiddenFolders : [];
+    const signature = autoHiddenSignature(folders);
+    const dismissed = signature === data.autoHiddenDismissed || signature === autoHiddenDismissedLocally;
+    // Never stacked with the one-time fullscreen banner (bottom center); shown once it is gone.
+    const bannerShown = typeof fullscreenNotice !== "undefined" && fullscreenNotice && !fullscreenNotice.hidden;
+    autoHiddenChip.hidden = folders.length === 0 || dismissed || bannerShown;
+    if (autoHiddenChip.hidden) return;
+    const label = folders.length === 1 ? `1 folder auto-hidden (${folders[0].replace(/\/$/, "")})` : `${folders.length} folders auto-hidden`;
+    if (autoHiddenOpen.textContent !== label) autoHiddenOpen.textContent = label;
+}
+if (autoHiddenOpen) {
+    autoHiddenOpen.onclick = () => {
+        const btn = document.getElementById("folders-btn");
+        if (btn) btn.click();
+    };
+}
+const autoHiddenClose = document.getElementById("auto-hidden-close");
+if (autoHiddenClose) {
+    autoHiddenClose.onclick = () => {
+        const signature = autoHiddenSignature(Array.isArray(data && data.autoHiddenFolders) ? data.autoHiddenFolders : []);
+        autoHiddenDismissedLocally = signature;
+        if (autoHiddenChip) autoHiddenChip.hidden = true;
+        // extension.ts settings_actions "dismissAutoHiddenChip" { signature }.
+        vscode.postMessage({ command: "dismissAutoHiddenChip", signature });
+        canvas.focus();
+    };
+}
+
 const fullscreenNotice = document.getElementById("fullscreen-notice");
 const fullscreenToggle = document.getElementById("fullscreen-toggle");
 
@@ -6645,10 +7930,12 @@ function showFullscreenNotice(keybinding) {
     fullscreenNotice.hidden = false;
     const text = document.getElementById("fullscreen-notice-text");
     if (text) announce(text.textContent);
+    syncAutoHiddenChip();
 }
 
 function hideFullscreenNotice() {
     if (fullscreenNotice) fullscreenNotice.hidden = true;
+    syncAutoHiddenChip();
 }
 
 const fullscreenKeepBtn = document.getElementById("fullscreen-notice-keep");

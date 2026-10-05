@@ -1,18 +1,37 @@
 // Measures the webview at workspace scale in headless Chrome, using the real page and a
 // host-shaped payload of synthetic files spread over folders (auto-ignore off: the worst case).
 // For 1,000 / 5,000 / 10,000 files it reports:
-//   payload      size of the "data" message the host posts
+//   payload      size of the "data" message the host posts (text over FIRST_PAYLOAD_LINE_BUDGET is
+//                streamed afterwards in "fileLines" chunks, as extension.ts withDeltaLines does)
 //   first frame  from posting that message to the page revealing a frame at a stable size
+//   all text     from posting it to the last streamed chunk being applied
 //   frame        render() time with warm caches (the cost of a repaint, e.g. on hover)
 //   search       time to update the search index for one keystroke and repaint
-//   drill-in     time to open one folder and paint it
+//   drill-in     time to open one folder and paint it (tiles over the frame budget as placeholders),
+//                and in parentheses until every tile is fully drawn
 // Headless Chrome rasterizes on the CPU, so absolute numbers vary by machine; compare runs on
 // the same machine. `--json` prints machine-readable results.
 //   npm run benchmark [-- --sizes=1000,5000] [-- --json] [-- --budget]
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { launchChrome, openThumbviewPage, scratchDir, settle, spanningDataMessage, textFile, writeThumbviewPage } from "./lib/webview_page.mjs";
+import { createRequire } from "node:module";
+import { launchChrome, openThumbviewPage, root, scratchDir, settle, spanningDataMessage, textFile, writeThumbviewPage } from "./lib/webview_page.mjs";
+
+const { loadTs } = createRequire(import.meta.url)(join(root, "src/test/helpers/load_ts.js"));
+const { inlineWithinBudget, chunkBySize, lineTextSize } = loadTs("../payload_stream.ts");
+
+/** Splits a full payload the way the host does: inline text within budget, the rest as fileLines chunks. */
+function streamedMessages(message) {
+    const inline = inlineWithinBudget(message.files.map(lineTextSize));
+    const streamed = [];
+    const files = message.files.map((f, i) => {
+        if (inline[i]) return f;
+        streamed.push({ id: f.id, contentVersion: f.contentVersion, lines: f.lines, fullLines: f.fullLines });
+        return { ...f, lines: [], fullLines: undefined, linesPending: true };
+    });
+    return { first: { ...message, files }, chunks: chunkBySize(streamed, lineTextSize).map(c => ({ command: "fileLines", files: c })) };
+}
 
 const sizesArg = process.argv.find(a => a.startsWith("--sizes="));
 const SIZES = sizesArg ? sizesArg.substring(8).split(",").map(Number) : [1000, 5000, 10000];
@@ -52,7 +71,8 @@ try {
     for (const n of SIZES) {
         console.error(`benchmarking ${n} files...`);
         const files = workspace(n);
-        const { message } = spanningDataMessage(files, files.map(f => f.id));
+        const { message: fullMessage } = spanningDataMessage(files, files.map(f => f.id));
+        const { first: message, chunks } = streamedMessages(fullMessage);
         const payloadMB = Buffer.byteLength(JSON.stringify(message)) / 1024 / 1024;
 
         // Open the page without data, stage the payload inside it, then time postMessage (the
@@ -61,15 +81,27 @@ try {
         const page = await openThumbviewPage(browser, pagePath, { width: 1600, height: 900, waitForReveal: false });
         // Staged through a file: sending ~150 MB through the DevTools protocol crashes the tab.
         const payloadPath = join(dir, `payload-${n}.json`);
-        writeFileSync(payloadPath, JSON.stringify(message));
-        await page.evaluate(async url => { window.__payload = await (await fetch(url)).json(); }, pathToFileURL(payloadPath).href);
+        writeFileSync(payloadPath, JSON.stringify({ message, chunks }));
+        await page.evaluate(async url => { window.__staged = await (await fetch(url)).json(); }, pathToFileURL(payloadPath).href);
         rmSync(payloadPath);
         await page.evaluate(() => {
+            // Registered after the page's own listener, so it runs once the last chunk is applied.
+            window.addEventListener("message", e => { if (e.data && e.data.__benchDone) window.__textDone = performance.now(); });
             window.__t0 = performance.now();
-            window.postMessage(window.__payload, "*");
+            window.postMessage(window.__staged.message, "*");
+            // The host sends each chunk once the previous one is delivered.
+            (async () => {
+                for (const chunk of window.__staged.chunks) {
+                    await new Promise(r => setTimeout(r, 0));
+                    window.postMessage(chunk, "*");
+                }
+                window.postMessage({ __benchDone: true }, "*");
+            })();
         });
         await page.waitForFunction(() => document.body.style.opacity === "1", { timeout: 120000, polling: "raf" });
         const firstFrame = await page.evaluate(() => performance.now() - window.__t0);
+        await page.waitForFunction(() => window.__textDone !== undefined, { timeout: 120000 });
+        const allText = await page.evaluate(() => window.__textDone - window.__t0);
         await settle(500);
 
         const frame = await page.evaluate(() => {
@@ -94,19 +126,26 @@ try {
             }, ch));
         }
 
-        const drill = await page.evaluate(() => {
+        // First paint: the synchronous render after the click (tiles over the frame budget are drawn
+        // as placeholders). Complete: every tile rasterized, over the following frames.
+        const drill = await page.evaluate(() => new Promise(resolve => {
             const t = performance.now();
             setFocusedFolderWithHistory("pkg001/");
-            return performance.now() - t;
-        });
+            const firstPaint = performance.now() - t;
+            const check = () => (rasterDeferred ? requestAnimationFrame(check) : resolve({ firstPaint, complete: performance.now() - t }));
+            requestAnimationFrame(check);
+        }));
 
         results.push({
             files: n,
             payloadMB: +payloadMB.toFixed(1),
             firstFrameMs: Math.round(firstFrame),
+            allTextMs: Math.round(allText),
+            streamedChunks: chunks.length,
             frameMs: +median(frame).toFixed(1),
             searchKeystrokeMs: +median(search).toFixed(1),
-            drillInMs: +drill.toFixed(1)
+            drillInMs: +drill.firstPaint.toFixed(1),
+            drillInCompleteMs: Math.round(drill.complete)
         });
         await page.close();
     }
@@ -133,10 +172,10 @@ if (process.argv.includes("--budget")) {
 if (process.argv.includes("--json")) {
     console.log(JSON.stringify(results, null, 2));
 } else {
-    console.log("| Files | Payload | First frame | Frame (warm) | Search keystroke | Drill into folder |");
-    console.log("|---:|---:|---:|---:|---:|---:|");
+    console.log("| Files | Payload | First frame | All text (chunks) | Frame (warm) | Search keystroke | Drill into folder (complete) |");
+    console.log("|---:|---:|---:|---:|---:|---:|---:|");
     for (const r of results) {
-        console.log(`| ${r.files.toLocaleString("en-US")} | ${r.payloadMB} MB | ${r.firstFrameMs} ms | ${r.frameMs} ms | ${r.searchKeystrokeMs} ms | ${r.drillInMs} ms |`);
+        console.log(`| ${r.files.toLocaleString("en-US")} | ${r.payloadMB} MB | ${r.firstFrameMs} ms | ${r.allTextMs} ms (${r.streamedChunks}) | ${r.frameMs} ms | ${r.searchKeystrokeMs} ms | ${r.drillInMs} ms (${r.drillInCompleteMs} ms) |`);
     }
 }
 

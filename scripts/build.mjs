@@ -1,6 +1,6 @@
 // Bundles the extension host (src/extension.ts and everything it imports) into dist/extension.js,
-// the file package.json "main" loads. tsc still compiles src/ to out/ for type checking and the
-// unit tests; only the bundle ships.
+// the file package.json "main" loads, and the uninstall hook into dist/uninstall.js. tsc still
+// compiles src/ to out/ for type checking and the unit tests; only the bundles ship.
 //   node scripts/build.mjs               one development build (with source maps)
 //   node scripts/build.mjs --production  minified, no source maps (vscode:prepublish)
 //   node scripts/build.mjs --watch       rebuild on change, and run `tsc -watch` alongside
@@ -18,8 +18,9 @@ const watch = process.argv.includes("--watch");
 
 const options = {
     absWorkingDir: root,
-    entryPoints: ["src/extension.ts"],
-    outfile: "dist/extension.js",
+    // dist/uninstall.js: package.json "vscode:uninstall" (uninstalling ends study participation).
+    entryPoints: { extension: "src/extension.ts", uninstall: "src/study/uninstall.ts" },
+    outdir: "dist",
     bundle: true,
     platform: "node",
     format: "cjs",

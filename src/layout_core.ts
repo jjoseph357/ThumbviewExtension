@@ -292,8 +292,14 @@ export function reduceSpanningGridOrder(
 }
 
 /**
- * Reorders items in a 2D spanning grid layout, placing sourceId at targetCol, targetRow.
- * Preserves empty holes in the column-major grid and respects capacity constraints.
+ * Moves `sourceId` in a spanning (column-major) order so its top lands at (targetCol, targetRow),
+ * both in flow cells. The source's cells and an equal-height block of cells at the target trade
+ * places, empty cells included: [1;1;0] onto [2;0;0] gives [2;0;0] and [1;1;0]; onto [2;3;0] gives
+ * [2;3;0] and [1;1;0]; dropped on the 3 of [2;3;0] gives [2;1;1] and [3;0;0]. A block never splits
+ * a tile: both blocks grow to whole tiles (so dragging either of two tiles onto the other swaps the
+ * same blocks). A move within one column shifts the tiles in between around it, in order. Nothing
+ * outside the two blocks moves. `rejected` is true when no such move exists (a tile would be split,
+ * or a block leaves the grid); the order is then returned unchanged.
  */
 export function reorderSpanningItems(
     activeIds: string[],
@@ -315,162 +321,181 @@ export function reorderSpanningItems(
     sourceRow: number;
     targetPlacement?: { id: string; col: number; row: number; nCells: number };
     safeSourceRow: number;
+    rejected: boolean;
 } {
-    let maxColUsed = maxAllowedCols - 1;
-    let scanCol = 0;
-    let scanRow = 0;
+    type Placement = { id: string; col: number; row: number; nCells: number };
+    const placements: Placement[] = [];
+    const placementById = new Map<string, Placement>();
+    let col = 0;
+    let row = 0;
+    let maxColUsed = 0;
     for (const id of currentOrder) {
         const nCells = id ? (allocations[id] || 1) : 1;
-        if (scanRow > 0 && scanRow + nCells > wrapRows) {
-            scanCol++;
-            scanRow = 0;
+        if (row > 0 && row + nCells > wrapRows) {
+            col++;
+            row = 0;
         }
-        if (id && scanCol > maxColUsed) {
-            maxColUsed = scanCol;
+        if (id) {
+            const p = { id, col, row, nCells };
+            placements.push(p);
+            placementById.set(id, p);
+            maxColUsed = Math.max(maxColUsed, col);
         }
-        scanRow += nCells;
+        row += nCells;
     }
-
     const maxCol = Math.max(maxAllowedCols - 1, maxColUsed);
-    const sourceCells = allocations[sourceId] || 1;
     const gridRows = Math.max(maxAllowedRows, wrapRows);
-
-    let currCol = 0;
-    let currRow = 0;
-    const placements: Array<{ id: string; col: number; row: number; nCells: number }> = [];
-    const placementBySlot = new Map<string, { id: string; col: number; row: number; nCells: number }>();
-    const placementById = new Map<string, { id: string; col: number; row: number; nCells: number }>();
-
-    for (const id of currentOrder) {
-        const nCells = id ? (allocations[id] || 1) : 1;
-        if (currRow > 0 && currRow + nCells > wrapRows) {
-            currCol++;
-            currRow = 0;
-        }
-        if (currCol > maxCol) break;
-        if (!id) {
-            currRow += 1;
-            continue;
-        }
-        const p = { id, col: currCol, row: currRow, nCells };
-        placements.push(p);
-        placementById.set(id, p);
-        for (let i = 0; i < nCells; i++) {
-            if (currRow + i < gridRows) {
-                placementBySlot.set(`${currCol},${currRow + i}`, p);
-            }
-        }
-        currRow += nCells;
+    const unchanged = (rejected: boolean) => ({
+        newOrder: [...currentOrder],
+        rows: wrapRows,
+        cols: Math.max(maxAllowedCols, maxCol + 1),
+        finalTargetCol: source ? source.col : 0,
+        finalTargetRow: source ? source.row : 0,
+        sourceCol: source ? source.col : 0,
+        sourceRow: source ? source.row : 0,
+        targetPlacement: undefined,
+        safeSourceRow: source ? source.row : 0,
+        rejected
+    });
+    const source = placementById.get(sourceId);
+    if (!source) {
+        return unchanged(true);
+    }
+    const h = source.nCells;
+    const tc = Math.max(0, Math.min(maxCol, targetCol));
+    const tr = Math.max(0, Math.min(gridRows - h, targetRow));
+    if (tc === source.col && tr === source.row) {
+        return unchanged(false);
     }
 
-    const sourcePlacement = placementById.get(sourceId);
-    const sourceCol = sourcePlacement ? sourcePlacement.col : 0;
-    const sourceRow = sourcePlacement ? sourcePlacement.row : 0;
-
-    let targetPlacement = placementBySlot.get(`${targetCol},${targetRow}`);
-    if (targetPlacement && targetPlacement.id === sourceId) {
-        targetPlacement = undefined;
-    }
-
-    const clamped = clampTargetToGridCapacity(targetCol, targetRow, sourceCells, maxAllowedCols, maxAllowedRows);
-    const maxAllowedRow = Math.max(0, maxAllowedRows - sourceCells);
-    const finalTargetCol = targetPlacement ? targetPlacement.col : clamped.col;
-    const finalTargetRow = targetPlacement ? Math.min(targetPlacement.row, maxAllowedRow) : clamped.row;
-
-    const grid: string[][] = [];
+    // occupant[c][r]: the placement covering that cell, if any.
+    const occupant: Array<Array<Placement | undefined>> = [];
     for (let c = 0; c <= maxCol; c++) {
-        grid.push(new Array(gridRows).fill(""));
+        occupant.push(new Array(gridRows).fill(undefined));
     }
     for (const p of placements) {
-        for (let i = 0; i < p.nCells; i++) {
-            if (p.row + i < gridRows && p.col <= maxCol) {
-                grid[p.col][p.row + i] = p.id;
+        for (let i = 0; i < p.nCells && p.row + i < gridRows; i++) {
+            occupant[p.col][p.row + i] = p;
+        }
+    }
+    const targetPlacement = occupant[tc][tr] && occupant[tc][tr] !== source ? occupant[tc][tr] : undefined;
+
+    // Grows [start, end) in column c until no tile crosses either edge.
+    const wholeSpan = (c: number, start: number, end: number): { start: number; end: number } => {
+        for (;;) {
+            const top = start < gridRows ? occupant[c][start] : undefined;
+            const bottom = end - 1 >= 0 && end - 1 < gridRows ? occupant[c][end - 1] : undefined;
+            const newStart = top && top.row < start ? top.row : start;
+            const newEnd = bottom && bottom.row + bottom.nCells > end ? bottom.row + bottom.nCells : end;
+            if (newStart === start && newEnd === end) {
+                return { start, end };
             }
+            start = newStart;
+            end = newEnd;
+        }
+    };
+    const tilesIn = (c: number, start: number, end: number): Placement[] => {
+        const out: Placement[] = [];
+        for (let r = start; r < end && r < gridRows; r++) {
+            const p = occupant[c][r];
+            if (p && !out.includes(p)) out.push(p);
+        }
+        return out;
+    };
+    const moves = new Map<Placement, { col: number; row: number }>();
+
+    const sameColumnOverlap = tc === source.col && tr < source.row + h && source.row < tr + h;
+    if (!sameColumnOverlap) {
+        // Two blocks of equal height, each made of whole tiles and empty cells, trade places.
+        let rStart = tr;
+        let height = h;
+        let target = { start: tr, end: tr + h };
+        let src = { start: source.row, end: source.row + h };
+        for (let guard = 0; ; guard++) {
+            target = wholeSpan(tc, rStart, rStart + height);
+            src = wholeSpan(source.col, source.row, source.row + Math.max(height, target.end - target.start));
+            const next = Math.max(target.end - target.start, src.end - src.start);
+            if (target.end > gridRows || src.end > gridRows || guard > gridRows) {
+                return unchanged(true);
+            }
+            if (next === target.end - target.start && next === src.end - src.start) {
+                break;
+            }
+            rStart = target.start;
+            height = next;
+        }
+        // In one column, the blocks must not overlap after growing.
+        if (tc === source.col && target.start < src.end && src.start < target.end) {
+            return unchanged(true);
+        }
+        for (const p of tilesIn(tc, target.start, target.end)) {
+            moves.set(p, { col: source.col, row: p.row - target.start + src.start });
+        }
+        for (const p of tilesIn(source.col, src.start, src.end)) {
+            moves.set(p, { col: tc, row: p.row - src.start + target.start });
+        }
+    } else {
+        // Within one column: the source takes [tr, tr + h); the other tiles of the span keep their
+        // order and fill the remaining cells, top to bottom, never split by the source.
+        const span = wholeSpan(tc, Math.min(source.row, tr), Math.max(source.row, tr) + h);
+        if (span.end > gridRows) {
+            return unchanged(true);
+        }
+        const others: Array<Placement | null> = [];
+        for (let r = span.start; r < span.end; r++) {
+            const p = occupant[tc][r];
+            if (p === source) continue;
+            if (!p) others.push(null);
+            else if (p.row === r) others.push(p);
+        }
+        let r = span.start;
+        moves.set(source, { col: tc, row: tr });
+        for (const item of others) {
+            const n = item ? item.nCells : 1;
+            if (r < tr + h && r + n > tr) {
+                r = tr + h;
+            }
+            if (r + n > span.end) {
+                return unchanged(true);
+            }
+            if (item) moves.set(item, { col: tc, row: r });
+            r += n;
         }
     }
 
+    const finalPlacements = placements.map(p => ({ ...p, ...(moves.get(p) || {}) }));
+    const movedSource = finalPlacements.find(p => p.id === sourceId)!;
+    let effectiveWrapRows = wrapRows;
+    for (const p of finalPlacements) {
+        effectiveWrapRows = Math.max(effectiveWrapRows, p.row + p.nCells);
+    }
+
+    // Serialize column-major, every column effectiveWrapRows tall, so every tile keeps its cell.
+    const cell: string[][] = [];
     for (let c = 0; c <= maxCol; c++) {
-        for (let r = 0; r < gridRows; r++) {
-            if (grid[c][r] === sourceId) {
-                grid[c][r] = "";
-            }
-        }
+        cell.push(new Array(effectiveWrapRows).fill(""));
     }
-
-    // Identify all items overlapping the target span [finalTargetRow ... finalTargetRow + sourceCells - 1] in finalTargetCol
-    const displacedPlacements: Array<{ id: string; col: number; row: number; nCells: number }> = [];
-    const seenDisplacedIds = new Set<string>();
-
-    for (let i = 0; i < sourceCells; i++) {
-        const r = finalTargetRow + i;
-        if (r < gridRows && finalTargetCol <= maxCol) {
-            const cellId = grid[finalTargetCol][r];
-            if (cellId && cellId !== sourceId && !seenDisplacedIds.has(cellId)) {
-                seenDisplacedIds.add(cellId);
-                const p = placementById.get(cellId);
-                if (p) displacedPlacements.push(p);
-            }
-        }
+    const startsAt = new Map<string, Placement>();
+    for (const p of finalPlacements) {
+        startsAt.set(`${p.col},${p.row}`, p);
     }
-    if (targetPlacement && targetPlacement.id !== sourceId && !seenDisplacedIds.has(targetPlacement.id)) {
-        seenDisplacedIds.add(targetPlacement.id);
-        displacedPlacements.push(targetPlacement);
-    }
-
-    // Clear sourceId and all displaced items from the grid
-    for (let c = 0; c <= maxCol; c++) {
-        for (let r = 0; r < gridRows; r++) {
-            if (grid[c][r] === sourceId || seenDisplacedIds.has(grid[c][r])) {
-                grid[c][r] = "";
-            }
-        }
-    }
-
-    // Place displaced items into sourceCol, preserving relative offsets and gaps
-    let safeSourceRow = sourceRow;
-    let curSourceR = sourceRow;
-    for (const p of displacedPlacements) {
-        const relOffset = p.row - finalTargetRow;
-        let destR = (sourceCells >= p.nCells && relOffset >= 0)
-            ? (sourceRow + relOffset)
-            : curSourceR;
-        destR = Math.min(destR, Math.max(0, gridRows - p.nCells));
-        for (let i = 0; i < p.nCells; i++) {
-            if (sourceCol <= maxCol && destR + i < gridRows) {
-                grid[sourceCol][destR + i] = p.id;
-            }
-        }
-        curSourceR = destR + p.nCells;
-    }
-    if (displacedPlacements.length > 0) {
-        safeSourceRow = Math.min(sourceRow, Math.max(0, gridRows - displacedPlacements[0].nCells));
-    }
-
-    for (let i = 0; i < sourceCells; i++) {
-        if (finalTargetCol <= maxCol && finalTargetRow + i < gridRows) {
-            grid[finalTargetCol][finalTargetRow + i] = sourceId;
-        }
-    }
-
-    const effectiveWrapRows = Math.max(wrapRows, finalTargetRow + sourceCells);
-
     const newOrder: string[] = [];
     for (let c = 0; c <= maxCol; c++) {
         let r = 0;
         while (r < effectiveWrapRows) {
-            const cell = grid[c][r];
-            if (cell) {
-                newOrder.push(cell);
-                const n = allocations[cell] || 1;
-                r += n;
+            const p = startsAt.get(`${c},${r}`);
+            if (p) {
+                newOrder.push(p.id);
+                r += p.nCells;
             } else {
                 newOrder.push("");
                 r += 1;
             }
         }
     }
-
-    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+    // Padding is trimmed, never below the order's original length: a shorter order can shrink
+    // the grid and move every tile (spatial stability).
+    while (newOrder.length > currentOrder.length && !newOrder[newOrder.length - 1]) {
         newOrder.pop();
     }
 
@@ -478,13 +503,49 @@ export function reorderSpanningItems(
         newOrder,
         rows: effectiveWrapRows,
         cols: Math.max(maxAllowedCols, maxCol + 1),
-        finalTargetCol,
-        finalTargetRow,
-        sourceCol,
-        sourceRow,
+        finalTargetCol: movedSource.col,
+        finalTargetRow: movedSource.row,
+        sourceCol: source.col,
+        sourceRow: source.row,
         targetPlacement,
-        safeSourceRow
+        safeSourceRow: source.row,
+        rejected: false
     };
+}
+
+/**
+ * The flow row under a drawn (display) row in one column of a spanning order. Tiles are drawn at
+ * their current height, so below a file that grew or shrank the drawn rows no longer equal the flow
+ * rows a reorder works in; drops convert with this. Past a column's last entry, rows map one to one.
+ */
+export function displayToFlowRow(
+    order: string[],
+    flowCells: { [id: string]: number },
+    displayCells: { [id: string]: number },
+    wrapRows: number,
+    col: number,
+    displayRow: number
+): number {
+    let c = 0;
+    let flow = 0;
+    let display = 0;
+    for (const id of order) {
+        const f = id ? (flowCells[id] || 1) : 1;
+        const g = id ? (displayCells[id] || f) : 1;
+        if (flow > 0 && flow + f > wrapRows) {
+            if (c === col) break;
+            c++;
+            flow = 0;
+            display = 0;
+        }
+        if (c > col) break;
+        if (c === col && displayRow < display + g) {
+            return flow + Math.min(Math.max(0, displayRow - display), f - 1);
+        }
+        flow += f;
+        display += g;
+    }
+    return c === col ? flow + Math.max(0, displayRow - display) : displayRow;
 }
 
 export type LineCategory = "comment" | "import" | "function" | "class" | "control-flow" | "normal";

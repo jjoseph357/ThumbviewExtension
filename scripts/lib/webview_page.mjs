@@ -51,8 +51,8 @@ export function spanningDataMessage(files, order, { flowCells = {}, ignorePatter
             fullscreenOnOpen: true,
             compressionPercentage: 5,
             autoIgnoreThreshold: 30,
-            minCellWidth: 60,
-            minCellHeight: 40,
+            minCellWidth: 40,
+            minCellHeight: 28,
             openKeybinding: "F4",
             ignorePatterns,
             ignorePatternCounts: Object.fromEntries(ignorePatterns.map(p => [p, (ignoredFilesMap[p] || []).length])),
@@ -187,7 +187,7 @@ export function writeThumbviewPage(workDir) {
         Uri: { joinPath: (base, ...parts) => fileUri(join(base.fsPath, ...parts)) }
     });
     const pagePath = join(workDir, "thumbview.html");
-    writeFileSync(pagePath, getHtml({ cspSource: "file:", asWebviewUri: uri => uri }, { extensionUri: fileUri(root) }, "F4", true));
+    writeFileSync(pagePath, getHtml({ cspSource: "file:", asWebviewUri: uri => uri }, { extensionUri: fileUri(root) }, "F4"));
     return pagePath;
 }
 

@@ -57,7 +57,7 @@ npm run package                                    # produces thumbview-<version
 code --install-extension thumbview-<version>.vsix
 ```
 
-The package contains only `dist/extension.js`, the runtime files in `media/`, and the README, CHANGELOG, and LICENSE (see `.vscodeignore`).
+The package contains only `dist/extension.js`, `dist/uninstall.js` (run by VS Code after an uninstall; it ends study participation), the runtime files in `media/`, and the README, CHANGELOG, and LICENSE (see `.vscodeignore`).
 
 ### Notes
 

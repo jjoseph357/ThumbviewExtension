@@ -48,25 +48,17 @@ console.log("New layout after unignoring 70 files (total 80):", {
     actualRowsUsed: maxRowPlaced + 1
 });
 
-// The grid MUST add files to rows (wrapRows >= 6 for 80 files)
-assert(
-    newLayout.wrapRows >= 6,
-    `wrapRows MUST expand for 80 files! Expected >= 6, got ${newLayout.wrapRows}`
-);
-assert(
-    maxRowPlaced >= 5,
-    `Files must be placed into rows in addition to columns! Expected maxRowPlaced >= 5, got ${maxRowPlaced}`
-);
-// The grid MUST NOT have phantom empty rows at the bottom (rows should match maxRowPlaced + 1)
-assert(
-    newLayout.rows <= maxRowPlaced + 2,
-    `Grid must not leave bottom half empty! rows: ${newLayout.rows}, maxRowPlaced + 1: ${maxRowPlaced + 1}`
-);
-// Columns should not sprawl out excessively
-assert(
-    newLayout.cols <= 20,
-    `Grid cols must not sprawl out! Expected cols <= 20, got ${newLayout.cols}`
-);
+// Spatial stability (owner's rule): adding files never moves an existing file. The saved column
+// height is kept, so the original ten files keep their exact cells and the new files take new
+// columns; a re-wrap to a taller column (what this test once required) moved every one of them.
+// Reflow Layout is how a user who wants taller columns gets them.
+assert.strictEqual(newLayout.wrapRows, initialLayout.wrapRows, "the saved column height is kept");
+const before = Object.fromEntries(initialLayout.placements.map(p => [p.file.id, `${p.col},${p.row}`]));
+for (const p of newLayout.placements) {
+    if (before[p.file.id]) {
+        assert.strictEqual(`${p.col},${p.row}`, before[p.file.id], `${p.file.id} keeps its cell after 70 files are added`);
+    }
+}
 
 console.log("✓ Test 1 passed: files added to rows and columns without empty vertical space");
 
@@ -239,10 +231,18 @@ const samplePayload = {
     activeFile: null
 };
 
+// With the default minimum tile size (40 x 28 since 0.5.2), 220 files stay readable tiles.
+const defaultPayload = { ...samplePayload };
+msgHandler({ data: defaultPayload });
+assert.strictEqual((defaultPayload._folderCards || []).length, 0, "220 files are readable tiles at the default minimum");
+
+// With the earlier 60 x 40 minimum they are too small and group into folder cards.
+samplePayload.minCellWidth = 60;
+samplePayload.minCellHeight = 40;
 msgHandler({ data: samplePayload });
 
 const folderCards = samplePayload._folderCards || [];
-console.log("Folder cards generated for 220 files with default settings:", folderCards.length);
+console.log("Folder cards generated for 220 files at a 60 x 40 minimum:", folderCards.length);
 assert(
     folderCards.length >= 4,
     `Expected at least 4 folder cards for 220 files across 4 folders, got: ${folderCards.length}`

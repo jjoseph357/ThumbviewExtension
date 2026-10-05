@@ -9,6 +9,8 @@ venv/**
 src/**
 out/**
 scripts/**
+study/**
+tools/**
 node_modules/**
 dist/**/*.map
 media/*.png

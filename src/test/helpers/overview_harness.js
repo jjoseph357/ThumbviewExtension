@@ -42,7 +42,9 @@ function loadOverview(extraExports = []) {
                 dataset: {},
                 classList: { contains: () => false, add: () => {}, remove: () => {}, toggle: () => {} },
                 appendChild: () => {},
-                addEventListener: () => {},
+                listeners: {},
+                addEventListener(event, fn) { (this.listeners[event] = this.listeners[event] || []).push(fn); },
+                removeEventListener: () => {},
                 focus: () => {},
                 blur: () => {},
                 setAttribute: () => {},
@@ -117,10 +119,12 @@ module.exports = { ${names.join(", ")}, getData: () => data };
     }
     const onMessage = (ev) => (windowListeners["message"] || []).forEach(fn => fn(ev));
     const fireWindow = (event, detail = {}) => (windowListeners[event] || []).forEach(fn => fn(detail));
+    // Element listeners (addEventListener on mock elements), e.g. the search box's keydown.
+    const fireElement = (id, event, detail = {}) => (mockElement(id).listeners[event] || []).forEach(fn => fn(detail));
 
     return {
         exports: mod.exports, rafQueue, flushFrames, clock, counts, createdCanvases, mockCtx, viewport, resizeTo,
-        windowListeners, docListeners, postedMessages, onMessage, fireWindow,
+        windowListeners, docListeners, postedMessages, onMessage, fireWindow, fireElement, mockElement,
         canvas: mockElement("map")
     };
 }

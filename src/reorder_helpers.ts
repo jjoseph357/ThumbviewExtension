@@ -34,8 +34,9 @@ export function moveItemToEmptySlot(
 
     newOrder[clampedTargetIndex] = idToMove;
 
-    // Trim trailing empty strings only beyond the last occupied item
-    while (newOrder.length > 0 && !newOrder[newOrder.length - 1]) {
+    // Padding added above is trimmed, but never below the order's original length: a shorter order
+    // can shrink the grid and move every tile (spatial stability). Only Reflow Layout compacts.
+    while (newOrder.length > order.length && !newOrder[newOrder.length - 1]) {
         newOrder.pop();
     }
 

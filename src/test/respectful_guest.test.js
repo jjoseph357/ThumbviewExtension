@@ -138,8 +138,13 @@ function fakeMemento() {
 
     console.log("\n--- Test 6: F4 yields to Search and References, and fullscreen is a setting ---");
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "../../package.json"), "utf8"));
-    const binding = pkg.contributes.keybindings.find(k => k.command === "thumbview.open");
-    assert(binding.when && binding.when.includes("!searchViewletFocus") && binding.when.includes("!referenceSearchVisible"));
+    const bindings = pkg.contributes.keybindings.filter(k => k.command === "thumbview.open");
+    for (const binding of bindings) {
+        assert(binding.when && binding.when.includes("!searchViewletFocus") && binding.when.includes("!referenceSearchVisible"));
+    }
+    // F4 in the user's own Zen mode tells Thumbview so it leaves that Zen mode alone.
+    assert(bindings.some(b => /(^|&& )inZenMode/.test(b.when) && b.args && b.args.inZen === true), "an inZenMode binding passes inZen");
+    assert(bindings.some(b => b.when.includes("!inZenMode") && !(b.args && b.args.inZen)), "the normal binding does not");
     assert.strictEqual(pkg.contributes.configuration.properties["thumbview.fullscreenOnOpen"].default, true);
     console.log("✓ Test 6 passed");
 

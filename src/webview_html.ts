@@ -9,18 +9,17 @@ import { ACCENT_SEARCH, ACCENT_INSPECT, ACCENT_RECENCY } from "./colors";
 export function getHtml(
     webview: vscode.Webview,
     context: vscode.ExtensionContext,
-    openKeybindingLabel: string = "F4",
-    hasPdfs: boolean = false
+    openKeybindingLabel: string = "F4"
 ): string {
     const isMac = process.platform === "darwin";
     const jsUri = webview.asWebviewUri(
         vscode.Uri.joinPath(context.extensionUri, "media", "overview.js")
     );
     const pdfJsUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(context.extensionUri, "media", "pdf.min.js")
+        vscode.Uri.joinPath(context.extensionUri, "media", "pdfjs", "pdf.min.js")
     );
     const pdfWorkerUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(context.extensionUri, "media", "pdf.worker.min.js")
+        vscode.Uri.joinPath(context.extensionUri, "media", "pdfjs", "pdf.worker.min.js")
     );
 
     const nonce = getNonce();
@@ -223,6 +222,16 @@ export function getHtml(
         }
 
         /* Magnifying floating code tooltip */
+        /* Pointer hover feedback over the canvas (overview.js updateHoverOutline); never takes input. */
+        #hover-outline {
+            position: absolute;
+            display: none;
+            box-sizing: border-box;
+            border: 2px solid #648fff;
+            border-radius: 2px;
+            pointer-events: none;
+        }
+
         #hover-tooltip {
             position: absolute;
             display: none;
@@ -1039,6 +1048,39 @@ export function getHtml(
         .shortcut-legend[hidden] {
             display: none;
         }
+        /* Folders auto-ignore hid (overview.js syncAutoHiddenChip); bottom right, clear of the legend. */
+        .auto-hidden-chip {
+            position: absolute;
+            right: 16px;
+            bottom: 12px;
+            z-index: 55;
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            padding: 2px 4px 2px 2px;
+            border-radius: 4px;
+            background: var(--vscode-editorWidget-background, #252526);
+            color: var(--vscode-foreground, #cccccc);
+            border: 1px solid var(--vscode-widget-border, #454545);
+            font-size: 12px;
+        }
+        .auto-hidden-chip[hidden] {
+            display: none;
+        }
+        .auto-hidden-open {
+            border: none;
+            background: transparent;
+            color: var(--vscode-textLink-foreground, #3794ff);
+            font: inherit;
+            padding: 2px 6px;
+            cursor: pointer;
+        }
+        .auto-hidden-open:hover {
+            text-decoration: underline;
+        }
+        .auto-hidden-open:focus-visible {
+            outline: 1px solid var(--vscode-focusBorder, #007fd4);
+        }
         .shortcut-legend kbd {
             font-family: inherit;
             padding: 0 4px;
@@ -1200,10 +1242,12 @@ export function getHtml(
     <div id="canvas-container" role="main">
         <h1 class="sr-only">Thumbview</h1>
         <canvas id="map" tabindex="0" role="application" aria-roledescription="file grid" aria-label="Thumbview files" aria-describedby="grid-help"></canvas>
+        <div id="hover-outline" aria-hidden="true"></div>
+        <div id="search-help" class="sr-only">Enter opens the first match. Down Arrow moves to the matches, then the arrow keys move between them. Escape clears the search.</div>
         <div id="grid-help" class="sr-only">Arrow keys move between files and folders. Home and End jump to the first and last. Enter opens. Shift+F10 opens the context menu. Hold Control to magnify the focused file. Alt+Arrow moves the focused tile. Type to search.</div>
         <div id="sr-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
         <div id="hover-tooltip"></div>
-        <div id="context-menu"></div>
+        <div id="context-menu" role="menu" aria-label="Actions" tabindex="-1"></div>
         
         <div id="folders-popover" class="menu-popover" role="dialog" aria-modal="false" aria-labelledby="folders-popover-title" style="display: none; width: 720px; max-width: 94vw; height: 560px; max-height: 82vh;">
             <div class="popover-header">
@@ -1316,9 +1360,9 @@ export function getHtml(
                             <div class="setting-desc">Minimum tile width and height in pixels before grouping files into folder cards</div>
                         </div>
                         <div class="setting-dimension-group">
-                            <input type="number" id="min-cell-width-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="60" title="Minimum width (px)" aria-label="Minimum tile width in pixels">
+                            <input type="number" id="min-cell-width-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="40" title="Minimum width (px)" aria-label="Minimum tile width in pixels">
                             <span class="setting-dim-sep">×</span>
-                            <input type="number" id="min-cell-height-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="40" title="Minimum height (px)" aria-label="Minimum tile height in pixels">
+                            <input type="number" id="min-cell-height-input" class="setting-input setting-input-dim" min="10" max="500" step="5" value="28" title="Minimum height (px)" aria-label="Minimum tile height in pixels">
                             <span class="setting-input-unit">px</span>
                         </div>
                     </div>
@@ -1377,11 +1421,19 @@ export function getHtml(
                         <button id="change-hotkey-btn" class="action-trigger-btn">Configure Keybinding</button>
                     </div>
                 </div>
+
+                <div class="modal-section">
+                    <div class="modal-section-title">Feedback &amp; Issues</div>
+                    <div class="setting-desc">
+                        Report bugs, request features, or view documentation at
+                        <a href="https://github.com/jjoseph357/thumbview-issues/issues" target="_blank" style="color: var(--vscode-textLink-foreground, #3794ff); text-decoration: underline;">thumbview-issues</a>.
+                    </div>
+                </div>
             </div>
         </div>
         <div class="controls-overlay">
             <div class="search-container" role="search">
-                <input type="text" id="search-input" class="search-input" title="Begin typing with the Thumbview open to Search" aria-label="Search files" placeholder="Search files (e.g. auth)...">
+                <input type="text" id="search-input" class="search-input" title="Begin typing with the Thumbview open to Search" aria-label="Search files" aria-describedby="search-help" placeholder="Search files (e.g. auth)...">
                 <button id="search-match-case" class="search-option-btn" aria-label="Match Case" aria-pressed="false" title="Match Case (${isMac ? "⌥C" : "Alt+C"})">Aa</button>
                 <button id="search-match-word" class="search-option-btn" aria-label="Match Whole Word" aria-pressed="false" title="Match Whole Word (${isMac ? "⌥W" : "Alt+W"})">[ab]</button>
                 <button id="search-use-regex" class="search-option-btn" aria-label="Use Regular Expression" aria-pressed="false" title="Use Regular Expression (${isMac ? "⌥X" : "Alt+X"})">.*</button>
@@ -1408,6 +1460,10 @@ export function getHtml(
             <span><kbd id="shortcut-legend-key">F4</kbd> / <kbd>Esc</kbd> back to code</span>
             <button id="shortcut-legend-close" class="shortcut-legend-close" aria-label="Hide shortcuts" title="Hide shortcuts">&times;</button>
         </div>
+        <div id="auto-hidden-chip" class="auto-hidden-chip" role="status" hidden>
+            <button id="auto-hidden-open" class="auto-hidden-open" title="Show in Folders &amp; Ignored">Folders auto-hidden</button>
+            <button id="auto-hidden-close" class="shortcut-legend-close" aria-label="Hide this notice" title="Hide this notice">&times;</button>
+        </div>
         <div id="fullscreen-notice" class="fullscreen-notice" role="region" aria-labelledby="fullscreen-notice-text" hidden>
             <span id="fullscreen-notice-text">Thumbview opens fullscreen so code stays readable. Press <kbd id="fullscreen-notice-key">F4</kbd> or open a file to go back.</span>
             <button id="fullscreen-notice-keep" class="notice-btn notice-btn-primary">Got it</button>
@@ -1419,7 +1475,6 @@ export function getHtml(
         window.PDF_JS_URI = "${pdfJsUri}";
         window.PDF_JS_NONCE = "${nonce}";
     </script>
-    ${hasPdfs ? `<script nonce="${nonce}" src="${pdfJsUri}"></script>` : ""}
     <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;
