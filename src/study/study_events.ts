@@ -53,15 +53,22 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback
  * in particular no text (the search query only as its length).
  */
 export function sanitizeEpisode(raw: { [key: string]: unknown }): StudyEvent["props"] {
+    const timeToTarget = clampInt(raw.timeToTargetMs ?? raw.sinceRevealMs);
+    const focusedDuration = clampInt(raw.focusedDurationMs ?? raw.focusedMs);
+    const reactionTime = clampInt(raw.reactionTimeMs ?? raw.firstActionMs);
+    const slotCol = clampInt(raw.slotCol ?? raw.targetCol, 100000);
+    const slotRow = clampInt(raw.slotRow ?? raw.targetRow, 100000);
     return {
         outcome: oneOf(raw.outcome, OUTCOMES, "dismissed"),
         method: oneOf(raw.method, METHODS, "none"),
-        since_reveal_ms: clampInt(raw.sinceRevealMs),
-        // Time the page had keyboard focus during the visit: separates use from Thumbview idling
-        // beside the code in a split.
-        focused_ms: clampInt(raw.focusedMs),
+        time_to_target_ms: timeToTarget,
+        focused_duration_ms: focusedDuration,
+        reaction_time_ms: reactionTime,
+        // Legacy aliases
+        since_reveal_ms: timeToTarget,
+        focused_ms: focusedDuration,
+        first_action_ms: reactionTime,
         start_source: oneOf(raw.startSource, START_SOURCES, "interaction"),
-        first_action_ms: clampInt(raw.firstActionMs),
         search_used: raw.searchUsed === true,
         search_edits: clampInt(raw.searchEdits, 100000),
         query_length: clampInt(raw.queryLength, 10000),
@@ -73,8 +80,11 @@ export function sanitizeEpisode(raw: { [key: string]: unknown }): StudyEvent["pr
         folder_drill_ins: clampInt(raw.folderDrillIns, 10000),
         folder_back_outs: clampInt(raw.folderBackOuts, 10000),
         keyboard_moves: clampInt(raw.keyboardMoves, 100000),
-        target_col: clampInt(raw.targetCol, 100000),
-        target_row: clampInt(raw.targetRow, 100000),
+        slot_col: slotCol,
+        slot_row: slotRow,
+        // Legacy aliases
+        target_col: slotCol,
+        target_row: slotRow,
         grid_cols: clampInt(raw.gridCols, 100000),
         grid_rows: clampInt(raw.gridRows, 100000),
         folder_cards_view: raw.folderCardsView === true,
@@ -217,11 +227,13 @@ export class HostVisitTracker {
         if (this.openSince === null) {
             return null;
         }
+        const duration = Math.max(0, visibleUntil - this.openSince);
         const episode = {
             outcome: "dismissed",
             method: "none",
             startSource: "shown",
-            sinceRevealMs: Math.max(0, visibleUntil - this.openSince),
+            timeToTargetMs: duration,
+            sinceRevealMs: duration,
             tabClosed: true
         };
         this.openSince = null;

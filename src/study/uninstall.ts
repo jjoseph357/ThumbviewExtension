@@ -29,7 +29,7 @@ async function main(): Promise<void> {
         return;
     }
     const client = new StudyClient(
-        { url: STUDY_CONFIG.supabaseUrl, anonKey: STUDY_CONFIG.supabaseAnonKey },
+        { url: (STUDY_CONFIG as any).ingestUrl || (STUDY_CONFIG as any).supabaseUrl, key: (STUDY_CONFIG as any).ingestKey || (STUDY_CONFIG as any).supabaseAnonKey },
         { load: () => [], save: () => { } },
         (url, init) => fetch(url, init)
     );

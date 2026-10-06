@@ -27,9 +27,12 @@ const { isStudyConfigured, STUDY_CONFIG } = require("../../out/study/study_confi
     assert.strictEqual(props.outcome, "jump");
     assert.strictEqual(props.method, "none", "unknown enum values fall back");
     assert.strictEqual(props.since_reveal_ms, 1235);
+    assert.strictEqual(props.time_to_target_ms, 1235);
+    assert.strictEqual(props.slot_col, 3);
     assert.strictEqual(props.search_used, false, "booleans must be real booleans");
     assert.strictEqual(props.tiles_hovered, 0, "negative counts are clamped");
     assert.strictEqual(props.first_action_ms, null, "missing numbers are null");
+    assert.strictEqual(props.reaction_time_ms, null, "missing numbers are null");
     assert(!JSON.stringify(props).includes("secret"), "no query text or path is kept");
     assert(!("extra" in props) && !("query" in props) && !("uri" in props));
     console.log("✓ Test 2 passed");
@@ -74,7 +77,7 @@ const { isStudyConfigured, STUDY_CONFIG } = require("../../out/study/study_confi
     let now = 0;
     const calls = [];
     let respond = () => ({ ok: true, status: 201 });
-    const client = new StudyClient({ url: "https://x.supabase.co/", anonKey: "anon" }, store, async (url, init) => {
+    const client = new StudyClient({ url: "https://precision.usask.ca/study/api", key: "secret" }, store, async (url, init) => {
         calls.push({ url, init });
         return respond();
     }, () => now);
@@ -84,8 +87,8 @@ const { isStudyConfigured, STUDY_CONFIG } = require("../../out/study/study_confi
     assert.strictEqual(saved.length, 2, "the queue is persisted on enqueue");
     await client.flush();
     assert.strictEqual(calls.length, 1);
-    assert.strictEqual(calls[0].url, "https://x.supabase.co/rest/v1/events");
-    assert.strictEqual(calls[0].init.headers.apikey, "anon");
+    assert.strictEqual(calls[0].url, "https://precision.usask.ca/study/api/events");
+    assert.strictEqual(calls[0].init.headers["X-Study-Key"], "secret");
     assert.strictEqual(JSON.parse(calls[0].init.body).length, 2);
     assert.strictEqual(client.pending, 0);
     assert.strictEqual(saved.length, 0);
@@ -240,6 +243,7 @@ const { isStudyConfigured, STUDY_CONFIG } = require("../../out/study/study_confi
     const closed = sanitizeEpisode(tracker.closedTab(4000));
     assert.strictEqual(closed.outcome, "dismissed");
     assert.strictEqual(closed.tab_closed, true);
+    assert.strictEqual(closed.time_to_target_ms, 3000, "the host's visible time");
     assert.strictEqual(closed.since_reveal_ms, 3000, "the host's visible time");
     assert.strictEqual(closed.tiles_hovered, null, "the page's counts are unknown, not zero");
     assert.strictEqual(tracker.closedTab(9000), null, "reported once");
@@ -250,6 +254,8 @@ const { isStudyConfigured, STUDY_CONFIG } = require("../../out/study/study_confi
     console.log("✓ Test 5c passed");
 
     console.log("--- Test 6: the study is dormant until configured ---");
+    assert.strictEqual(isStudyConfigured({ ...STUDY_CONFIG, ingestUrl: "", consentUrl: "c" }), false);
+    assert.strictEqual(isStudyConfigured({ ...STUDY_CONFIG, ingestUrl: "u", consentUrl: "c" }), true);
     assert.strictEqual(isStudyConfigured({ ...STUDY_CONFIG, supabaseUrl: "", supabaseAnonKey: "k", consentUrl: "c" }), false);
     assert.strictEqual(isStudyConfigured({ ...STUDY_CONFIG, supabaseUrl: "u", supabaseAnonKey: "k", consentUrl: "c" }), true);
     console.log("✓ Test 6 passed");

@@ -113,7 +113,7 @@ export function createStudy(
         return adopted;
     };
     const client = new StudyClient(
-        { url: STUDY_CONFIG.supabaseUrl, anonKey: STUDY_CONFIG.supabaseAnonKey },
+        { url: (STUDY_CONFIG as any).ingestUrl || (STUDY_CONFIG as any).supabaseUrl, key: (STUDY_CONFIG as any).ingestKey || (STUDY_CONFIG as any).supabaseAnonKey },
         {
             load: () => adoptOrphanQueues(),
             save: rows => context.globalState.update(queueKey, rows.length > 0 ? { updatedAt: Date.now(), rows } : undefined)
@@ -205,7 +205,7 @@ export function createStudy(
         if (!participant || !template) {
             return;
         }
-        emit("survey_opened", { which });
+        emit("survey_opened", { survey_type: which, which });
         await vscode.env.openExternal(vscode.Uri.parse(surveyUrl(template, participant)));
     };
 
@@ -533,9 +533,12 @@ export function createStudy(
             visits.refreshBase(storedVisits());
             const hash = fileHash(participant, uri);
             const { priorVisits, sinceLastVisitMs } = visits.record(hash, now);
+            const isDeliberate = isDeliberateSwitch({ previousStillVisible, tabOpened, tabClosedJustBefore, viaThumbview: via === "thumbview" });
             emit("editor_switch", {
+                navigation_source: via,
                 via,
-                deliberate: isDeliberateSwitch({ previousStillVisible, tabOpened, tabClosedJustBefore, viaThumbview: via === "thumbview" }),
+                is_deliberate: isDeliberate,
+                deliberate: isDeliberate,
                 new_tab: tabOpened,
                 after_tab_close: tabClosedJustBefore,
                 previous_still_visible: previousStillVisible,
@@ -581,11 +584,16 @@ export function createStudy(
                     props.target_prior_visits = priorVisits;
                     props.target_since_last_visit_ms = sinceLastVisitMs;
                     // Root-grid slot compared with this file's last Thumbview visit (stored on this machine only).
-                    if (typeof props.target_col === "number" && typeof props.target_row === "number") {
+                    const slotCol = typeof props.slot_col === "number" ? props.slot_col : props.target_col;
+                    const slotRow = typeof props.slot_row === "number" ? props.slot_row : props.target_row;
+                    if (typeof slotCol === "number" && typeof slotRow === "number") {
                         const slots = new SlotMemory(context.globalState.get<{ [hash: string]: string }>(SLOTS_KEY) ?? {});
-                        props.target_moved_since_last_visit = slots.moved(hash, props.target_col, props.target_row);
+                        const moved = slots.moved(hash, slotCol, slotRow);
+                        props.target_position_changed = moved;
+                        props.target_moved_since_last_visit = moved;
                         void context.globalState.update(SLOTS_KEY, slots.toJSON());
                     } else {
+                        props.target_position_changed = null;
                         props.target_moved_since_last_visit = null;
                     }
                 } catch {
@@ -604,7 +612,7 @@ export function createStudy(
             }
         },
         recordAction(action) {
-            emit("action", { action: action.slice(0, 40) });
+            emit("action", { action_name: action.slice(0, 40), action: action.slice(0, 40) });
         },
         isActive,
         async shutdown() {

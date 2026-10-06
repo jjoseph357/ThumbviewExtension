@@ -50,11 +50,21 @@ export function isRowRejection(status: number, body = ""): boolean {
     }
     let code: unknown;
     try {
-        code = (JSON.parse(body) as { code?: unknown }).code;
+        const parsed = JSON.parse(body) as { code?: unknown; rowRejection?: unknown };
+        if (parsed.rowRejection === true) {
+            return true;
+        }
+        code = parsed.code;
     } catch {
         return false;
     }
     return typeof code === "string" && /^2[23][0-9A-Z]{3}$/.test(code);
+}
+
+export interface StudyEndpoint {
+    url: string;
+    key?: string;
+    anonKey?: string;
 }
 
 const SEND_NOW_TIMEOUT_MS = 3000;
@@ -66,7 +76,7 @@ export class StudyClient {
     private nextAttemptAt = 0;
 
     constructor(
-        private readonly endpoint: { url: string; anonKey: string },
+        private readonly endpoint: StudyEndpoint,
         private readonly store: QueueStore,
         private readonly fetchImpl: FetchLike,
         private readonly now: () => number = Date.now,
@@ -136,14 +146,20 @@ export class StudyClient {
     }
 
     private post(rows: StudyRow[]): ReturnType<FetchLike> {
-        return this.fetchImpl(`${this.endpoint.url.replace(/\/+$/, "")}/rest/v1/events`, {
+        const base = this.endpoint.url.replace(/\/+$/, "");
+        const targetUrl = base.endsWith("/events") ? base : `${base}/events`;
+        const headers: { [key: string]: string } = {
+            "Content-Type": "application/json"
+        };
+        const token = this.endpoint.key || this.endpoint.anonKey;
+        if (token) {
+            headers["apikey"] = token;
+            headers["Authorization"] = `Bearer ${token}`;
+            headers["X-Study-Key"] = token;
+        }
+        return this.fetchImpl(targetUrl, {
             method: "POST",
-            headers: {
-                "apikey": this.endpoint.anonKey,
-                "Authorization": `Bearer ${this.endpoint.anonKey}`,
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal"
-            },
+            headers,
             body: JSON.stringify(rows)
         });
     }

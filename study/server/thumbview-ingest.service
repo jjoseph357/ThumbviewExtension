@@ -1,0 +1,21 @@
+[Unit]
+Description=Thumbview Study Telemetry Ingestion Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/thumbview-study/server
+Environment=PORT=3000
+Environment=PGHOST=localhost
+Environment=PGPORT=5432
+Environment=PGDATABASE=thumbview_study
+Environment=PGUSER=thumbview_user
+Environment=PGPASSWORD=your_secure_password_here
+Environment=STUDY_SECRET=your_optional_secret_here
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

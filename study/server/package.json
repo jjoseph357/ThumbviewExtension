@@ -1,0 +1,12 @@
+{
+  "name": "thumbview-telemetry-ingest",
+  "version": "1.0.0",
+  "description": "Telemetry ingestion server for Thumbview study running on precision.usask.ca",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.3"
+  }
+}

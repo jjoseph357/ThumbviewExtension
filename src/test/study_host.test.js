@@ -56,7 +56,7 @@ Module._load = function (request, ...rest) {
 };
 
 const { STUDY_CONFIG } = require("../../out/study/study_config");
-Object.assign(STUDY_CONFIG, { supabaseUrl: "https://study.example", supabaseAnonKey: "anon", consentUrl: "https://consent.example" });
+Object.assign(STUDY_CONFIG, { ingestUrl: "https://study.example", ingestKey: "key", supabaseUrl: "https://study.example", supabaseAnonKey: "anon", consentUrl: "https://consent.example" });
 const { createStudy } = require("../../out/study/study");
 const { readParticipantFile, writeParticipantFile, mayNotifyUninstall, PARTICIPANT_FILE } = require("../../out/study/participant_file");
 
