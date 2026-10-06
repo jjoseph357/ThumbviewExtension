@@ -5,6 +5,11 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-10-05
+
+### Changed
+- **Research study telemetry server and schema v2**: migrated study telemetry backend to a dedicated Canadian server (`precision.usask.ca` at the University of Saskatchewan) with an updated relational schema for research data governance. Telemetry metrics now use typed, direct spatial and navigation indicators (`time_to_target_ms`, `reaction_time_ms`, `slot_col`, `slot_row`, `target_position_changed`).
+
 ## [0.5.3] - 2026-10-05
 
 ### Added
