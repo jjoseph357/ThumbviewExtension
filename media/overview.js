@@ -8228,6 +8228,28 @@ if (changeHotkeyBtn) {
     };
 }
 
+const studyStatusBtn = document.getElementById("study-status-btn");
+if (studyStatusBtn) {
+    studyStatusBtn.onclick = () => {
+        vscode.postMessage({ command: "studyStatus" });
+    };
+}
+
+const saveParticipantIdBtn = document.getElementById("save-participant-id-btn");
+const participantIdInput = document.getElementById("participant-id-input");
+if (saveParticipantIdBtn && participantIdInput) {
+    saveParticipantIdBtn.onclick = () => {
+        const val = participantIdInput.value.trim();
+        vscode.postMessage({ command: "setParticipantId", participantId: val });
+    };
+    participantIdInput.onkeydown = e => {
+        if (e.key === "Enter") {
+            const val = participantIdInput.value.trim();
+            vscode.postMessage({ command: "setParticipantId", participantId: val });
+        }
+    };
+}
+
 document.addEventListener("click", event => {
     const clickedInside =
         (actionsModal && actionsModal.contains(event.target)) ||

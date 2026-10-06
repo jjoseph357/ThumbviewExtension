@@ -234,6 +234,11 @@
         "command": "thumbview.study.info",
         "title": "Research Study Info",
         "category": "Thumbview"
+      },
+      {
+        "command": "thumbview.study.setParticipantId",
+        "title": "Set Study Participant ID",
+        "category": "Thumbview"
       }
     ],
     "keybindings": [
@@ -374,6 +379,10 @@
         },
         {
           "command": "thumbview.study.info",
+          "when": "thumbview.studyAvailable"
+        },
+        {
+          "command": "thumbview.study.setParticipantId",
           "when": "thumbview.studyAvailable"
         }
       ]

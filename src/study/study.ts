@@ -27,6 +27,11 @@ const VISITS_SAVE_DELAY_MS = 5000;
 
 export type ShownTrigger = "f4" | "command" | "tab";
 
+/** Generates a distinct participant ID for users who did not enter a survey ID (e.g. 'auto-3f8a12bc4e5d'). */
+export function generateAutoParticipantId(): string {
+    return "auto-" + randomBytes(6).toString("hex");
+}
+
 /** The conditions a visit ran under, from the host: they can change mid-session. */
 export interface EpisodeConditions {
     layoutMode: string;
@@ -226,40 +231,7 @@ export function createStudy(
         });
     };
 
-    const join = async (): Promise<boolean> => {
-        if (!configured) {
-            return false;
-        }
-        refreshParticipant();
-        if (getParticipant()?.consentVersion === STUDY_CONFIG.consentVersion) {
-            vscode.window.showInformationMessage("You are already taking part in the Thumbview study.");
-            return true;
-        }
-        const detail = [
-            "Thumbview's developers are studying how people find code with a spatial map, for an academic paper.",
-            "",
-            "If you join, Thumbview records how you use it: when you open it, how long it takes to open a file, whether you search or click, and how often you open files in other ways. Files are identified only by a scrambled code that cannot be turned back into a name. File contents, file and folder names, and search text are never sent.",
-            "",
-            "Your data is pseudonymous, not anonymous: it carries a random participant ID for this computer, and the database host sees your IP address when data is sent. The surveys receive the same participant ID so answers can be linked to usage.",
-            "",
-            "Joining is voluntary. You can leave at any time with \"Thumbview: Leave the Research Study\"; nothing more is sent from then on, including anything not yet uploaded. Please read the consent form before you agree."
-        ].join("\n");
-        for (;;) {
-            const choice = await vscode.window.showInformationMessage(
-                "Join the Thumbview research study?",
-                { modal: true, detail },
-                "Read Consent Form",
-                "I Agree and Join"
-            );
-            if (choice === "Read Consent Form") {
-                await vscode.env.openExternal(vscode.Uri.parse(STUDY_CONFIG.consentUrl));
-                continue;
-            }
-            if (choice !== "I Agree and Join") {
-                return false;
-            }
-            break;
-        }
+    const enrollWithId = async (participantId?: string): Promise<boolean> => {
         if (!telemetry.isUsageEnabled) {
             const enableChoice = await vscode.window.showInformationMessage(
                 "The Thumbview study requires VS Code usage telemetry to be enabled (setting telemetry.telemetryLevel to \"all\"). Would you like to enable it now?",
@@ -286,10 +258,13 @@ export function createStudy(
             }
         }
         const previous = getParticipant();
+        const finalId = (participantId && participantId.trim().length > 0)
+            ? participantId.trim()
+            : (previous?.id ?? generateAutoParticipantId());
         // Re-consent to a newer form keeps the identity; a new enrollment (including after leaving,
         // when the old ID's data may have been deleted on request) always gets a new one.
         const participant: Participant = {
-            id: previous?.id ?? randomUUID(),
+            id: finalId,
             salt: previous?.salt ?? randomBytes(32).toString("hex"),
             enrolledAt: previous?.enrolledAt ?? Date.now(),
             consentVersion: STUDY_CONFIG.consentVersion
@@ -308,6 +283,87 @@ export function createStudy(
         await openSurvey("pre");
         vscode.window.showInformationMessage(`Thank you for joining. Your participant ID is ${participant.id} (see "Thumbview: Research Study Info").`);
         return true;
+    };
+
+    const join = async (options?: { alreadyAgreed?: boolean; participantId?: string }): Promise<boolean> => {
+        if (!configured) {
+            return false;
+        }
+        refreshParticipant();
+        if (getParticipant()?.consentVersion === STUDY_CONFIG.consentVersion) {
+            vscode.window.showInformationMessage("You are already taking part in the Thumbview study.");
+            return true;
+        }
+        if (!options?.alreadyAgreed) {
+            const detail = [
+                "Thumbview's developers are studying how people find code with a spatial map, for an academic paper.",
+                "",
+                "If you join, Thumbview records how you use it: when you open it, how long it takes to open a file, whether you search or click, and how often you open files in other ways. File contents, file and folder names, and search text are never sent.",
+                "",
+                "Your data is pseudonymous, not anonymous: it carries a participant ID for this computer, and data uploads securely over HTTPS to precision.usask.ca in Canada.",
+                "",
+                "Joining is voluntary. You can leave at any time with \"Thumbview: Leave the Research Study\"; nothing more is sent from then on, including anything not yet uploaded. Please read the consent form before you agree."
+            ].join("\n");
+            for (; ;) {
+                const choice = await vscode.window.showInformationMessage(
+                    "Join the Thumbview research study?",
+                    { modal: true, detail },
+                    "Read Consent Form",
+                    "I Agree and Join"
+                );
+                if (choice === "Read Consent Form") {
+                    await vscode.env.openExternal(vscode.Uri.parse(STUDY_CONFIG.consentUrl));
+                    continue;
+                }
+                if (choice !== "I Agree and Join") {
+                    return false;
+                }
+                break;
+            }
+        }
+        let pid = options?.participantId?.trim();
+        if (!pid && vscode.window.showInputBox) {
+            const entered = await vscode.window.showInputBox({
+                prompt: "If you have a Participant ID from the demographic form, enter it here (or press Enter to auto-generate one):",
+                placeHolder: "Participant ID from survey (e.g. P-101) - press Enter to auto-generate"
+            });
+            if (typeof entered === "string" && entered.trim().length > 0) {
+                pid = entered.trim();
+            }
+        }
+        return enrollWithId(pid ?? (getParticipant()?.id ?? generateAutoParticipantId()));
+    };
+
+    const setParticipantId = async (id?: string): Promise<boolean> => {
+        let newId = id;
+        if (!newId && vscode.window.showInputBox) {
+            const current = getParticipant()?.id ?? "";
+            const entered = await vscode.window.showInputBox({
+                prompt: "Enter your Participant ID from the demographic form:",
+                placeHolder: "e.g. P-101",
+                value: current
+            });
+            if (typeof entered === "string" && entered.trim().length > 0) {
+                newId = entered.trim();
+            } else {
+                return false;
+            }
+        }
+        if (!newId) {
+            return false;
+        }
+        refreshParticipant();
+        const participant = getParticipant();
+        if (participant) {
+            const updated: Participant = { ...participant, id: newId };
+            writeParticipantFile({ ...participantFile, participant: updated });
+            refreshParticipant();
+            updateContextKeys();
+            vscode.window.showInformationMessage(`Participant ID updated to "${newId}".`);
+            return true;
+        } else {
+            return join({ alreadyAgreed: true, participantId: newId });
+        }
     };
 
     const leave = async () => {
@@ -363,6 +419,7 @@ export function createStudy(
         const enableTelemetryButtons = (participant && !telemetry.isUsageEnabled) ? ["Enable Telemetry"] : [];
         const buttons = [
             participant ? "Leave Study" : "Join Study",
+            "Set Participant ID",
             ...enableTelemetryButtons,
             ...(id ? ["Copy Participant ID"] : []),
             "Open Consent Form",
@@ -383,6 +440,8 @@ export function createStudy(
             await leave();
         } else if (choice === "Join Study") {
             await join();
+        } else if (choice === "Set Participant ID") {
+            await setParticipantId();
         } else if (choice === "Enable Telemetry") {
             try {
                 await vscode.workspace.getConfiguration("telemetry").update("telemetryLevel", "all", vscode.ConfigurationTarget.Global);
@@ -402,7 +461,8 @@ export function createStudy(
     context.subscriptions.push(
         vscode.commands.registerCommand("thumbview.study.join", join),
         vscode.commands.registerCommand("thumbview.study.leave", leave),
-        vscode.commands.registerCommand("thumbview.study.info", info)
+        vscode.commands.registerCommand("thumbview.study.info", info),
+        vscode.commands.registerCommand("thumbview.study.setParticipantId", setParticipantId)
     );
     recordTelemetryState();
     updateContextKeys();
@@ -460,16 +520,22 @@ export function createStudy(
         }
         await context.globalState.update(INVITE_SHOWN_KEY, true);
         const choice = await vscode.window.showInformationMessage(
-            "Would you help research on finding code spatially? Join the opt-in Thumbview study; no code, file names, or search text is ever collected.",
+            "Would you help research on finding code spatially? Join the opt-in Thumbview study",
             {
                 modal: true,
                 detail: "Participate in an academic study on finding code spatially. Telemetry is pseudonymous, strictly opt-in, and never collects code, file names, file paths, or search queries."
             },
-            "Learn More",
+            "I Agree and Join",
+            "Read Consent Form",
             "No Thanks"
         );
-        if (choice === "Learn More") {
-            await join();
+        if (choice === "Read Consent Form") {
+            await vscode.env.openExternal(vscode.Uri.parse(STUDY_CONFIG.consentUrl));
+            await join({ alreadyAgreed: false });
+            return;
+        }
+        if (choice === "I Agree and Join") {
+            await join({ alreadyAgreed: true });
         }
     };
 

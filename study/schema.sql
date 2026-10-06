@@ -3,7 +3,7 @@
 -- Run once in PostgreSQL to initialize the study database.
 
 create table if not exists participants (
-    participant_id      uuid        primary key,
+    participant_id      text        primary key,
     enrolled_at         timestamptz not null default now(),
     left_at             timestamptz,
     consent_version     integer     not null,
@@ -16,7 +16,7 @@ create table if not exists participants (
 
 create table if not exists sessions (
     session_id          uuid        primary key,
-    participant_id      uuid        not null references participants(participant_id) on delete cascade,
+    participant_id      text        not null references participants(participant_id) on delete cascade,
     started_at          timestamptz not null,
     workspace_hash      text,
     workspace_folders   integer,
@@ -31,7 +31,7 @@ create table if not exists sessions (
 
 create table if not exists episodes (
     event_id                    uuid        primary key,
-    participant_id              uuid        not null references participants(participant_id) on delete cascade,
+    participant_id              text        not null references participants(participant_id) on delete cascade,
     session_id                  uuid        not null,
     ts                          timestamptz not null,
     received_at                 timestamptz not null default now(),
@@ -83,7 +83,7 @@ create table if not exists episodes (
 
 create table if not exists editor_switches (
     event_id                uuid        primary key,
-    participant_id          uuid        not null references participants(participant_id) on delete cascade,
+    participant_id          text        not null references participants(participant_id) on delete cascade,
     session_id              uuid        not null,
     ts                      timestamptz not null,
     received_at             timestamptz not null default now(),
@@ -103,7 +103,7 @@ create table if not exists editor_switches (
 
 create table if not exists opens (
     event_id            uuid        primary key,
-    participant_id      uuid        not null references participants(participant_id) on delete cascade,
+    participant_id      text        not null references participants(participant_id) on delete cascade,
     session_id          uuid        not null,
     ts                  timestamptz not null,
     received_at         timestamptz not null default now(),
@@ -116,7 +116,7 @@ create table if not exists opens (
 
 create table if not exists actions (
     event_id            uuid        primary key,
-    participant_id      uuid        not null references participants(participant_id) on delete cascade,
+    participant_id      text        not null references participants(participant_id) on delete cascade,
     session_id          uuid        not null,
     ts                  timestamptz not null,
     received_at         timestamptz not null default now(),
@@ -127,7 +127,7 @@ create table if not exists actions (
 
 create table if not exists surveys (
     event_id            uuid        primary key,
-    participant_id      uuid        not null references participants(participant_id) on delete cascade,
+    participant_id      text        not null references participants(participant_id) on delete cascade,
     session_id          uuid        not null,
     ts                  timestamptz not null,
     received_at         timestamptz not null default now(),
@@ -140,7 +140,7 @@ create table if not exists surveys (
 create table if not exists raw_events (
     id                  bigint generated always as identity primary key,
     event_id            uuid        unique,
-    participant_id      uuid        not null,
+    participant_id      text        not null,
     session_id          uuid        not null,
     event               text        not null,
     ts                  timestamptz not null,

@@ -57,7 +57,7 @@ Module._load = function (request, ...rest) {
 
 const { STUDY_CONFIG } = require("../../out/study/study_config");
 Object.assign(STUDY_CONFIG, { ingestUrl: "https://study.example", ingestKey: "key", supabaseUrl: "https://study.example", supabaseAnonKey: "anon", consentUrl: "https://consent.example" });
-const { createStudy } = require("../../out/study/study");
+const { createStudy, generateAutoParticipantId } = require("../../out/study/study");
 const { readParticipantFile, writeParticipantFile, mayNotifyUninstall, PARTICIPANT_FILE } = require("../../out/study/participant_file");
 
 function makeContext() {
@@ -175,6 +175,18 @@ const log = { warn() { }, debug() { }, info() { } };
         context.subscriptions.forEach(s => s.dispose && s.dispose());
     }
     console.log("✓ Test 5 passed");
+
+    console.log("--- Test 6: auto-generated participant IDs use auto- prefix and do not collide with survey IDs ---");
+    {
+        const id1 = generateAutoParticipantId();
+        const id2 = generateAutoParticipantId();
+        assert(id1.startsWith("auto-"), "starts with auto- prefix");
+        assert(id2.startsWith("auto-"), "starts with auto-");
+        assert.notStrictEqual(id1, id2, "auto participant IDs are unique");
+        assert.strictEqual(id1.length, 17, "length is auto- prefix (5 chars) + 12 hex chars");
+        assert(!id1.startsWith("P-"), "does not collide with demographic survey ID format (P-xxx)");
+    }
+    console.log("✓ Test 6 passed");
 
     fs.rmSync(home, { recursive: true, force: true });
     console.log("\nAll study host tests passed.");

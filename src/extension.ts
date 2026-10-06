@@ -28,6 +28,7 @@ import { ACCENT_SEARCH, withAlpha } from "./colors";
 import { getHtml } from "./webview_html";
 import { createStudy } from "./study/study";
 import { HostVisitTracker } from "./study/study_events";
+import { readParticipantFile } from "./study/participant_file";
 
 // Re-exported for scripts/capture-screenshots.mjs, which renders the page headlessly from the bundle.
 export { getHtml } from "./webview_html";
@@ -1860,7 +1861,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 editorGroups.recordCovered(editorsBeforeCreate, createColumn);
 
                 // pdf.js is not on the page: overview.js loads it after Thumbview has opened (requestPdfJs).
-                panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel());
+                const currentParticipant = readParticipantFile().participant;
+                panel.webview.html = getHtml(panel.webview, context, getOpenKeybindingLabel(), currentParticipant?.id ?? "");
             } catch (err) {
                 log.error(`Failed to open the Thumbview panel: ${err instanceof Error ? err.message : String(err)}`);
                 // Zen and the maximize were entered for a panel that does not exist: undo them.

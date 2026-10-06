@@ -9,7 +9,8 @@ import { ACCENT_SEARCH, ACCENT_INSPECT, ACCENT_RECENCY } from "./colors";
 export function getHtml(
     webview: vscode.Webview,
     context: vscode.ExtensionContext,
-    openKeybindingLabel: string = "F4"
+    openKeybindingLabel: string = "F4",
+    participantId: string = ""
 ): string {
     const isMac = process.platform === "darwin";
     const jsUri = webview.asWebviewUri(
@@ -1423,10 +1424,34 @@ export function getHtml(
                 </div>
 
                 <div class="modal-section">
+                    <div class="modal-section-title">Research Study &amp; Telemetry</div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name" id="participant-id-setting-name">Participant ID</div>
+                            <div class="setting-desc">If you completed the demographic form, enter your study ID here</div>
+                        </div>
+                        <div class="setting-input-wrapper">
+                            <input type="text" id="participant-id-input" aria-labelledby="participant-id-setting-name" class="setting-input" style="width: 150px; text-align: left; padding: 4px 8px;" placeholder="e.g. P-101" value="${escapeHtml(participantId)}">
+                            <button id="save-participant-id-btn" class="action-trigger-btn" style="padding: 4px 8px;">Save</button>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-text">
+                            <div class="setting-name">Study Participation</div>
+                            <div class="setting-desc">Help research on spatial navigation. Zero code, file names, or search queries are ever collected.</div>
+                        </div>
+                        <button id="study-status-btn" class="action-trigger-btn">Study Status...</button>
+                    </div>
+                    <div class="setting-desc" style="margin-top: 8px;">
+                        <a href="https://jjoseph357.github.io/thumbview-issues/consent.html" target="_blank" style="color: var(--vscode-textLink-foreground, #3794ff); text-decoration: underline;">View Consent Form</a>
+                    </div>
+                </div>
+
+                <div class="modal-section">
                     <div class="modal-section-title">Feedback &amp; Issues</div>
                     <div class="setting-desc">
-                        Report bugs, request features, or view documentation at
-                        <a href="https://github.com/jjoseph357/thumbview-issues/issues" target="_blank" style="color: var(--vscode-textLink-foreground, #3794ff); text-decoration: underline;">thumbview-issues</a>.
+                        Report bugs, submit feedback, or view documentation at
+                        <a href="https://github.com/jjoseph357/thumbview-issues" target="_blank" style="color: var(--vscode-textLink-foreground, #3794ff); text-decoration: underline;">https://github.com/jjoseph357/thumbview-issues</a>.
                     </div>
                 </div>
             </div>

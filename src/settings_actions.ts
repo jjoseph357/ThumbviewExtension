@@ -184,5 +184,16 @@ export function createSettingsActions(host: SettingsActionHost): Record<string, 
         configureHotkey: async (msg: any) => {
             vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "thumbview.open");
         },
+        studyStatus: async (msg: any) => {
+            await vscode.commands.executeCommand("thumbview.study.info");
+        },
+        setParticipantId: async (msg: any) => {
+            const rawId = typeof msg.participantId === "string" ? msg.participantId.trim() : "";
+            if (!rawId) {
+                vscode.window.showWarningMessage("Please enter a valid Participant ID.");
+                return;
+            }
+            await vscode.commands.executeCommand("thumbview.study.setParticipantId", rawId);
+        },
     };
 }
