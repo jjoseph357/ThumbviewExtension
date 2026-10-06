@@ -5,6 +5,15 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-10-06
+
+### Added
+- **Study participant ID configuration in settings**: enter or update your study participant ID directly from the Thumbview Settings modal (`actions-modal`), and quickly open study status or review the consent form.
+
+### Fixed
+- **Settings modal scroll clipping**: dialog box sizing and max-height constraints now use `box-sizing: border-box` and adjusted padding so the scroll container never overflows the modal frame, allowing the bottom `thumbview-issues` link to be fully visible and reachable across all viewport sizes.
+- **Consent form code block contrast**: fixed syntax block contrast in the informed consent document for dark and light theme readability.
+
 ## [0.5.4] - 2026-10-06
 
 ### Changed
