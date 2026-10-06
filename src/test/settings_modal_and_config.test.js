@@ -133,7 +133,10 @@ assert(settingsModalSlice.includes("0% disables, 1% to 20% recommended"), "Expla
 assert(extSource.includes("-webkit-outer-spin-button"), "CSS must hide webkit outer spin buttons");
 assert(extSource.includes("-webkit-inner-spin-button"), "CSS must hide webkit inner spin buttons");
 assert(extSource.includes("-moz-appearance: textfield"), "CSS must set -moz-appearance: textfield for Firefox");
-console.log(`✓ Test 5 passed: settings modal HTML removed Grid Space, includes all new inputs, updated explanation, and CSS hides spin buttons`);
+
+// CSS must ensure modal scroll container does not clip bottom content
+assert(extSource.includes(".modal-content-scroll {\n            box-sizing: border-box;"), "CSS must set box-sizing: border-box on modal-content-scroll");
+console.log(`✓ Test 5 passed: settings modal HTML removed Grid Space, includes all new inputs, updated explanation, and CSS hides spin buttons and uses border-box scrolling`);
 
 // -------------------------------------------------------------
 // Test 6: Verify overview.js local spanning compression & rubberband prevention

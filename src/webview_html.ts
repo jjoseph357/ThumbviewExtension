@@ -767,6 +767,7 @@ export function getHtml(
             font-size: 13px;
             color: var(--vscode-foreground, #cccccc);
             overflow: hidden;
+            box-sizing: border-box;
             display: flex;
             flex-direction: column;
         }
@@ -815,9 +816,10 @@ export function getHtml(
         }
 
         .modal-content-scroll {
-            padding: 16px 20px;
+            box-sizing: border-box;
+            padding: 16px 20px 24px;
             overflow-y: auto;
-            max-height: calc(84vh - 48px);
+            max-height: calc(84vh - 50px);
             scrollbar-width: thin;
             scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.25)) transparent;
         }
