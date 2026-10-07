@@ -27,9 +27,46 @@ const VISITS_SAVE_DELAY_MS = 5000;
 
 export type ShownTrigger = "f4" | "command" | "tab";
 
-/** Generates a distinct participant ID for users who did not enter a survey ID (e.g. 'auto-3f8a12bc4e5d'). */
-export function generateAutoParticipantId(): string {
-    return "auto-" + randomBytes(6).toString("hex");
+/** Generates a fallback participant ID in the P-xxx format (e.g. 'P-101', 'P-8421') when server allocation is unreachable. */
+export function generateFallbackParticipantId(): string {
+    const num = Math.floor(1000 + Math.random() * 9000);
+    return `P-${num}`;
+}
+
+export const generateAutoParticipantId = generateFallbackParticipantId;
+
+/**
+ * Asynchronously requests the next sequential participant ID from the telemetry server (e.g. 'P-101').
+ * If offline or server is unreachable, falls back to a locally generated P-xxxx ID.
+ */
+export async function fetchNextParticipantId(ingestUrl?: string, ingestKey?: string): Promise<string> {
+    if (!ingestUrl) {
+        return generateFallbackParticipantId();
+    }
+    const endpoint = ingestUrl.replace(/\/+$/, "") + "/participant-id";
+    try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (ingestKey) {
+            headers["Authorization"] = `Bearer ${ingestKey}`;
+            headers["X-Study-Key"] = ingestKey;
+        }
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 4000);
+        const res = await fetch(endpoint, {
+            method: "POST",
+            headers,
+            signal: controller.signal
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+            const data = await res.json() as any;
+            if (data && typeof data.participant_id === "string" && data.participant_id.trim().length > 0) {
+                return data.participant_id.trim();
+            }
+        }
+    } catch {
+    }
+    return generateFallbackParticipantId();
 }
 
 /** The conditions a visit ran under, from the host: they can change mid-session. */
@@ -67,7 +104,11 @@ export interface StudyApi {
 
 export function createStudy(
     context: vscode.ExtensionContext,
-    options: { isThumbviewVisible: () => boolean; log: vscode.LogOutputChannel }
+    options: {
+        isThumbviewVisible: () => boolean;
+        log: vscode.LogOutputChannel;
+        onParticipantChanged?: (participantId: string | null) => void;
+    }
 ): StudyApi {
     const configured = isStudyConfigured();
     const extVersion = String(context.extension.packageJSON.version ?? "");
@@ -258,9 +299,13 @@ export function createStudy(
             }
         }
         const previous = getParticipant();
-        const finalId = (participantId && participantId.trim().length > 0)
-            ? participantId.trim()
-            : (previous?.id ?? generateAutoParticipantId());
+        let finalId = participantId?.trim();
+        if (!finalId) {
+            finalId = previous?.id ?? await fetchNextParticipantId(
+                (STUDY_CONFIG as any).ingestUrl || (STUDY_CONFIG as any).supabaseUrl,
+                (STUDY_CONFIG as any).ingestKey || (STUDY_CONFIG as any).supabaseAnonKey
+            );
+        }
         // Re-consent to a newer form keeps the identity; a new enrollment (including after leaving,
         // when the old ID's data may have been deleted on request) always gets a new one.
         const participant: Participant = {
@@ -278,10 +323,25 @@ export function createStudy(
         writeParticipantFile({ participant, usageTelemetryEnabled: true });
         refreshParticipant();
         updateContextKeys();
+        options.onParticipantChanged?.(participant.id);
         emit("study_enrolled", { consent_version: participant.consentVersion, platform: process.platform, vscode_version: vscode.version });
         emitSessionStart();
         await openSurvey("pre");
-        vscode.window.showInformationMessage(`Thank you for joining. Your participant ID is ${participant.id} (see "Thumbview: Research Study Info").`);
+        try {
+            await vscode.env.clipboard.writeText(participant.id);
+        } catch {
+        }
+        const infoChoice = await vscode.window.showInformationMessage(
+            `Thank you for joining the Thumbview study! Your Participant ID is "${participant.id}" (copied to clipboard). Please paste this ID into the demographic and exit surveys.`,
+            "Copy Participant ID",
+            "View Study Info"
+        );
+        if (infoChoice === "Copy Participant ID") {
+            await vscode.env.clipboard.writeText(participant.id);
+            vscode.window.showInformationMessage(`Copied "${participant.id}" to clipboard.`);
+        } else if (infoChoice === "View Study Info") {
+            await info();
+        }
         return true;
     };
 
@@ -321,49 +381,7 @@ export function createStudy(
                 break;
             }
         }
-        let pid = options?.participantId?.trim();
-        if (!pid && vscode.window.showInputBox) {
-            const entered = await vscode.window.showInputBox({
-                prompt: "If you have a Participant ID from the demographic form, enter it here (or press Enter to auto-generate one):",
-                placeHolder: "Participant ID from survey (e.g. P-101) - press Enter to auto-generate"
-            });
-            if (typeof entered === "string" && entered.trim().length > 0) {
-                pid = entered.trim();
-            }
-        }
-        return enrollWithId(pid ?? (getParticipant()?.id ?? generateAutoParticipantId()));
-    };
-
-    const setParticipantId = async (id?: string): Promise<boolean> => {
-        let newId = id;
-        if (!newId && vscode.window.showInputBox) {
-            const current = getParticipant()?.id ?? "";
-            const entered = await vscode.window.showInputBox({
-                prompt: "Enter your Participant ID from the demographic form:",
-                placeHolder: "e.g. P-101",
-                value: current
-            });
-            if (typeof entered === "string" && entered.trim().length > 0) {
-                newId = entered.trim();
-            } else {
-                return false;
-            }
-        }
-        if (!newId) {
-            return false;
-        }
-        refreshParticipant();
-        const participant = getParticipant();
-        if (participant) {
-            const updated: Participant = { ...participant, id: newId };
-            writeParticipantFile({ ...participantFile, participant: updated });
-            refreshParticipant();
-            updateContextKeys();
-            vscode.window.showInformationMessage(`Participant ID updated to "${newId}".`);
-            return true;
-        } else {
-            return join({ alreadyAgreed: true, participantId: newId });
-        }
+        return enrollWithId(options?.participantId);
     };
 
     const leave = async () => {
@@ -402,6 +420,7 @@ export function createStudy(
         await context.globalState.update(VISITS_KEY, undefined);
         await context.globalState.update(SLOTS_KEY, undefined);
         updateContextKeys();
+        options.onParticipantChanged?.(null);
         vscode.window.showInformationMessage(
             `You have left the Thumbview study; nothing more will be sent. To have your data deleted, send your participant ID (${participant.id}) by opening an issue at https://github.com/jjoseph357/thumbview-issues`
         );
@@ -419,7 +438,6 @@ export function createStudy(
         const enableTelemetryButtons = (participant && !telemetry.isUsageEnabled) ? ["Enable Telemetry"] : [];
         const buttons = [
             participant ? "Leave Study" : "Join Study",
-            "Set Participant ID",
             ...enableTelemetryButtons,
             ...(id ? ["Copy Participant ID"] : []),
             "Open Consent Form",
@@ -427,7 +445,7 @@ export function createStudy(
         ];
         const detail = [
             status,
-            id ? `\n\nParticipant ID: ${id}` : "",
+            id ? `\n\nParticipant ID: ${id}\n(Paste this ID into the demographic and exit surveys)` : "",
             participant ? `\nEvents waiting to be sent from this window: ${client.pending}` : "",
             "\n\nFeedback & Bug Reports: https://github.com/jjoseph357/thumbview-issues"
         ].join("");
@@ -440,8 +458,6 @@ export function createStudy(
             await leave();
         } else if (choice === "Join Study") {
             await join();
-        } else if (choice === "Set Participant ID") {
-            await setParticipantId();
         } else if (choice === "Enable Telemetry") {
             try {
                 await vscode.workspace.getConfiguration("telemetry").update("telemetryLevel", "all", vscode.ConfigurationTarget.Global);
@@ -451,6 +467,7 @@ export function createStudy(
             }
         } else if (choice === "Copy Participant ID" && id) {
             await vscode.env.clipboard.writeText(id);
+            vscode.window.showInformationMessage(`Copied Participant ID "${id}" to clipboard.`);
         } else if (choice === "Open Consent Form") {
             await vscode.env.openExternal(vscode.Uri.parse(STUDY_CONFIG.consentUrl));
         } else if (choice === "Contact & Issues") {
@@ -461,8 +478,7 @@ export function createStudy(
     context.subscriptions.push(
         vscode.commands.registerCommand("thumbview.study.join", join),
         vscode.commands.registerCommand("thumbview.study.leave", leave),
-        vscode.commands.registerCommand("thumbview.study.info", info),
-        vscode.commands.registerCommand("thumbview.study.setParticipantId", setParticipantId)
+        vscode.commands.registerCommand("thumbview.study.info", info)
     );
     recordTelemetryState();
     updateContextKeys();

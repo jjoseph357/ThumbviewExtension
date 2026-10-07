@@ -40,7 +40,7 @@ The study stays dormant until it is configured. Its commands are hidden, and not
 ## How participation works
 
 - **Invitation.** After the first time someone opens Thumbview, they see one notification asking whether they would help. They can also join at any time with **Thumbview: Join the Research Study**. Joining shows a summary and a link to the consent form, and needs an explicit "I Agree and Join".
-- **Participant ID.** There is one participant per computer. Joining creates a random participant ID and a secret salt that never leaves the computer.
+- **Participant ID.** There is one participant per computer. Joining automatically assigns a participant ID (e.g. `P-101`, allocated sequentially by the telemetry server) and a secret salt that never leaves the computer. The ID is copied to the clipboard on enrollment and displayed in Thumbview's settings modal so participants can paste it into the demographic and exit surveys.
   - Both are stored in `~/.thumbview/study.json` and shared by every VS Code window and profile on that computer. **Thumbview: Research Study Info** shows and copies the ID.
   - With VS Code Remote, the extension runs on the remote host, which then has its own ID.
   - Leaving and joining again creates a new ID, because the old one's data may have been deleted on request.

@@ -2138,6 +2138,12 @@ window.addEventListener("message", event => {
         if (fsToggleEl) fsToggleEl.checked = msg.enabled !== false;
         hideFullscreenNotice();
     }
+    if (msg.command === "participantId") {
+        const participantIdInput = document.getElementById("participant-id-input");
+        if (participantIdInput) {
+            participantIdInput.value = msg.participantId || "";
+        }
+    }
     if (msg.command === "panelHidden") {
         // Host signal (onDidChangeViewState): the panel was backgrounded. Retained webviews may be
         // hidden without document.visibilityState changing, so the fast reopen path relies on this.
@@ -8235,17 +8241,16 @@ if (studyStatusBtn) {
     };
 }
 
-const saveParticipantIdBtn = document.getElementById("save-participant-id-btn");
+const copyParticipantIdBtn = document.getElementById("copy-participant-id-btn");
 const participantIdInput = document.getElementById("participant-id-input");
-if (saveParticipantIdBtn && participantIdInput) {
-    saveParticipantIdBtn.onclick = () => {
+if (copyParticipantIdBtn && participantIdInput) {
+    copyParticipantIdBtn.onclick = () => {
         const val = participantIdInput.value.trim();
-        vscode.postMessage({ command: "setParticipantId", participantId: val });
-    };
-    participantIdInput.onkeydown = e => {
-        if (e.key === "Enter") {
-            const val = participantIdInput.value.trim();
-            vscode.postMessage({ command: "setParticipantId", participantId: val });
+        if (val) {
+            vscode.postMessage({ command: "copyParticipantId", participantId: val });
+            const orig = copyParticipantIdBtn.textContent;
+            copyParticipantIdBtn.textContent = "Copied!";
+            setTimeout(() => { copyParticipantIdBtn.textContent = orig; }, 1500);
         }
     };
 }

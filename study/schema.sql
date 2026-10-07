@@ -2,6 +2,40 @@
 -- Dedicated relational tables with explicit, typed columns for direct readability at a glance.
 -- Run once in PostgreSQL to initialize the study database.
 
+-- Automated migration: If participant_id was previously created as UUID, migrate to TEXT.
+do $$
+begin
+    if exists (
+        select 1 from information_schema.columns 
+        where table_name = 'participants' and column_name = 'participant_id' and data_type = 'uuid'
+    ) then
+        drop schema if exists analysis cascade;
+
+        alter table if exists sessions drop constraint if exists sessions_participant_id_fkey;
+        alter table if exists episodes drop constraint if exists episodes_participant_id_fkey;
+        alter table if exists editor_switches drop constraint if exists editor_switches_participant_id_fkey;
+        alter table if exists opens drop constraint if exists opens_participant_id_fkey;
+        alter table if exists actions drop constraint if exists actions_participant_id_fkey;
+        alter table if exists surveys drop constraint if exists surveys_participant_id_fkey;
+
+        alter table if exists participants alter column participant_id type text using participant_id::text;
+        alter table if exists sessions alter column participant_id type text using participant_id::text;
+        alter table if exists episodes alter column participant_id type text using participant_id::text;
+        alter table if exists editor_switches alter column participant_id type text using participant_id::text;
+        alter table if exists opens alter column participant_id type text using participant_id::text;
+        alter table if exists actions alter column participant_id type text using participant_id::text;
+        alter table if exists surveys alter column participant_id type text using participant_id::text;
+        alter table if exists raw_events alter column participant_id type text using participant_id::text;
+
+        alter table if exists sessions add constraint sessions_participant_id_fkey foreign key (participant_id) references participants(participant_id) on delete cascade;
+        alter table if exists episodes add constraint episodes_participant_id_fkey foreign key (participant_id) references participants(participant_id) on delete cascade;
+        alter table if exists editor_switches add constraint editor_switches_participant_id_fkey foreign key (participant_id) references participants(participant_id) on delete cascade;
+        alter table if exists opens add constraint opens_participant_id_fkey foreign key (participant_id) references participants(participant_id) on delete cascade;
+        alter table if exists actions add constraint actions_participant_id_fkey foreign key (participant_id) references participants(participant_id) on delete cascade;
+        alter table if exists surveys add constraint surveys_participant_id_fkey foreign key (participant_id) references participants(participant_id) on delete cascade;
+    end if;
+end $$;
+
 create table if not exists participants (
     participant_id      text        primary key,
     enrolled_at         timestamptz not null default now(),
@@ -13,6 +47,28 @@ create table if not exists participants (
     created_at          timestamptz not null default now(),
     updated_at          timestamptz not null default now()
 );
+
+-- Sequence for assigning sequential participant IDs (e.g. P-101, P-102).
+-- Backwards compatible with any participant ID format (e.g. legacy auto-*, UUIDs, or custom survey IDs).
+create sequence if not exists participant_id_seq start with 101;
+
+-- If existing P-xxx participants exist, advance the sequence to prevent collisions while safely ignoring non-numeric IDs.
+do $$
+declare
+    max_val bigint;
+    cur_val bigint;
+begin
+    select coalesce(max((substring(participant_id from '^P-([0-9]+)$'))::bigint), 100)
+    into max_val
+    from participants
+    where participant_id ~ '^P-[0-9]+$';
+
+    select last_value into cur_val from participant_id_seq;
+
+    if max_val >= cur_val then
+        perform setval('participant_id_seq', max_val, true);
+    end if;
+end $$;
 
 create table if not exists sessions (
     session_id          uuid        primary key,

@@ -91,3 +91,15 @@ curl https://precision.usask.ca/study/api/health
 
 The extension in `src/study/study_config.ts` points to:
 `ingestUrl: "https://precision.usask.ca/study/api"`
+
+## 5. Viewing Telemetry Data
+
+Use the helper script `view_data.sh` to inspect incoming data:
+```bash
+./view_data.sh           # Overview dashboard (table counts, participants, recent episodes, Nginx IPs)
+./view_data.sh -p        # List all participants
+./view_data.sh -e        # List recent episodes (Thumbview visits)
+./view_data.sh -s        # List recent sessions
+./view_data.sh -r        # List raw events stream
+./view_data.sh -n        # Show recent incoming client IPs from Nginx logs
+```

@@ -57,7 +57,7 @@ Module._load = function (request, ...rest) {
 
 const { STUDY_CONFIG } = require("../../out/study/study_config");
 Object.assign(STUDY_CONFIG, { ingestUrl: "https://study.example", ingestKey: "key", supabaseUrl: "https://study.example", supabaseAnonKey: "anon", consentUrl: "https://consent.example" });
-const { createStudy, generateAutoParticipantId } = require("../../out/study/study");
+const { createStudy, generateFallbackParticipantId, fetchNextParticipantId } = require("../../out/study/study");
 const { readParticipantFile, writeParticipantFile, mayNotifyUninstall, PARTICIPANT_FILE } = require("../../out/study/participant_file");
 
 function makeContext() {
@@ -176,15 +176,20 @@ const log = { warn() { }, debug() { }, info() { } };
     }
     console.log("✓ Test 5 passed");
 
-    console.log("--- Test 6: auto-generated participant IDs use auto- prefix and do not collide with survey IDs ---");
+    console.log("--- Test 6: participant IDs use P- format and no longer use auto- prefix ---");
     {
-        const id1 = generateAutoParticipantId();
-        const id2 = generateAutoParticipantId();
-        assert(id1.startsWith("auto-"), "starts with auto- prefix");
-        assert(id2.startsWith("auto-"), "starts with auto-");
-        assert.notStrictEqual(id1, id2, "auto participant IDs are unique");
-        assert.strictEqual(id1.length, 17, "length is auto- prefix (5 chars) + 12 hex chars");
-        assert(!id1.startsWith("P-"), "does not collide with demographic survey ID format (P-xxx)");
+        const id1 = generateFallbackParticipantId();
+        const id2 = generateFallbackParticipantId();
+        assert(id1.startsWith("P-"), "starts with P- prefix");
+        assert(id2.startsWith("P-"), "starts with P- prefix");
+        assert(!id1.startsWith("auto-"), "no longer uses auto- prefix");
+        assert(!id2.startsWith("auto-"), "no longer uses auto- prefix");
+        assert(/^P-[0-9]+$/.test(id1), "matches P-xxx format");
+        assert(/^P-[0-9]+$/.test(id2), "matches P-xxx format");
+
+        const fetchedId = await fetchNextParticipantId();
+        assert(fetchedId.startsWith("P-"), "fallback starts with P-");
+        assert(!fetchedId.startsWith("auto-"), "fallback does not use auto-");
     }
     console.log("✓ Test 6 passed");
 

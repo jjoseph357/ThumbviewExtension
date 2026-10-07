@@ -5,6 +5,16 @@ All notable changes to the "thumbview" extension will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-10-06
+
+### Added
+- **Sequential study participant ID allocation**: enrolled participants are assigned a sequential ID (starting from `P-101`) directly from the `precision.usask.ca` telemetry database to paste into demographic and exit surveys.
+- **Precision database telemetry inspection CLI**: added `view_data.sh` script to quickly inspect summary counts, participant rosters, recent episodes, and Nginx client IPs on `precision.usask.ca`.
+
+### Changed
+- **Read-only participant ID in Thumbview settings**: participant IDs are locked to read-only in the UI with a single-click Copy button to prevent ID collisions and survey data contamination. Removed manual ID override commands.
+- **Backwards-compatible participant ID schema**: PostgreSQL schema migrations now support generic text participant IDs (`P-xxx`, UUIDs, legacy `auto-*`), with automated sequence alignment past existing numeric IDs.
+
 ## [0.5.5] - 2026-10-06
 
 ### Added

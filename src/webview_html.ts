@@ -1430,11 +1430,11 @@ export function getHtml(
                     <div class="setting-row">
                         <div class="setting-text">
                             <div class="setting-name" id="participant-id-setting-name">Participant ID</div>
-                            <div class="setting-desc">If you completed the demographic form, enter your study ID here</div>
+                            <div class="setting-desc">Your study participant ID. Paste this ID into the demographic and exit surveys.</div>
                         </div>
                         <div class="setting-input-wrapper">
-                            <input type="text" id="participant-id-input" aria-labelledby="participant-id-setting-name" class="setting-input" style="width: 150px; text-align: left; padding: 4px 8px;" placeholder="e.g. P-101" value="${escapeHtml(participantId)}">
-                            <button id="save-participant-id-btn" class="action-trigger-btn" style="padding: 4px 8px;">Save</button>
+                            <input type="text" id="participant-id-input" aria-labelledby="participant-id-setting-name" class="setting-input" style="width: 150px; text-align: left; padding: 4px 8px; cursor: default;" placeholder="Not enrolled" value="${escapeHtml(participantId)}" readonly>
+                            <button id="copy-participant-id-btn" class="action-trigger-btn" style="padding: 4px 8px;">Copy</button>
                         </div>
                     </div>
                     <div class="setting-row">

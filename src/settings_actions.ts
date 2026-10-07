@@ -187,13 +187,13 @@ export function createSettingsActions(host: SettingsActionHost): Record<string, 
         studyStatus: async (msg: any) => {
             await vscode.commands.executeCommand("thumbview.study.info");
         },
-        setParticipantId: async (msg: any) => {
+
+        copyParticipantId: async (msg: any) => {
             const rawId = typeof msg.participantId === "string" ? msg.participantId.trim() : "";
-            if (!rawId) {
-                vscode.window.showWarningMessage("Please enter a valid Participant ID.");
-                return;
+            if (rawId) {
+                await vscode.env.clipboard.writeText(rawId);
+                vscode.window.showInformationMessage(`Copied Participant ID "${rawId}" to clipboard.`);
             }
-            await vscode.commands.executeCommand("thumbview.study.setParticipantId", rawId);
         },
     };
 }

@@ -163,7 +163,15 @@ export async function activate(context: vscode.ExtensionContext) {
     let lastActiveTextEditor: vscode.TextEditor | undefined;
     let activePanel: vscode.WebviewPanel | undefined;
     // Opt-in usage study (src/study, STUDY.md); every method is a no-op unless the user joined.
-    const study = createStudy(context, { isThumbviewVisible: () => !!activePanel?.visible, log });
+    const study = createStudy(context, {
+        isThumbviewVisible: () => !!activePanel?.visible,
+        log,
+        onParticipantChanged: (id) => {
+            if (activePanel) {
+                void activePanel.webview.postMessage({ command: "participantId", participantId: id ?? "" });
+            }
+        }
+    });
     // Webview messages recorded by name only, as study "action" events (never their arguments).
     const STUDY_ACTIONS = new Set([
         "reorderFile", "reorderFolder", "swapCardItems", "reflow", "expandSpace", "reduceSpace",

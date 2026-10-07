@@ -6,7 +6,7 @@
   "author": {
     "name": "Woody Morrice and Joseph Elliott"
   },
-  "version": "0.5.5",
+  "version": "0.5.6",
   "icon": "media/icon.png",
   "galleryBanner": {
     "color": "#1e1e24",
@@ -234,11 +234,6 @@
         "command": "thumbview.study.info",
         "title": "Research Study Info",
         "category": "Thumbview"
-      },
-      {
-        "command": "thumbview.study.setParticipantId",
-        "title": "Set Study Participant ID",
-        "category": "Thumbview"
       }
     ],
     "keybindings": [
@@ -379,10 +374,6 @@
         },
         {
           "command": "thumbview.study.info",
-          "when": "thumbview.studyAvailable"
-        },
-        {
-          "command": "thumbview.study.setParticipantId",
           "when": "thumbview.studyAvailable"
         }
       ]

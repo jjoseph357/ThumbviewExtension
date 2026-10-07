@@ -210,7 +210,7 @@ async function handleEvents(events) {
     }
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
         res.writeHead(204, {
             "Access-Control-Allow-Origin": "*",
@@ -226,6 +226,41 @@ const server = http.createServer((req, res) => {
 
     if (req.method === "GET" && (pathname === "/health" || pathname.endsWith("/health"))) {
         sendJson(res, 200, { status: "ok", time: new Date().toISOString() });
+        return;
+    }
+
+    if ((req.method === "POST" || req.method === "GET") && (pathname === "/participant-id" || pathname.endsWith("/participant-id"))) {
+        if (!verifyAuth(req)) {
+            sendJson(res, 401, { error: "Unauthorized" });
+            return;
+        }
+
+        let client;
+        try {
+            client = await pool.connect();
+
+            let nextId = "";
+            for (let attempt = 0; attempt < 100; attempt++) {
+                const resSeq = await client.query("SELECT nextval('participant_id_seq') AS num");
+                const cand = `P-${resSeq.rows[0].num}`;
+                const exists = await client.query("SELECT 1 FROM participants WHERE participant_id = $1", [cand]);
+                if (exists.rowCount === 0) {
+                    nextId = cand;
+                    break;
+                }
+            }
+            if (!nextId) {
+                throw new Error("Could not allocate a unique participant ID");
+            }
+            sendJson(res, 200, { participant_id: nextId });
+        } catch (err) {
+            console.error("Participant ID allocation error:", err);
+            sendJson(res, 500, { error: "Database error", message: err.message });
+        } finally {
+            if (client) {
+                client.release();
+            }
+        }
         return;
     }
 
